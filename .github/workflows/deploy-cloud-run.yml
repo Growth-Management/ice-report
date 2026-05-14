@@ -1,0 +1,43 @@
+name: Deploy Cloud Run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet
+
+      - name: Build image
+        run: docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest .
+
+      - name: Push image
+        run: docker push asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy report-generator \
+            --image asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest \
+            --region asia-northeast1 \
+            --memory 2Gi \
+            --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com \
+            --allow-unauthenticated
