@@ -32,13 +32,6 @@ jobs:
           grep -n "healthz" app.py
           grep -n "admin_ui" app.py
 
-      - name: Check Flask routes
-        run: |
-          python - <<'PY'
-          from app import app
-          print(app.url_map)
-          PY
-
       - name: Build image
         run: docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest .
 
