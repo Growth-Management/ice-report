@@ -33,15 +33,15 @@ jobs:
           grep -n "admin_ui" app.py
 
       - name: Build image
-        run: docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest .
+        run: docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${{ github.sha }} .
 
       - name: Push image
-        run: docker push asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest
+        run: docker push asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${{ github.sha }}
 
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy report-generator \
-            --image asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest \
+            --image asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${{ github.sha }} \
             --region asia-northeast1 \
             --memory 2Gi \
             --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com \
