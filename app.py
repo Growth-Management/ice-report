@@ -1838,6 +1838,125 @@ def _revoke_existing_challenges(token: str, email: str) -> int:
     return count
 
 
+
+
+def _rate_limit_collection_name() -> str:
+    return os.environ.get("OTP_RATE_LIMIT_COLLECTION", "otp_rate_limits")
+
+
+def _rate_limit_key(kind: str, value: str) -> str:
+    raw = f"{kind}:{value}"
+    return _hash_value(raw)
+
+
+def _check_and_increment_rate_limit(
+    *,
+    kind: str,
+    value: str,
+    limit: int,
+    window_seconds: int,
+) -> tuple[bool, str]:
+    if not value or limit <= 0 or window_seconds <= 0:
+        return True, ""
+
+    now = _now_utc()
+    bucket_start_seconds = int(now.timestamp()) // window_seconds * window_seconds
+    bucket_start = datetime.fromtimestamp(bucket_start_seconds, timezone.utc)
+    bucket_end = bucket_start + timedelta(seconds=window_seconds)
+
+    doc_id = _rate_limit_key(kind, f"{value}:{bucket_start_seconds}")
+    db = firestore.Client()
+    ref = db.collection(_rate_limit_collection_name()).document(doc_id)
+
+    @firestore.transactional
+    def update_in_transaction(transaction):
+        snapshot = ref.get(transaction=transaction)
+
+        if snapshot.exists:
+            data = snapshot.to_dict() or {}
+            count = int(data.get("count") or 0)
+
+            if count >= limit:
+                return False, count
+
+            transaction.update(
+                ref,
+                {
+                    "count": firestore.Increment(1),
+                    "updated_at": now,
+                },
+            )
+            return True, count + 1
+
+        transaction.set(
+            ref,
+            {
+                "kind": kind,
+                "value_hash": _hash_value(value),
+                "count": 1,
+                "limit": limit,
+                "window_seconds": window_seconds,
+                "window_start": bucket_start,
+                "window_end": bucket_end,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        return True, 1
+
+    transaction = db.transaction()
+    allowed, count = update_in_transaction(transaction)
+
+    if allowed:
+        return True, ""
+
+    retry_after = max(1, int((bucket_end - now).total_seconds()))
+    return False, f"PIN発行回数が上限に達しました。{retry_after}秒後に再試行してください。"
+
+
+def _check_pin_request_rate_limits(email: str) -> tuple[bool, str]:
+    ip = _get_client_ip()
+
+    checks = [
+        (
+            "ip_1m",
+            ip,
+            _int_env("OTP_RATE_LIMIT_IP_PER_MINUTE", 3),
+            60,
+        ),
+        (
+            "ip_10m",
+            ip,
+            _int_env("OTP_RATE_LIMIT_IP_PER_10_MINUTES", 10),
+            600,
+        ),
+        (
+            "email_1m",
+            email,
+            _int_env("OTP_RATE_LIMIT_EMAIL_PER_MINUTE", 3),
+            60,
+        ),
+        (
+            "email_10m",
+            email,
+            _int_env("OTP_RATE_LIMIT_EMAIL_PER_10_MINUTES", 10),
+            600,
+        ),
+    ]
+
+    for kind, value, limit, window_seconds in checks:
+        allowed, message = _check_and_increment_rate_limit(
+            kind=kind,
+            value=value,
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+        if not allowed:
+            return False, message
+
+    return True, ""
+
+
 def _issue_pin(token: str, delivery_id: str, email: str) -> dict:
     now = _now_utc()
     ttl_minutes = _int_env("OTP_PIN_TTL_MINUTES", 10)
@@ -1898,6 +2017,9 @@ def _find_valid_challenge(token: str, email: str) -> tuple[str | None, dict | No
 
     for doc in query.stream():
         data = doc.to_dict() or {}
+        if data.get("revoked"):
+            continue
+
         expires_at = data.get("expires_at")
         max_attempts = int(data.get("max_attempts") or _int_env("OTP_MAX_ATTEMPTS", 5))
         attempt_count = int(data.get("attempt_count") or 0)
@@ -2016,6 +2138,14 @@ def request_download_pin(token: str):
             error=message,
         ), 403
 
+    rate_allowed, rate_message = _check_pin_request_rate_limits(email)
+    if not rate_allowed:
+        return _render_otp_page(
+            token,
+            email=email,
+            error=rate_message,
+        ), 429
+
     _issue_pin(token, delivery_id, email)
 
     return _render_otp_page(
@@ -2087,11 +2217,20 @@ def verify_download_pin(token: str):
             "last_failed_at": _now_utc(),
         })
 
+        max_attempts = int(challenge.get("max_attempts") or _int_env("OTP_MAX_ATTEMPTS", 5))
+        current_attempts = int(challenge.get("attempt_count") or 0) + 1
+
+        if current_attempts >= max_attempts:
+            error_message = "PINの入力回数が上限に達しました。もう一度PINを発行してください。"
+        else:
+            remaining = max_attempts - current_attempts
+            error_message = f"PINが正しくありません。残り{remaining}回です。"
+
         return _render_otp_page(
             token,
             email=email,
             step="pin",
-            error="PINが正しくありません。",
+            error=error_message,
         ), 403
 
     challenge_ref.update({
