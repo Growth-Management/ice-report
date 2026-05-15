@@ -1159,7 +1159,7 @@ def admin_ui():
     return render_admin_ui()
 
 
-@app.get("/healthz")
+@app.route("/healthz", methods=["GET"])
 def healthz():
     return jsonify({"status": "ok"})
 
