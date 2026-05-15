@@ -35,6 +35,19 @@ jobs:
       - name: Build image
         run: docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${{ github.sha }} .
 
+      - name: Check Flask routes in Docker image
+        run: |
+          docker run --rm asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${{ github.sha }} python -c "from app import app; print(app.url_map)"
+
+      - name: Test healthz in Docker image
+        run: |
+          docker run -d -p 8080:8080 --name report-test asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${{ github.sha }}
+          sleep 5
+          curl -i http://127.0.0.1:8080/admin
+          curl -i http://127.0.0.1:8080/healthz
+          docker logs report-test
+          docker rm -f report-test
+
       - name: Push image
         run: docker push asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${{ github.sha }}
 
