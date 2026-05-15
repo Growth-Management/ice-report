@@ -1806,6 +1806,38 @@ def _get_client_ip() -> str:
     return request.remote_addr or ""
 
 
+def _revoke_existing_challenges(token: str, email: str) -> int:
+    now = _now_utc()
+    db = firestore.Client()
+    query = (
+        db.collection(_otp_collection_name())
+        .where("token", "==", token)
+        .where("email", "==", email)
+        .where("used", "==", False)
+        .limit(100)
+    )
+
+    batch = db.batch()
+    count = 0
+
+    for doc in query.stream():
+        batch.update(
+            db.collection(_otp_collection_name()).document(doc.id),
+            {
+                "used": True,
+                "revoked": True,
+                "revoked_at": now,
+                "revoked_reason": "superseded_by_new_pin",
+            },
+        )
+        count += 1
+
+    if count:
+        batch.commit()
+
+    return count
+
+
 def _issue_pin(token: str, delivery_id: str, email: str) -> dict:
     now = _now_utc()
     ttl_minutes = _int_env("OTP_PIN_TTL_MINUTES", 10)
@@ -1826,17 +1858,20 @@ def _issue_pin(token: str, delivery_id: str, email: str) -> dict:
         "user_agent": request.headers.get("User-Agent", ""),
     }
 
+    revoked_count = _revoke_existing_challenges(token, email)
+
     db = firestore.Client()
     ref = db.collection(_otp_collection_name()).document()
     ref.set(record)
 
     logging.warning(
-        "ICE_REPORT_OTP_PIN issued token=%s delivery_id=%s email=%s pin=%s expires_at=%s",
+        "ICE_REPORT_OTP_PIN issued token=%s delivery_id=%s email=%s pin=%s expires_at=%s revoked_previous=%s",
         token,
         delivery_id,
         email,
         pin,
         record["expires_at"].isoformat(),
+        revoked_count,
     )
 
     return {
