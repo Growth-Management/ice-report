@@ -1840,6 +1840,91 @@ def _revoke_existing_challenges(token: str, email: str) -> int:
 
 
 
+
+
+def _security_events_collection_name() -> str:
+    return os.environ.get("SECURITY_EVENTS_COLLECTION", "security_events")
+
+
+def _log_security_event(
+    *,
+    event_type: str,
+    token: str = "",
+    delivery_id: str = "",
+    email: str = "",
+    reason: str = "",
+    detail: dict | None = None,
+) -> None:
+    now = _now_utc()
+    record = {
+        "event_type": event_type,
+        "token": token,
+        "delivery_id": delivery_id,
+        "email": email,
+        "reason": reason,
+        "detail": detail or {},
+        "ip": _get_client_ip(),
+        "user_agent": request.headers.get("User-Agent", ""),
+        "created_at": now,
+    }
+
+    try:
+        db = firestore.Client()
+        db.collection(_security_events_collection_name()).document().set(record)
+    except Exception:
+        logging.exception("failed to write security event")
+
+    logging.warning(
+        "ICE_REPORT_SECURITY_EVENT type=%s token=%s delivery_id=%s email=%s reason=%s",
+        event_type,
+        token,
+        delivery_id,
+        email,
+        reason,
+    )
+
+
+def _latest_pin_issue_for_email(token: str, email: str) -> datetime | None:
+    db = firestore.Client()
+    query = (
+        db.collection(_otp_collection_name())
+        .where("token", "==", token)
+        .where("email", "==", email)
+        .limit(20)
+    )
+
+    latest = None
+
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        created_at = data.get("created_at")
+        if not created_at:
+            continue
+
+        if latest is None or created_at > latest:
+            latest = created_at
+
+    return latest
+
+
+def _check_pin_resend_interval(token: str, email: str) -> tuple[bool, str]:
+    interval_seconds = _int_env("OTP_RESEND_INTERVAL_SECONDS", 60)
+    if interval_seconds <= 0:
+        return True, ""
+
+    latest = _latest_pin_issue_for_email(token, email)
+    if not latest:
+        return True, ""
+
+    now = _now_utc()
+    elapsed = int((now - latest).total_seconds())
+    if elapsed >= interval_seconds:
+        return True, ""
+
+    retry_after = interval_seconds - elapsed
+    return False, f"PIN再発行は{retry_after}秒後に再試行してください。"
+
+
 def _rate_limit_collection_name() -> str:
     return os.environ.get("OTP_RATE_LIMIT_COLLECTION", "otp_rate_limits")
 
@@ -2120,6 +2205,12 @@ def request_download_pin(token: str):
     delivery_id, delivery = find_delivery_by_token(token)
 
     if not delivery:
+        _log_security_event(
+            event_type="otp_request_denied",
+            token=token,
+            email=email,
+            reason="delivery_not_found",
+        )
         return _render_otp_page(
             token,
             email=email,
@@ -2138,8 +2229,32 @@ def request_download_pin(token: str):
             error=message,
         ), 403
 
+    resend_allowed, resend_message = _check_pin_resend_interval(token, email)
+    if not resend_allowed:
+        _log_security_event(
+            event_type="otp_resend_interval_blocked",
+            token=token,
+            delivery_id=delivery_id,
+            email=email,
+            reason="resend_interval",
+            detail={"message": resend_message},
+        )
+        return _render_otp_page(
+            token,
+            email=email,
+            error=resend_message,
+        ), 429
+
     rate_allowed, rate_message = _check_pin_request_rate_limits(email)
     if not rate_allowed:
+        _log_security_event(
+            event_type="otp_rate_limited",
+            token=token,
+            delivery_id=delivery_id,
+            email=email,
+            reason="rate_limit",
+            detail={"message": rate_message},
+        )
         return _render_otp_page(
             token,
             email=email,
@@ -2201,6 +2316,14 @@ def verify_download_pin(token: str):
     challenge_id, challenge, challenge_error = _find_valid_challenge(token, email)
 
     if not challenge:
+        _log_security_event(
+            event_type="otp_verify_denied",
+            token=token,
+            delivery_id=delivery_id,
+            email=email,
+            reason="challenge_not_found_or_expired",
+            detail={"message": challenge_error or "PINが無効です。"},
+        )
         return _render_otp_page(
             token,
             email=email,
@@ -2222,9 +2345,23 @@ def verify_download_pin(token: str):
 
         if current_attempts >= max_attempts:
             error_message = "PINの入力回数が上限に達しました。もう一度PINを発行してください。"
+            reason = "max_attempts_reached"
         else:
             remaining = max_attempts - current_attempts
             error_message = f"PINが正しくありません。残り{remaining}回です。"
+            reason = "wrong_pin"
+
+        _log_security_event(
+            event_type="otp_verify_failed",
+            token=token,
+            delivery_id=delivery_id,
+            email=email,
+            reason=reason,
+            detail={
+                "attempt_count": current_attempts,
+                "max_attempts": max_attempts,
+            },
+        )
 
         return _render_otp_page(
             token,
@@ -2237,6 +2374,14 @@ def verify_download_pin(token: str):
         "used": True,
         "verified_at": _now_utc(),
     })
+
+    _log_security_event(
+        event_type="otp_verify_success",
+        token=token,
+        delivery_id=delivery_id,
+        email=email,
+        reason="verified",
+    )
 
     session_token, session_expires_at = _create_download_session(
         token,
@@ -2264,6 +2409,11 @@ def download_file(token: str):
     session_id, session = _find_download_session(token, cookie_value)
 
     if not session:
+        _log_security_event(
+            event_type="download_session_denied",
+            token=token,
+            reason="session_missing_or_expired",
+        )
         return _render_otp_page(
             token,
             error="ダウンロード認証が未完了、またはsessionが期限切れです。もう一度PIN認証してください。",
@@ -2303,7 +2453,19 @@ def download_file(token: str):
         request=request,
     )
 
-    if _bool_env("DOWNLOAD_SESSION_ONE_TIME", False) and session_id:
+    _log_security_event(
+        event_type="download_session_success",
+        token=token,
+        delivery_id=delivery_id,
+        email=email,
+        reason="signed_url_redirect",
+        detail={
+            "version": version.get("version"),
+            "file_name": version.get("file_name"),
+        },
+    )
+
+    if _bool_env("DOWNLOAD_SESSION_ONE_TIME", True) and session_id:
         db = firestore.Client()
         db.collection(_download_sessions_collection_name()).document(session_id).update({
             "used": True,
