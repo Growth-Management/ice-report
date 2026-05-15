@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import logging
 import os
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, request
+from flask import Flask, jsonify, make_response, redirect, request
 from google.cloud import firestore, storage
 
 from create_report import DEFAULT_TEMPLATE, generate_report
@@ -1516,44 +1520,594 @@ def cleanup_expired_deliveries():
     })
 
 
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _otp_collection_name() -> str:
+    return os.environ.get("OTP_COLLECTION", "otp_challenges")
+
+
+def _download_sessions_collection_name() -> str:
+    return os.environ.get("DOWNLOAD_SESSIONS_COLLECTION", "download_sessions")
+
+
+def _otp_hash_secret() -> str:
+    secret = (
+        os.environ.get("OTP_HASH_SECRET")
+        or os.environ.get("SECRET_KEY")
+        or os.environ.get("ADMIN_API_KEY")
+    )
+
+    if not secret:
+        logging.warning(
+            "OTP_HASH_SECRET, SECRET_KEY, and ADMIN_API_KEY are not set. "
+            "Using PROJECT_ID fallback for OTP hashing. Set OTP_HASH_SECRET before production use."
+        )
+        secret = os.environ.get("PROJECT_ID", "ice-report-local-dev")
+
+    return secret
+
+
+def _hash_value(value: str) -> str:
+    return hmac.new(
+        _otp_hash_secret().encode("utf-8"),
+        value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def _cookie_name(token: str) -> str:
+    safe = "".join(c if c.isalnum() else "_" for c in token)
+    return f"ice_dl_session_{safe}"
+
+
+def _int_env(name: str, default_value: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default_value)))
+    except ValueError:
+        return default_value
+
+
+def _bool_env(name: str, default_value: bool = False) -> bool:
+    value = os.environ.get(name)
+
+    if value is None:
+        return default_value
+
+    return value.lower() in ("1", "true", "yes", "y", "on")
+
+
+def _render_otp_page(
+    token: str,
+    *,
+    email: str = "",
+    step: str = "email",
+    message: str = "",
+    error: str = "",
+) -> str:
+    email_value = (email or "").replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+    message_html = (
+        f"<div class='message'>{message}</div>"
+        if message
+        else ""
+    )
+    error_html = (
+        f"<div class='error'>{error}</div>"
+        if error
+        else ""
+    )
+
+    if step == "pin":
+        form_html = f"""
+        <form method="post" action="/d/{token}/verify-pin">
+          <input type="hidden" name="email" value="{email_value}">
+          <label>メールアドレス</label>
+          <input type="email" value="{email_value}" disabled>
+          <label>PIN</label>
+          <input name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="6桁のPIN" required>
+          <button type="submit">PINを確認してダウンロードへ進む</button>
+        </form>
+        <form method="post" action="/d/{token}/request-pin" class="secondary-form">
+          <input type="hidden" name="email" value="{email_value}">
+          <button type="submit" class="secondary">PINを再発行</button>
+        </form>
+        """
+    else:
+        form_html = f"""
+        <form method="post" action="/d/{token}/request-pin">
+          <label>メールアドレス</label>
+          <input name="email" type="email" value="{email_value}" autocomplete="email" placeholder="you@example.com" required>
+          <button type="submit">PINを送信</button>
+        </form>
+        """
+
+    return f"""
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ICEレポート ダウンロード</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #172033;
+      --muted: #667085;
+      --line: #d8dee9;
+      --primary: #2457d6;
+      --primary-dark: #1c45ab;
+      --danger: #c73535;
+      --danger-bg: #fff1f1;
+      --success: #157347;
+      --success-bg: #eaf7ef;
+      --radius: 16px;
+      --shadow: 0 18px 40px rgba(20, 32, 55, 0.10);
+    }}
+
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg: #0b1020;
+        --panel: #12192b;
+        --text: #e6edf7;
+        --muted: #9aa8bd;
+        --line: #2d3a53;
+        --primary: #7aa2ff;
+        --primary-dark: #5f8df0;
+        --danger: #ff7b7b;
+        --danger-bg: rgba(255, 123, 123, 0.13);
+        --success: #65d99a;
+        --success-bg: rgba(101, 217, 154, 0.13);
+        --shadow: 0 20px 48px rgba(0, 0, 0, 0.35);
+      }}
+    }}
+
+    * {{ box-sizing: border-box; }}
+
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top left, rgba(36, 87, 214, 0.10), transparent 34rem),
+        radial-gradient(circle at top right, rgba(21, 115, 71, 0.08), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      padding: 24px;
+    }}
+
+    .card {{
+      width: min(100%, 460px);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 24px;
+    }}
+
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 22px;
+      letter-spacing: -0.02em;
+    }}
+
+    p {{
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }}
+
+    label {{
+      display: block;
+      margin: 14px 0 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+
+    input {{
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 11px 12px;
+      font: inherit;
+      background: var(--panel);
+      color: var(--text);
+    }}
+
+    button {{
+      width: 100%;
+      margin-top: 18px;
+      border: 0;
+      border-radius: 10px;
+      padding: 11px 12px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      color: #fff;
+      background: var(--primary);
+    }}
+
+    button:hover {{ background: var(--primary-dark); }}
+
+    button.secondary {{
+      color: var(--text);
+      background: transparent;
+      border: 1px solid var(--line);
+    }}
+
+    .secondary-form {{
+      margin-top: 8px;
+    }}
+
+    .message {{
+      border: 1px solid rgba(21, 115, 71, 0.35);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: var(--success-bg);
+      color: var(--success);
+      font-size: 13px;
+      margin-bottom: 14px;
+    }}
+
+    .error {{
+      border: 1px solid rgba(199, 53, 53, 0.35);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: var(--danger-bg);
+      color: var(--danger);
+      font-size: 13px;
+      margin-bottom: 14px;
+    }}
+
+    .note {{
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>ICEレポート ダウンロード</h1>
+    <p>許可されたメールアドレス宛に発行されたPINで認証します。</p>
+    {message_html}
+    {error_html}
+    {form_html}
+    <div class="note">PINの有効期限は約10分です。</div>
+  </main>
+</body>
+</html>
+"""
+
+
+def _get_client_ip() -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+
+    return request.remote_addr or ""
+
+
+def _issue_pin(token: str, delivery_id: str, email: str) -> dict:
+    now = _now_utc()
+    ttl_minutes = _int_env("OTP_PIN_TTL_MINUTES", 10)
+    max_attempts = _int_env("OTP_MAX_ATTEMPTS", 5)
+    pin = f"{secrets.randbelow(1000000):06d}"
+
+    record = {
+        "token": token,
+        "delivery_id": delivery_id,
+        "email": email,
+        "pin_hash": _hash_value(pin),
+        "expires_at": now + timedelta(minutes=ttl_minutes),
+        "attempt_count": 0,
+        "max_attempts": max_attempts,
+        "used": False,
+        "created_at": now,
+        "ip": _get_client_ip(),
+        "user_agent": request.headers.get("User-Agent", ""),
+    }
+
+    db = firestore.Client()
+    ref = db.collection(_otp_collection_name()).document()
+    ref.set(record)
+
+    logging.warning(
+        "ICE_REPORT_OTP_PIN issued token=%s delivery_id=%s email=%s pin=%s expires_at=%s",
+        token,
+        delivery_id,
+        email,
+        pin,
+        record["expires_at"].isoformat(),
+    )
+
+    return {
+        "challenge_id": ref.id,
+        "expires_at": record["expires_at"],
+        "ttl_minutes": ttl_minutes,
+    }
+
+
+def _find_valid_challenge(token: str, email: str) -> tuple[str | None, dict | None, str | None]:
+    now = _now_utc()
+
+    db = firestore.Client()
+    query = (
+        db.collection(_otp_collection_name())
+        .where("token", "==", token)
+        .where("email", "==", email)
+        .where("used", "==", False)
+        .limit(20)
+    )
+
+    newest_id = None
+    newest = None
+
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        expires_at = data.get("expires_at")
+        max_attempts = int(data.get("max_attempts") or _int_env("OTP_MAX_ATTEMPTS", 5))
+        attempt_count = int(data.get("attempt_count") or 0)
+
+        if expires_at and expires_at < now:
+            continue
+
+        if attempt_count >= max_attempts:
+            continue
+
+        if newest is None or data.get("created_at") > newest.get("created_at"):
+            newest_id = doc.id
+            newest = data
+
+    if newest:
+        return newest_id, newest, None
+
+    return None, None, "PINが見つからないか、有効期限切れです。もう一度PINを発行してください。"
+
+
+def _create_download_session(token: str, delivery_id: str, email: str) -> tuple[str, datetime]:
+    now = _now_utc()
+    ttl_minutes = _int_env("DOWNLOAD_SESSION_TTL_MINUTES", 15)
+    session_token = secrets.token_urlsafe(32)
+    expires_at = now + timedelta(minutes=ttl_minutes)
+
+    record = {
+        "token": token,
+        "delivery_id": delivery_id,
+        "email": email,
+        "session_hash": _hash_value(session_token),
+        "expires_at": expires_at,
+        "used": False,
+        "created_at": now,
+        "ip": _get_client_ip(),
+        "user_agent": request.headers.get("User-Agent", ""),
+    }
+
+    db = firestore.Client()
+    db.collection(_download_sessions_collection_name()).document().set(record)
+
+    return session_token, expires_at
+
+
+def _find_download_session(token: str, session_token: str) -> tuple[str | None, dict | None]:
+    if not session_token:
+        return None, None
+
+    now = _now_utc()
+    session_hash = _hash_value(session_token)
+
+    db = firestore.Client()
+    query = (
+        db.collection(_download_sessions_collection_name())
+        .where("token", "==", token)
+        .where("session_hash", "==", session_hash)
+        .limit(5)
+    )
+
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        expires_at = data.get("expires_at")
+
+        if data.get("used"):
+            continue
+
+        if expires_at and expires_at < now:
+            continue
+
+        return doc.id, data
+
+    return None, None
+
+
 @app.get("/d/<token>")
 def download_form(token: str):
     delivery_id, delivery = find_delivery_by_token(token)
 
     if not delivery:
-        return render_download_form(
+        return _render_otp_page(
             token,
-            "配布URLが見つかりません。"
+            error="配布URLが見つかりません。",
         ), 404
 
-    return render_download_form(token)
+    return _render_otp_page(token)
 
 
-@app.post("/d/<token>")
-def download_file(token: str):
-    email = (request.form.get("email") or "").strip()
+@app.post("/d/<token>/request-pin")
+def request_download_pin(token: str):
+    email = _normalize_email(request.form.get("email") or "")
 
     if not email:
-        return render_download_form(
+        return _render_otp_page(
             token,
-            "メールアドレスを入力してください。"
+            error="メールアドレスを入力してください。",
         ), 400
 
     delivery_id, delivery = find_delivery_by_token(token)
 
     if not delivery:
-        return render_download_form(
+        return _render_otp_page(
             token,
-            "配布URLが見つかりません。"
+            email=email,
+            error="配布URLが見つかりません。",
         ), 404
 
     allowed, message = validate_delivery_access(
         delivery,
-        email
+        email,
     )
 
     if not allowed:
-        return render_download_form(token, message), 403
+        return _render_otp_page(
+            token,
+            email=email,
+            error=message,
+        ), 403
+
+    _issue_pin(token, delivery_id, email)
+
+    return _render_otp_page(
+        token,
+        email=email,
+        step="pin",
+        message="PINを発行しました。Phase 1ではPINはCloud Loggingに出力されます。",
+    )
+
+
+@app.post("/d/<token>/verify-pin")
+def verify_download_pin(token: str):
+    email = _normalize_email(request.form.get("email") or "")
+    pin = (request.form.get("pin") or "").strip()
+
+    if not email:
+        return _render_otp_page(
+            token,
+            error="メールアドレスを入力してください。",
+        ), 400
+
+    if not pin:
+        return _render_otp_page(
+            token,
+            email=email,
+            step="pin",
+            error="PINを入力してください。",
+        ), 400
+
+    delivery_id, delivery = find_delivery_by_token(token)
+
+    if not delivery:
+        return _render_otp_page(
+            token,
+            email=email,
+            step="pin",
+            error="配布URLが見つかりません。",
+        ), 404
+
+    allowed, message = validate_delivery_access(
+        delivery,
+        email,
+    )
+
+    if not allowed:
+        return _render_otp_page(
+            token,
+            email=email,
+            step="pin",
+            error=message,
+        ), 403
+
+    challenge_id, challenge, challenge_error = _find_valid_challenge(token, email)
+
+    if not challenge:
+        return _render_otp_page(
+            token,
+            email=email,
+            step="pin",
+            error=challenge_error or "PINが無効です。",
+        ), 403
+
+    db = firestore.Client()
+    challenge_ref = db.collection(_otp_collection_name()).document(challenge_id)
+
+    if not hmac.compare_digest(challenge.get("pin_hash") or "", _hash_value(pin)):
+        challenge_ref.update({
+            "attempt_count": firestore.Increment(1),
+            "last_failed_at": _now_utc(),
+        })
+
+        return _render_otp_page(
+            token,
+            email=email,
+            step="pin",
+            error="PINが正しくありません。",
+        ), 403
+
+    challenge_ref.update({
+        "used": True,
+        "verified_at": _now_utc(),
+    })
+
+    session_token, session_expires_at = _create_download_session(
+        token,
+        delivery_id,
+        email,
+    )
+
+    response = make_response(redirect(f"/d/{token}/download", code=302))
+    response.set_cookie(
+        _cookie_name(token),
+        session_token,
+        max_age=_int_env("DOWNLOAD_SESSION_TTL_MINUTES", 15) * 60,
+        expires=session_expires_at,
+        secure=True,
+        httponly=True,
+        samesite="Lax",
+    )
+
+    return response
+
+
+@app.get("/d/<token>/download")
+def download_file(token: str):
+    cookie_value = request.cookies.get(_cookie_name(token), "")
+    session_id, session = _find_download_session(token, cookie_value)
+
+    if not session:
+        return _render_otp_page(
+            token,
+            error="ダウンロード認証が未完了、またはsessionが期限切れです。もう一度PIN認証してください。",
+        ), 403
+
+    delivery_id, delivery = find_delivery_by_token(token)
+
+    if not delivery:
+        return _render_otp_page(
+            token,
+            error="配布URLが見つかりません。",
+        ), 404
+
+    email = session.get("email") or ""
+
+    allowed, message = validate_delivery_access(
+        delivery,
+        email,
+    )
+
+    if not allowed:
+        return _render_otp_page(
+            token,
+            email=email,
+            error=message,
+        ), 403
 
     version = get_current_version(delivery)
 
@@ -1564,7 +2118,19 @@ def download_file(token: str):
         delivery=delivery,
         version=version,
         email=email,
-        request=request
+        request=request,
     )
 
+    if _bool_env("DOWNLOAD_SESSION_ONE_TIME", False) and session_id:
+        db = firestore.Client()
+        db.collection(_download_sessions_collection_name()).document(session_id).update({
+            "used": True,
+            "used_at": _now_utc(),
+        })
+
     return redirect(signed_url, code=302)
+
+
+@app.post("/d/<token>")
+def legacy_download_file(token: str):
+    return request_download_pin(token)
