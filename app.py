@@ -1163,6 +1163,9 @@ def admin_ui():
 def healthz():
     return jsonify({"status": "ok"})
 
+@app.route("/api-health", methods=["GET"], strict_slashes=False)
+def api_health():
+    return jsonify({"status": "ok"})
 
 @app.get("/gcs-files")
 def list_gcs_files():
