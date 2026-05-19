@@ -43,3 +43,27 @@ Docker build は必ず `--no-cache` を使用します。
 
 ```bash
 docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest .
+```
+
+## メール送信 provider 方針
+
+OTP / PIN 送信は provider interface 経由で切り替える前提です。
+
+- 共通 interface: `mail_provider.py`
+- OTP 用テンプレート: `otp_mail.py`
+- runtime resolver: `mail_runtime.py`
+
+想定 provider は次の 3 種です。
+
+- `logging`: Phase1 の暫定送信経路。実送信せず Cloud Logging で確認
+- `noop`: 開発用の無送信モード
+- `ses`: Amazon SES 本実装
+
+推奨環境変数:
+
+- `MAIL_PROVIDER`
+- `MAIL_FROM_EMAIL`
+- `MAIL_REPLY_TO_EMAILS`
+- `MAIL_PROVIDER_SES_CONFIGURATION_SET`
+- `MAIL_PROVIDER_SES_REGION`
+- `MAIL_PROVIDER_TIMEOUT_SECONDS`

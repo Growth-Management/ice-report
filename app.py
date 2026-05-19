@@ -25,6 +25,8 @@ from distribution import (
     set_delivery_active,
     validate_delivery_access,
 )
+from mail_provider import MailDeliveryError
+from mail_runtime import send_otp_pin_email
 
 app = Flask(__name__)
 
@@ -1839,9 +1841,6 @@ def _revoke_existing_challenges(token: str, email: str) -> int:
 
 
 
-
-
-
 def _security_events_collection_name() -> str:
     return os.environ.get("SECURITY_EVENTS_COLLECTION", "security_events")
 
@@ -2078,10 +2077,29 @@ def _issue_pin(token: str, delivery_id: str, email: str) -> dict:
         revoked_count,
     )
 
+    delivery_result = send_otp_pin_email(
+        to_email=email,
+        pin=pin,
+        ttl_minutes=ttl_minutes,
+        token=token,
+        delivery_id=delivery_id,
+    )
+
+    logging.warning(
+        "ICE_REPORT_OTP_DELIVERY_SENT token=%s delivery_id=%s email=%s provider=%s provider_message_id=%s",
+        token,
+        delivery_id,
+        email,
+        delivery_result.provider,
+        delivery_result.provider_message_id,
+    )
+
     return {
         "challenge_id": ref.id,
         "expires_at": record["expires_at"],
         "ttl_minutes": ttl_minutes,
+        "provider": delivery_result.provider,
+        "provider_message_id": delivery_result.provider_message_id,
     }
 
 
@@ -2158,10 +2176,7 @@ def _find_download_session(token: str, session_token: str) -> tuple[str | None, 
 
     db = firestore.Client()
     query = (
-        db.collection(_download_sessions_collection_name())
-        .where("token", "==", token)
-        .where("session_hash", "==", session_hash)
-        .limit(5)
+        db.collection(_download_sessions_collection_name()).where("token", "==", token).where("session_hash", "==", session_hash).limit(5)
     )
 
     for doc in query.stream():
@@ -2261,13 +2276,46 @@ def request_download_pin(token: str):
             error=rate_message,
         ), 429
 
-    _issue_pin(token, delivery_id, email)
+    try:
+        pin_result = _issue_pin(token, delivery_id, email)
+    except MailDeliveryError as exc:
+        _log_security_event(
+            event_type="otp_delivery_failed",
+            token=token,
+            delivery_id=delivery_id,
+            email=email,
+            reason=exc.safe_reason,
+        )
+        logging.exception(
+            "failed to deliver otp pin token=%s delivery_id=%s email=%s safe_reason=%s",
+            token,
+            delivery_id,
+            email,
+            exc.safe_reason,
+        )
+        return _render_otp_page(
+            token,
+            email=email,
+            error="PIN送信に失敗しました。少し待ってから再試行してください。",
+        ), 503
+
+    _log_security_event(
+        event_type="otp_delivery_sent",
+        token=token,
+        delivery_id=delivery_id,
+        email=email,
+        reason=pin_result.get("provider", "unknown"),
+        detail={
+            "provider": pin_result.get("provider", ""),
+            "provider_message_id": pin_result.get("provider_message_id", ""),
+        },
+    )
 
     return _render_otp_page(
         token,
         email=email,
         step="pin",
-        message="PINを発行しました。Phase 1ではPINはCloud Loggingに出力されます。",
+        message="PINを送信しました。メールをご確認のうえ認証を続けてください。",
     )
 
 
