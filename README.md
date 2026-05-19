@@ -42,7 +42,7 @@ BigQuery の集計結果を Excel レポートとして生成し、GCS に保存
 Docker build は必ず `--no-cache` を使用します。
 
 ```bash
-docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest .
+docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${GITHUB_SHA} .
 ```
 
 ## メール送信 provider 方針
@@ -59,11 +59,33 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 - `noop`: 開発用の無送信モード
 - `ses`: Amazon SES 本実装
 
+### SES 本番設定
+
+`MAIL_PROVIDER=ses` の場合、起動時に必須設定を検証し、不足があれば fail closed で起動失敗します。
+
 推奨環境変数:
 
 - `MAIL_PROVIDER`
-- `MAIL_FROM_EMAIL`
+- `AWS_SES_ACCESS_KEY_ID`
+- `AWS_SES_SECRET_ACCESS_KEY`
+- `AWS_SES_REGION`
+- `AWS_SES_FROM_ADDRESS`
+- `AWS_SES_FROM_NAME`
+- `AWS_SES_CONFIGURATION_SET`
 - `MAIL_REPLY_TO_EMAILS`
-- `MAIL_PROVIDER_SES_CONFIGURATION_SET`
+- `MAIL_SERVICE_NAME`
+- `AWS_SES_TIMEOUT_SECONDS`
+
+移行互換として次の既存名も当面は fallback で読み取ります。
+
+- `MAIL_FROM_EMAIL`
+- `MAIL_FROM_NAME`
 - `MAIL_PROVIDER_SES_REGION`
+- `MAIL_PROVIDER_SES_CONFIGURATION_SET`
 - `MAIL_PROVIDER_TIMEOUT_SECONDS`
+
+Cloud Run では AWS 認証情報をイメージへ埋め込まず、Secret Manager から環境変数注入する前提です。
+
+### 削除候補の扱い
+
+不要になった設定名や運用手順は即削除せず、確認付きのやることとして管理します。候補は `docs/ses-cutover-checklist.md` に残し、合意後に削除します.
