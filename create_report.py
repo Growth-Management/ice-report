@@ -27,6 +27,15 @@ FREE_SOURCE_SHEET = "無料_yymm_PLUS"
 PAID_TOTAL_COLS = range(5, 11)
 
 
+def resolve_bigquery_project_id() -> str:
+    return (
+        os.environ.get("BIGQUERY_PROJECT_ID")
+        or os.environ.get("PROJECT_ID")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or ""
+    )
+
+
 def previous_month_base(today: Optional[date] = None) -> date:
     if today is None:
         today = date.today()
@@ -277,7 +286,7 @@ def generate_report(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ジャンプ＋月次ExcelレポートをBigQueryから生成し、必要に応じてGCSへ保存します。")
-    parser.add_argument("--project", default=os.environ.get("PROJECT_ID"), help="BigQueryジョブを実行するGCPプロジェクトID")
+    parser.add_argument("--project", default=resolve_bigquery_project_id(), help="BigQueryジョブを実行するGCPプロジェクトID")
     parser.add_argument("--bucket", default=os.environ.get("BUCKET_NAME"), help="生成Excelを保存するGCS bucket名")
     parser.add_argument("--object-prefix", default=os.environ.get("OBJECT_PREFIX", "reports/plus"), help="GCS object prefix")
     parser.add_argument("--template", default=str(DEFAULT_TEMPLATE), help="Excelテンプレートのパス")
@@ -291,7 +300,7 @@ def main() -> None:
     args = parse_args()
 
     if not args.project:
-        raise ValueError("--project または環境変数 PROJECT_ID が必要です。")
+        raise ValueError("--project または環境変数 BIGQUERY_PROJECT_ID / PROJECT_ID が必要です。")
 
     today = datetime.strptime(args.today, "%Y-%m-%d").date() if args.today else date.today()
 
