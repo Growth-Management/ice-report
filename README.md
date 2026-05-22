@@ -63,18 +63,26 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 
 `MAIL_PROVIDER=ses` の場合、起動時に必須設定を検証し、不足があれば fail closed で起動失敗します。
 
+認証経路は次です。
+
+1. Cloud Run が metadata server から Google-signed ID token を取得
+2. AWS STS `AssumeRoleWithWebIdentity` で一時認証情報へ交換
+3. 取得した一時認証情報で SES `SendEmail` を実行
+
 推奨環境変数:
 
-- `MAIL_PROVIDER`
-- `AWS_SES_ACCESS_KEY_ID`
-- `AWS_SES_SECRET_ACCESS_KEY`
+- `MAIL_PROVIDER=ses`
+- `AWS_SES_ROLE_ARN`
+- `AWS_SES_WEB_IDENTITY_AUDIENCE`
 - `AWS_SES_REGION`
 - `AWS_SES_FROM_ADDRESS`
 - `AWS_SES_FROM_NAME`
-- `AWS_SES_CONFIGURATION_SET`
-- `MAIL_REPLY_TO_EMAILS`
-- `MAIL_SERVICE_NAME`
-- `AWS_SES_TIMEOUT_SECONDS`
+- `AWS_SES_CONFIGURATION_SET` (optional)
+- `AWS_SES_ROLE_SESSION_NAME` (optional)
+- `AWS_SES_ROLE_SESSION_DURATION_SECONDS` (optional)
+- `AWS_SES_TIMEOUT_SECONDS` (optional)
+- `MAIL_REPLY_TO_EMAILS` (optional)
+- `MAIL_SERVICE_NAME` (optional)
 
 移行互換として次の既存名も当面は fallback で読み取ります。
 
@@ -84,8 +92,10 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 - `MAIL_PROVIDER_SES_CONFIGURATION_SET`
 - `MAIL_PROVIDER_TIMEOUT_SECONDS`
 
-Cloud Run では AWS 認証情報をイメージへ埋め込まず、Secret Manager から環境変数注入する前提です。
+長期AWS access key (`AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY`) は本番経路の前提にしません。残っている場合は削除候補として扱い、切替確認後に整理してください。
+
+Cloud Run では認証情報をイメージへ埋め込まず、Secret Manager から設定注入する前提です。具体的な切替手順は `docs/ses-cutover-checklist.md` を参照してください。
 
 ### 削除候補の扱い
 
-不要になった設定名や運用手順は即削除せず、確認付きのやることとして管理します。候補は `docs/ses-cutover-checklist.md` に残し、合意後に削除します.
+不要になった設定名や運用手順は即削除せず、確認付きのやることとして管理します。候補は `docs/ses-cutover-checklist.md` に残し、合意後に削除します。
