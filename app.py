@@ -31,6 +31,15 @@ from mail_runtime import send_otp_pin_email
 app = Flask(__name__)
 
 
+def _bigquery_project_id() -> str:
+    return (
+        os.environ.get("BIGQUERY_PROJECT_ID")
+        or os.environ.get("PROJECT_ID")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or ""
+    )
+
+
 @app.route("/healthz", methods=["GET"], strict_slashes=False)
 @app.route("/healthz/", methods=["GET"], strict_slashes=False)
 def healthz():
@@ -681,62 +690,61 @@ function getAdminKey() {
   return key || "";
 }
 
-function clearAdminKey() {
-  localStorage.removeItem(ADMIN_KEY_STORAGE);
-}
-
 function clearAdminKeyAndReload() {
-  clearAdminKey();
+  localStorage.removeItem(ADMIN_KEY_STORAGE);
   location.reload();
 }
 
+function splitList(value) {
+  return (value || "")
+    .split(",")
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
 async function api(path, options = {}) {
+  const headers = Object.assign({}, options.headers || {});
   const adminKey = getAdminKey();
+  if (adminKey) {
+    headers["X-Admin-Key"] = adminKey;
+  }
+  if (options.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
 
-  options.headers = Object.assign(
-    {
-      "Content-Type": "application/json",
-      "X-Admin-Key": adminKey
-    },
-    options.headers || {}
-  );
+  const res = await fetch(baseUrl + path, {
+    method: options.method || "GET",
+    headers,
+    body: options.body,
+  });
 
-  const res = await fetch(path, options);
   const text = await res.text();
+  let data = {};
 
-  let data;
   try {
-    data = JSON.parse(text);
-  } catch {
+    data = text ? JSON.parse(text) : {};
+  } catch (e) {
     data = {raw: text};
   }
 
-  if (res.status === 401) {
-    clearAdminKey();
-    alert("管理キーが不正です。再入力してください。");
-    location.reload();
-    return;
-  }
-
   if (!res.ok) {
-    throw new Error(JSON.stringify(data));
+    const message = data && (data.error || data.message || data.raw) ? (data.error || data.message || data.raw) : ("HTTP " + res.status);
+    if (res.status === 401) {
+      localStorage.removeItem(ADMIN_KEY_STORAGE);
+    }
+    throw new Error(message);
   }
 
   return data;
 }
 
-function splitList(value) {
-  return (value || "").split(",").map(s => s.trim()).filter(Boolean);
-}
-
 function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, c => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    "\"": "&quot;",
-    "'": "&#39;"
-  }[c]));
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function attr(s) {
@@ -772,13 +780,8 @@ function showToast(message) {
   setTimeout(() => el.classList.remove("show"), 1600);
 }
 
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text || "");
-    showToast("コピーしました");
-  } catch (e) {
-    showToast("コピーに失敗しました");
-  }
+function copyText(text) {
+  navigator.clipboard.writeText(text || "").then(() => showToast("コピーしました")).catch(() => showToast("コピーに失敗しました"));
 }
 
 function clearCreateForm() {
@@ -898,36 +901,23 @@ function useGcsUri(inputId, gcsUri) {
   }
 }
 
-function currentVersion(item) {
-  return (item.versions || []).find(v => v.version === item.current_version) || {};
-}
-
-function publicUrl(item) {
-  return item.public_download_url || item.download_url || "";
+function deliveryStatus(item) {
+  if (item.active === true) return "active";
+  if (item.active === false) return "disabled";
+  return "unknown";
 }
 
 function deliverySearchText(item) {
-  const v = currentVersion(item);
+  const versions = item.versions || [];
+  const fileNames = versions.map(v => v.file_name || "").join(" ");
   return [
     item.delivery_id,
     item.customer_name,
     item.report_month,
-    item.current_version,
-    item.active ? "active" : "disabled",
-    v.file_name,
-    publicUrl(item)
+    item.download_url,
+    item.public_download_url,
+    fileNames
   ].join(" ").toLowerCase();
-}
-
-async function loadDeliveries() {
-  try {
-    const data = await api("/deliveries");
-    deliveryItems = data.items || [];
-    renderDeliveriesFromState();
-  } catch (e) {
-    document.getElementById("deliveries").innerHTML =
-      "<p style='color:#c73535'>" + esc(e.message) + "</p>";
-  }
 }
 
 function renderDeliveriesFromState() {
@@ -935,10 +925,7 @@ function renderDeliveriesFromState() {
   const status = document.getElementById("deliveryStatusFilter").value;
 
   const filtered = deliveryItems.filter(item => {
-    if (status === "active" && !item.active) {
-      return false;
-    }
-    if (status === "disabled" && item.active) {
+    if (status !== "all" && deliveryStatus(item) !== status) {
       return false;
     }
     if (q && !deliverySearchText(item).includes(q)) {
@@ -951,150 +938,167 @@ function renderDeliveriesFromState() {
   updateSummary();
 }
 
-function updateSummary() {
-  const total = deliveryItems.length;
-  const active = deliveryItems.filter(item => item.active).length;
-  const disabled = total - active;
-  document.getElementById("summaryTotal").textContent = total;
-  document.getElementById("summaryActive").textContent = active;
-  document.getElementById("summaryDisabled").textContent = disabled;
-  document.getElementById("summaryLogs").textContent = logItems.length;
+function renderVersions(delivery) {
+  const versions = delivery.versions || [];
+  if (!versions.length) {
+    return "<span class='muted'>versionなし</span>";
+  }
+
+  return versions.map(v => {
+    const current = Number(v.version) === Number(delivery.current_version);
+    return "<div class='version-panel' style='margin-bottom:8px;'>" +
+      "<div><strong>v" + esc(v.version) + "</strong>" + (current ? " <span class='status-pill status-active'>current</span>" : "") + "</div>" +
+      "<div class='muted'>" + esc(formatDateTime(v.created_at || "")) + "</div>" +
+      "<div><code>" + esc(v.file_name || "") + "</code></div>" +
+      "<div><code>" + esc(v.gcs_uri || "") + "</code></div>" +
+      "</div>";
+  }).join("");
+}
+
+function versionButtonText(deliveryId) {
+  return versionInProgress[deliveryId] ? "更新中..." : "version追加";
+}
+
+async function loadDeliveries() {
+  const el = document.getElementById("deliveries");
+  el.innerHTML = "<p class='muted'>loading deliveries...</p>";
+
+  try {
+    const data = await api("/deliveries?limit=100");
+    deliveryItems = data.items || [];
+    renderDeliveriesFromState();
+  } catch (e) {
+    el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+  }
 }
 
 function renderDeliveries(items) {
+  const el = document.getElementById("deliveries");
+
   if (!items.length) {
-    document.getElementById("deliveries").innerHTML = "<p class='muted'>該当なし</p>";
+    el.innerHTML = "<p class='muted'>該当なし</p>";
     return;
   }
 
   const rows = items.map(item => {
-    const v = currentVersion(item);
-    const activeLabel = item.active ? "active" : "disabled";
-    const activeClass = item.active ? "status-active" : "status-disabled";
-    const action = item.active ? "停止" : "再開";
-    const enableNext = item.active ? "false" : "true";
-    const actionClass = item.active ? "small danger" : "small";
-    const inputId = "filename-" + item.delivery_id;
-    const addButtonId = "add-version-button-" + item.delivery_id;
-    const url = publicUrl(item);
-    const urlHtml = url
-      ? "<a href=\"" + esc(url) + "\" target=\"_blank\">配布URLを開く</a><br><code>" + esc(url) + "</code>"
-      : "<span class='muted'>未保存</span>";
+    const isActive = item.active === true;
+    const statusClass = isActive ? "status-active" : "status-disabled";
+    const statusText = isActive ? "active" : "disabled";
+    const toggleAction = isActive ? "disable" : "enable";
+    const toggleLabel = isActive ? "停止" : "再開";
+    const url = item.public_download_url || item.download_url || "";
+    const outputId = "versionOutput_" + item.delivery_id;
+    const fileInputId = "versionFile_" + item.delivery_id;
+    const overwriteId = "overwrite_" + item.delivery_id;
 
     return "<tr>" +
-      "<td><code>" + esc(item.delivery_id) + "</code><br><button class='small secondary' onclick=\"copyText('" + attr(item.delivery_id) + "')\">IDコピー</button></td>" +
-      "<td><strong>" + esc(item.customer_name) + "</strong><br><span class='muted'>" + esc(item.report_month) + "</span></td>" +
-      "<td><span class='status-pill " + activeClass + "'>" + activeLabel + "</span><br><span class='muted'>期限: " + esc(formatDateTime(item.expires_at)) + "</span></td>" +
-      "<td><strong>v" + esc(item.current_version) + "</strong><br><code>" + esc(v.file_name || "") + "</code></td>" +
-      "<td>" + urlHtml + "<br><button class='small secondary' onclick=\"copyText('" + attr(url) + "')\">URLコピー</button></td>" +
-      "<td><div class='row-actions'>" +
-        "<button class='" + actionClass + "' onclick=\"toggleDelivery('" + attr(item.delivery_id) + "', " + enableNext + ")\">" + action + "</button>" +
-        "<button class='small secondary' onclick=\"showVersionForm('" + attr(item.delivery_id) + "')\">version追加</button>" +
-        "<button class='small secondary' onclick=\"loadLogsFor('" + attr(item.delivery_id) + "')\">ログ</button>" +
-      "</div></td>" +
-    "</tr>" +
-    "<tr id=\"version-" + esc(item.delivery_id) + "\" style=\"display:none\">" +
-      "<td colspan=\"6\">" +
-        "<div class='version-panel'>" +
-          "<h3>version追加 / クエリ再実行</h3>" +
-          "<div class='field'><label>保存ファイル名 .xlsx</label><input id=\"" + esc(inputId) + "\" placeholder=\"保存ファイル名 .xlsx\"></div>" +
-          "<div class='field'><label><input id=\"overwrite-" + esc(item.delivery_id) + "\" type=\"checkbox\" style=\"width:auto;margin-right:6px;\">現在のファイル名で上書きする</label></div>" +
-          "<div class='field'><label>note</label><input id=\"note-" + esc(item.delivery_id) + "\" value=\"修正版\"></div>" +
-          "<button id=\"" + esc(addButtonId) + "\" onclick=\"addVersion('" + attr(item.delivery_id) + "')\">クエリ再実行して最新版にする</button>" +
-          "<pre id=\"ver-result-" + esc(item.delivery_id) + "\">待機中</pre>" +
+      "<td><code>" + esc(item.delivery_id || "") + "</code></td>" +
+      "<td>" + esc(item.customer_name || "") + "<br><span class='muted'>" + esc(item.report_month || "") + "</span></td>" +
+      "<td><span class='status-pill " + statusClass + "'>" + statusText + "</span></td>" +
+      "<td><a href='" + esc(url) + "' target='_blank' rel='noopener noreferrer'>" + esc(url) + "</a></td>" +
+      "<td>v" + esc(item.current_version || "") + "</td>" +
+      "<td>" + renderVersions(item) +
+        "<div class='field' style='margin-top:10px;'><label>新規保存ファイル名 .xlsx</label><input id='" + attr(fileInputId) + "' placeholder='例: ダウンロード数入力シート_260522_ICE入力済み_plus.xlsx'></div>" +
+        "<div class='field'><label><input type='checkbox' id='" + attr(overwriteId) + "'> overwrite current file name を使う</label></div>" +
+        "<div class='row-actions'>" +
+          "<button class='small' onclick=\"addVersion('" + attr(item.delivery_id) + "')\" id='versionBtn_" + attr(item.delivery_id) + "'>" + esc(versionButtonText(item.delivery_id)) + "</button>" +
+          "<button class='small secondary' onclick=\"loadGcsFiles('" + attr(fileInputId) + "')\">GCS参照</button>" +
         "</div>" +
+        "<pre id='" + attr(outputId) + "' style='margin-top:8px;'>待機中</pre>" +
       "</td>" +
+      "<td><div class='row-actions'>" +
+        "<button class='small secondary' onclick=\"copyText('" + attr(url) + "')\">URLコピー</button>" +
+        "<button class='small secondary' onclick=\"loadLogs('" + attr(item.delivery_id) + "')\">ログ</button>" +
+        "<button class='small danger' onclick=\"toggleDelivery('" + attr(item.delivery_id) + "', '" + attr(toggleAction) + "')\">" + esc(toggleLabel) + "</button>" +
+      "</div></td>" +
     "</tr>";
   }).join("");
 
-  document.getElementById("deliveries").innerHTML =
-    "<p class='muted'>表示: " + items.length + "件 / 全体: " + deliveryItems.length + "件</p>" +
+  el.innerHTML =
+    "<p class='muted'>loaded deliveries: " + items.length + "件</p>" +
     "<div class='table-wrap'><table>" +
-    "<thead><tr><th>delivery_id</th><th>顧客/月</th><th>状態</th><th>version</th><th>配布URL</th><th>操作</th></tr></thead>" +
+    "<thead><tr><th>delivery_id</th><th>顧客 / 月</th><th>状態</th><th>配布URL</th><th>current</th><th>versions</th><th>操作</th></tr></thead>" +
     "<tbody>" + rows + "</tbody></table></div>";
 }
 
-async function toggleDelivery(id, enable) {
-  const path = enable ? "/deliveries/" + id + "/enable" : "/deliveries/" + id + "/disable";
-
+async function toggleDelivery(deliveryId, action) {
   try {
-    await api(path, {
-      method: "POST",
-      body: "{}"
+    await api("/deliveries/" + encodeURIComponent(deliveryId) + "/" + action, {
+      method: "POST"
     });
-    showToast(enable ? "配布を再開しました" : "配布を停止しました");
+    showToast(action === "disable" ? "停止しました" : "再開しました");
     await loadDeliveries();
   } catch (e) {
     alert(e.message);
   }
 }
 
-function showVersionForm(id) {
-  const row = document.getElementById("version-" + id);
-  row.style.display = row.style.display === "none" ? "" : "none";
-}
-
-async function addVersion(id) {
-  if (versionInProgress[id]) {
+async function addVersion(deliveryId) {
+  if (versionInProgress[deliveryId]) {
     return;
   }
 
-  versionInProgress[id] = true;
+  versionInProgress[deliveryId] = true;
 
-  const button = document.getElementById("add-version-button-" + id);
-  const resultEl = document.getElementById("ver-result-" + id);
+  const button = document.getElementById("versionBtn_" + deliveryId);
+  const fileInput = document.getElementById("versionFile_" + deliveryId);
+  const overwrite = document.getElementById("overwrite_" + deliveryId);
+  const output = document.getElementById("versionOutput_" + deliveryId);
 
   if (button) {
     button.disabled = true;
-    button.textContent = "生成中...";
+    button.textContent = versionButtonText(deliveryId);
   }
 
-  resultEl.textContent = "最新版を生成中です。クエリ再実行・Excel生成・GCS保存中...";
-
-  const payload = {
-    output_filename: document.getElementById("filename-" + id).value,
-    note: document.getElementById("note-" + id).value,
-    make_current: true,
-    overwrite: document.getElementById("overwrite-" + id).checked
-  };
+  if (output) {
+    output.textContent = "version追加中...";
+  }
 
   try {
-    const data = await api("/deliveries/" + id + "/versions", {
+    const payload = {
+      output_filename: fileInput ? fileInput.value : "",
+      overwrite: overwrite ? overwrite.checked : false
+    };
+
+    const data = await api("/deliveries/" + encodeURIComponent(deliveryId) + "/versions", {
       method: "POST",
       body: JSON.stringify(payload)
     });
 
-    resultEl.textContent =
-      "最新版を追加しました\n" +
-      "version: " + (data.result && data.result.version ? data.result.version : "-") + "\n" +
-      "gcs_uri: " + (data.result && data.result.gcs_uri ? data.result.gcs_uri : "-");
-
+    if (output) {
+      output.textContent = "version追加完了\n" + JSON.stringify(data.result || data, null, 2);
+    }
     showToast("versionを追加しました");
     await loadDeliveries();
     await loadGcsFiles();
-
   } catch (e) {
-    resultEl.textContent = "最新版追加に失敗しました\n" + e.message;
+    if (output) {
+      output.textContent = "version追加に失敗しました\n" + e.message;
+    }
   } finally {
-    versionInProgress[id] = false;
-
+    versionInProgress[deliveryId] = false;
     if (button) {
       button.disabled = false;
-      button.textContent = "クエリ再実行して最新版にする";
+      button.textContent = versionButtonText(deliveryId);
     }
   }
 }
 
-function loadLogsFor(id) {
-  document.getElementById("logSearch").value = id;
-  loadLogs(id);
+function updateSummary() {
+  const total = deliveryItems.length;
+  const active = deliveryItems.filter(item => item.active === true).length;
+  const disabled = deliveryItems.filter(item => item.active === false).length;
+  const shownLogs = logItems.length;
+
+  document.getElementById("summaryTotal").textContent = String(total);
+  document.getElementById("summaryActive").textContent = String(active);
+  document.getElementById("summaryDisabled").textContent = String(disabled);
+  document.getElementById("summaryLogs").textContent = String(shownLogs);
 }
 
 async function loadLogs(deliveryId = "") {
   const logsEl = document.getElementById("logs");
-
-  logsEl.innerHTML =
-    "<p class='muted'>loading logs... delivery_id=" + esc(deliveryId || "all") + "</p>";
+  logsEl.innerHTML = "<p class='muted'>loading logs...</p>";
 
   try {
     const path = deliveryId
@@ -1177,7 +1181,6 @@ def admin_ui():
     return render_admin_ui()
 
 
-
 @app.get("/gcs-files")
 def list_gcs_files():
     ok, error_response = _check_admin()
@@ -1215,14 +1218,14 @@ def list_gcs_files():
 def generate():
     payload = request.get_json(silent=True) or {}
 
-    project_id = payload.get("project_id") or os.environ.get("PROJECT_ID")
+    project_id = payload.get("project_id") or _bigquery_project_id()
     bucket_name = payload.get("bucket_name") or os.environ.get("BUCKET_NAME")
     object_prefix = payload.get("object_prefix") or os.environ.get("OBJECT_PREFIX", "reports/plus")
     today_text = payload.get("today")
     output_filename = payload.get("output_filename") or payload.get("file_name")
 
     if not project_id:
-        return jsonify({"error": "PROJECT_ID is required"}), 400
+        return jsonify({"error": "BIGQUERY_PROJECT_ID or PROJECT_ID is required"}), 400
 
     if not bucket_name:
         return jsonify({"error": "BUCKET_NAME is required"}), 400
@@ -1261,13 +1264,13 @@ def create_delivery():
         return jsonify({"error": "report_month is required"}), 400
 
     if not gcs_uri:
-        project_id = payload.get("project_id") or os.environ.get("PROJECT_ID")
+        project_id = payload.get("project_id") or _bigquery_project_id()
         bucket_name = payload.get("bucket_name") or os.environ.get("BUCKET_NAME")
         object_prefix = payload.get("object_prefix") or os.environ.get("OBJECT_PREFIX", "reports/plus")
         today_text = payload.get("today")
 
         if not project_id:
-            return jsonify({"error": "PROJECT_ID is required"}), 400
+            return jsonify({"error": "BIGQUERY_PROJECT_ID or PROJECT_ID is required"}), 400
 
         if not bucket_name:
             return jsonify({"error": "BUCKET_NAME is required"}), 400
@@ -1348,7 +1351,7 @@ def add_version(delivery_id: str):
 
     payload = request.get_json(silent=True) or {}
 
-    project_id = payload.get("project_id") or os.environ.get("PROJECT_ID")
+    project_id = payload.get("project_id") or _bigquery_project_id()
     bucket_name = payload.get("bucket_name") or os.environ.get("BUCKET_NAME")
     object_prefix = payload.get("object_prefix") or os.environ.get("OBJECT_PREFIX", "reports/plus")
     today_text = payload.get("today")
@@ -1356,7 +1359,7 @@ def add_version(delivery_id: str):
     overwrite = bool(payload.get("overwrite", False))
 
     if not project_id:
-        return jsonify({"error": "PROJECT_ID is required"}), 400
+        return jsonify({"error": "BIGQUERY_PROJECT_ID or PROJECT_ID is required"}), 400
 
     if not bucket_name:
         return jsonify({"error": "BUCKET_NAME is required"}), 400
@@ -1401,7 +1404,6 @@ def add_version(delivery_id: str):
     )
 
     gcs_uri = generated.get("gcs_uri")
-
     if not gcs_uri:
         return jsonify({
             "error": "gcs_uri was not generated",
@@ -1489,7 +1491,6 @@ def cleanup_expired_deliveries():
 
     collection_name = os.environ.get("DELIVERIES_COLLECTION", "deliveries")
     now = datetime.now(timezone.utc)
-
     db = firestore.Client()
     query = (
         db.collection(collection_name)
@@ -1530,7 +1531,6 @@ def cleanup_expired_deliveries():
     })
 
 
-
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -1549,14 +1549,13 @@ def _otp_hash_secret() -> str:
         or os.environ.get("SECRET_KEY")
         or os.environ.get("ADMIN_API_KEY")
     )
-
     if not secret:
         logging.warning(
             "OTP_HASH_SECRET, SECRET_KEY, and ADMIN_API_KEY are not set. "
-            "Using PROJECT_ID fallback for OTP hashing. Set OTP_HASH_SECRET before production use."
+            "Using PROJECT_ID fallback for OTP hashing. "
+            "Set OTP_HASH_SECRET before production use."
         )
         secret = os.environ.get("PROJECT_ID", "ice-report-local-dev")
-
     return secret
 
 
@@ -1586,10 +1585,8 @@ def _int_env(name: str, default_value: int) -> int:
 
 def _bool_env(name: str, default_value: bool = False) -> bool:
     value = os.environ.get(name)
-
     if value is None:
         return default_value
-
     return value.lower() in ("1", "true", "yes", "y", "on")
 
 
@@ -1604,38 +1601,35 @@ def _render_otp_page(
     email_value = (email or "").replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
     message_html = (
         f"<div class='message'>{message}</div>"
-        if message
-        else ""
+        if message else ""
     )
     error_html = (
         f"<div class='error'>{error}</div>"
-        if error
-        else ""
+        if error else ""
     )
 
     if step == "pin":
         form_html = f"""
-        <form method="post" action="/d/{token}/verify-pin">
-          <input type="hidden" name="email" value="{email_value}">
-          <label>メールアドレス</label>
-          <input type="email" value="{email_value}" disabled>
-          <label>PIN</label>
-          <input name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="6桁のPIN" required>
-          <button type="submit">PINを確認してダウンロードへ進む</button>
-        </form>
-        <form method="post" action="/d/{token}/request-pin" class="secondary-form">
-          <input type="hidden" name="email" value="{email_value}">
-          <button type="submit" class="secondary">PINを再発行</button>
-        </form>
-        """
+<form method="post" action="/d/{token}/verify-pin">
+  <label>メールアドレス</label>
+  <input type="email" name="email" value="{email_value}" required readonly>
+  <label>PIN</label>
+  <input type="text" name="pin" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" placeholder="6桁のPIN" required>
+  <button type="submit">PINを確認してダウンロードへ進む</button>
+</form>
+<form method="post" action="/d/{token}/request-pin" class="secondary-form">
+  <input type="hidden" name="email" value="{email_value}">
+  <button type="submit" class="secondary">PINを再発行</button>
+</form>
+"""
     else:
         form_html = f"""
-        <form method="post" action="/d/{token}/request-pin">
-          <label>メールアドレス</label>
-          <input name="email" type="email" value="{email_value}" autocomplete="email" placeholder="you@example.com" required>
-          <button type="submit">PINを送信</button>
-        </form>
-        """
+<form method="post" action="/d/{token}/request-pin">
+  <label>メールアドレス</label>
+  <input type="email" name="email" value="{email_value}" placeholder="you@example.com" required>
+  <button type="submit">PINを送信</button>
+</form>
+"""
 
     return f"""
 <!doctype html>
@@ -1648,34 +1642,34 @@ def _render_otp_page(
     :root {{
       color-scheme: light dark;
       --bg: #f5f7fb;
-      --panel: #ffffff;
+      --panel: rgba(255, 255, 255, 0.94);
       --text: #172033;
       --muted: #667085;
       --line: #d8dee9;
       --primary: #2457d6;
       --primary-dark: #1c45ab;
-      --danger: #c73535;
-      --danger-bg: #fff1f1;
       --success: #157347;
       --success-bg: #eaf7ef;
-      --radius: 16px;
-      --shadow: 0 18px 40px rgba(20, 32, 55, 0.10);
+      --danger: #c73535;
+      --danger-bg: #fff1f1;
+      --radius: 18px;
+      --shadow: 0 24px 48px rgba(20, 32, 55, 0.14);
     }}
 
     @media (prefers-color-scheme: dark) {{
       :root {{
         --bg: #0b1020;
-        --panel: #12192b;
+        --panel: rgba(18, 25, 43, 0.92);
         --text: #e6edf7;
         --muted: #9aa8bd;
         --line: #2d3a53;
         --primary: #7aa2ff;
         --primary-dark: #5f8df0;
-        --danger: #ff7b7b;
-        --danger-bg: rgba(255, 123, 123, 0.13);
         --success: #65d99a;
         --success-bg: rgba(101, 217, 154, 0.13);
-        --shadow: 0 20px 48px rgba(0, 0, 0, 0.35);
+        --danger: #ff7b7b;
+        --danger-bg: rgba(255, 123, 123, 0.13);
+        --shadow: 0 24px 52px rgba(0, 0, 0, 0.38);
       }}
     }}
 
