@@ -394,6 +394,62 @@ def render_admin_ui() -> str:
       padding: 12px;
     }
 
+    .delivery-table {
+      min-width: 1080px;
+      table-layout: fixed;
+    }
+
+    .delivery-id-cell {
+      width: 110px;
+    }
+
+    .delivery-id-cell code {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .delivery-meta-cell {
+      width: 140px;
+    }
+
+    .delivery-status-cell {
+      width: 88px;
+    }
+
+    .delivery-url-cell {
+      width: 280px;
+    }
+
+    .delivery-url-link {
+      display: block;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .delivery-version-cell {
+      width: 360px;
+    }
+
+    .delivery-actions-cell {
+      width: 160px;
+    }
+
+    .delivery-uri-toggle {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .delivery-uri-toggle summary {
+      cursor: pointer;
+    }
+
+    .delivery-uri-toggle code {
+      display: block;
+      margin-top: 6px;
+      white-space: pre-wrap;
+    }
+
     .toast {
       position: fixed;
       right: 20px;
@@ -946,11 +1002,12 @@ function renderVersions(delivery) {
 
   return versions.map(v => {
     const current = Number(v.version) === Number(delivery.current_version);
+    const gcsUri = v.gcs_uri || "";
     return "<div class='version-panel' style='margin-bottom:8px;'>" +
       "<div><strong>v" + esc(v.version) + "</strong>" + (current ? " <span class='status-pill status-active'>current</span>" : "") + "</div>" +
       "<div class='muted'>" + esc(formatDateTime(v.created_at || "")) + "</div>" +
       "<div><code>" + esc(v.file_name || "") + "</code></div>" +
-      "<div><code>" + esc(v.gcs_uri || "") + "</code></div>" +
+      "<details class='delivery-uri-toggle'><summary>GCS URIを表示</summary><code>" + esc(gcsUri) + "</code></details>" +
       "</div>";
   }).join("");
 }
@@ -992,12 +1049,12 @@ function renderDeliveries(items) {
     const overwriteId = "overwrite_" + item.delivery_id;
 
     return "<tr>" +
-      "<td><code>" + esc(item.delivery_id || "") + "</code></td>" +
-      "<td>" + esc(item.customer_name || "") + "<br><span class='muted'>" + esc(item.report_month || "") + "</span></td>" +
-      "<td><span class='status-pill " + statusClass + "'>" + statusText + "</span></td>" +
-      "<td><a href='" + esc(url) + "' target='_blank' rel='noopener noreferrer'>" + esc(url) + "</a></td>" +
+      "<td class='delivery-id-cell'><code>" + esc(item.delivery_id || "") + "</code></td>" +
+      "<td class='delivery-meta-cell'>" + esc(item.customer_name || "") + "<br><span class='muted'>" + esc(item.report_month || "") + "</span></td>" +
+      "<td class='delivery-status-cell'><span class='status-pill " + statusClass + "'>" + statusText + "</span></td>" +
+      "<td class='delivery-url-cell'><a class='delivery-url-link' href='" + esc(url) + "' target='_blank' rel='noopener noreferrer'>" + esc(url) + "</a></td>" +
       "<td>v" + esc(item.current_version || "") + "</td>" +
-      "<td>" + renderVersions(item) +
+      "<td class='delivery-version-cell'>" + renderVersions(item) +
         "<div class='field' style='margin-top:10px;'><label>新規保存ファイル名 .xlsx</label><input id='" + attr(fileInputId) + "' placeholder='例: ダウンロード数入力シート_260522_ICE入力済み_plus.xlsx'></div>" +
         "<div class='field'><label><input type='checkbox' id='" + attr(overwriteId) + "'> overwrite current file name を使う</label></div>" +
         "<div class='row-actions'>" +
@@ -1006,7 +1063,7 @@ function renderDeliveries(items) {
         "</div>" +
         "<pre id='" + attr(outputId) + "' style='margin-top:8px;'>待機中</pre>" +
       "</td>" +
-      "<td><div class='row-actions'>" +
+      "<td class='delivery-actions-cell'><div class='row-actions'>" +
         "<button class='small secondary' onclick=\"copyText('" + attr(url) + "')\">URLコピー</button>" +
         "<button class='small secondary' onclick=\"loadLogs('" + attr(item.delivery_id) + "')\">ログ</button>" +
         "<button class='small danger' onclick=\"toggleDelivery('" + attr(item.delivery_id) + "', '" + attr(toggleAction) + "')\">" + esc(toggleLabel) + "</button>" +
@@ -1016,7 +1073,7 @@ function renderDeliveries(items) {
 
   el.innerHTML =
     "<p class='muted'>loaded deliveries: " + items.length + "件</p>" +
-    "<div class='table-wrap'><table>" +
+    "<div class='table-wrap'><table class='delivery-table'>" +
     "<thead><tr><th>delivery_id</th><th>顧客 / 月</th><th>状態</th><th>配布URL</th><th>current</th><th>versions</th><th>操作</th></tr></thead>" +
     "<tbody>" + rows + "</tbody></table></div>";
 }
@@ -1832,7 +1889,6 @@ def _revoke_existing_challenges(token: str, email: str) -> int:
         batch.commit()
 
     return count
-
 
 
 def _security_events_collection_name() -> str:
