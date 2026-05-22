@@ -84,7 +84,6 @@ def _ses_region_name() -> str:
         "MAIL_PROVIDER_SES_REGION",
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
-        default="ap-northeast-1",
     )
 
 
