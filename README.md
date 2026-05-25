@@ -81,6 +81,8 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 - `AWS_SES_ROLE_SESSION_NAME` (optional)
 - `AWS_SES_ROLE_SESSION_DURATION_SECONDS` (optional)
 - `AWS_SES_TIMEOUT_SECONDS` (optional)
+- `MAIL_DELIVERY_MAX_ATTEMPTS` (optional, default `2`, max `5`)
+- `MAIL_DELIVERY_RETRY_BASE_SECONDS` (optional, default `0.5`)
 - `MAIL_REPLY_TO_EMAILS` (optional)
 - `MAIL_SERVICE_NAME` (optional)
 
@@ -95,6 +97,8 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 長期AWS access key (`AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY`) は本番経路の前提にしません。残っている場合は削除候補として扱い、切替確認後に整理してください。
 
 Cloud Run では認証情報をイメージへ埋め込まず、Secret Manager から設定注入する前提です。具体的な切替手順は `docs/ses-cutover-checklist.md` を参照してください。
+
+OTP 送信ログは調査用に `ICE_REPORT_MAIL_DELIVERY_ATTEMPT` / `ICE_REPORT_OTP_DELIVERY_SENT` を出しますが、Cloud Logging には生PIN、生メールアドレス、生トークンを出しません。照合が必要な値は `token_hash` / `email_hash` / `recipient_hash` で追います。
 
 ### 削除候補の扱い
 

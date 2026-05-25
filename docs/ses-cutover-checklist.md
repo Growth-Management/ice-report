@@ -132,10 +132,58 @@ gcloud run services describe report-generator \
 
 - Cloud Run revision が起動失敗していない
 - `MAIL_PROVIDER=ses` で起動している
+- `ICE_REPORT_MAIL_DELIVERY_ATTEMPT` で attempt / safe_reason / retryable / will_retry が追える
 - OTP リクエストで `ICE_REPORT_OTP_DELIVERY_SENT` が出る
 - `ICE_REPORT_SES_STS_ASSUMED` が出る
 - `otp_delivery_failed` や `mail_provider_auth_failed` が増えていない
+- Cloud Logging に生PIN、生メールアドレス、生トークンが出ていない
 - SES 側で bounce / complaint が異常増加していない
+
+### SES account / identity 状態の確認権限
+
+Cloud Run と同じ Web Identity 経路で確認する場合は、AWS側の確認用roleに次のread権限が必要です。runtime送信roleへ付けるか、別のops確認roleへ分けるかは最小権限の方針に合わせて決めます。
+
+- `ses:GetAccount`
+- `ses:GetEmailIdentity`
+
+ローカルからの確認補助:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-web-identity.ps1
+```
+
+このスクリプトは長期AWS credentialを保存せず、GCP service account impersonation でID tokenを発行し、AWS STS `AssumeRoleWithWebIdentity` で一時credentialを取得します。
+
+AWS IAM user `arn:aws:iam::855532282119:user/ice-report-ops` など、SES read権限を持つ通常AWS profileで確認する場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-direct.ps1 -Profile ice-report-ops
+```
+
+現時点の整理:
+
+- SES read確認対象のAWS accountは `855532282119`
+- `arn:aws:iam::855532282119:user/ice-report-ops` には `ses:GetAccount` / `ses:GetEmailIdentity` が付与済み
+- ローカル環境には `ice-report-ops` のAWS CLI profileは未登録
+- ローカルでSES確認を行う前に、`aws configure --profile ice-report-ops` などでprofile作成または認証情報設定が必要
+- 以前使っていた `ice-report-ses-sender` はSES送信テストには使えたが、IAM role作成権限はない。read確認・IAM管理の主体としては扱わない
+- `ice-report-ops` のAccess Keyは2本とも無効化済み。今後ローカルからdirect確認が必要な場合は、必要時のみ新しい作業用credentialを発行する
+
+2026-05-25 確認結果:
+
+- caller: `arn:aws:iam::855532282119:user/ice-report-ops`
+- `ProductionAccessEnabled=True`
+- `SendingEnabled=True`
+- `EnforcementStatus=HEALTHY`
+- `Max24HourSend=50000.0`
+- `MaxSendRate=14.0`
+- `SentLast24Hours=0.0`
+- identity `ice-sv.jp` は `VerificationStatus=SUCCESS`
+- `VerifiedForSendingStatus=True`
+- DKIM は `SUCCESS`
+- custom MAIL FROM は `bounce.ice-sv.jp`
+- `MailFromDomainStatus=SUCCESS`
+- `BehaviorOnMxFailure=USE_DEFAULT_VALUE`
 
 ## 7. Smoke Test
 
@@ -148,7 +196,7 @@ gcloud run services describe report-generator \
 
 ```bash
 gcloud logging read \
-  'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND (textPayload:"ICE_REPORT_SES_STS_ASSUMED" OR textPayload:"ICE_REPORT_OTP_DELIVERY_SENT" OR textPayload:"mail_provider_auth_failed")' \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND (textPayload:"ICE_REPORT_SES_STS_ASSUMED" OR textPayload:"ICE_REPORT_MAIL_DELIVERY_ATTEMPT" OR textPayload:"ICE_REPORT_OTP_DELIVERY_SENT" OR textPayload:"mail_provider_auth_failed")' \
   --project=ice-sh \
   --limit=50 \
   --format='value(timestamp,textPayload)'

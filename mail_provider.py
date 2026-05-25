@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -37,10 +38,12 @@ class MailDeliveryError(RuntimeError):
         *,
         safe_reason: str = "mail_provider_failed",
         retryable: bool = False,
+        provider_error_code: str = "",
     ) -> None:
         super().__init__(message)
         self.safe_reason = safe_reason
         self.retryable = retryable
+        self.provider_error_code = provider_error_code
 
 
 class MailProvider(ABC):
@@ -55,10 +58,10 @@ class LoggingMailProvider(MailProvider):
 
     def send(self, request: MailDeliveryRequest) -> MailDeliveryResult:
         self._logger.warning(
-            "ICE_REPORT_MAIL_PROVIDER type=logging to=%s subject=%s metadata=%s",
-            ",".join(request.to_emails),
+            "ICE_REPORT_MAIL_PROVIDER type=logging recipient_hashes=%s subject=%s metadata=%s",
+            ",".join(_fingerprint(email) for email in request.to_emails),
             request.subject,
-            request.metadata,
+            _safe_metadata(request.metadata),
         )
         return MailDeliveryResult(
             provider="logging",
@@ -128,10 +131,12 @@ class SesMailProvider(MailProvider):
         try:
             response = self._client.send_email(**params)
         except Exception as exc:
+            safe_reason, retryable, provider_error_code = _classify_ses_exception(exc)
             raise MailDeliveryError(
-                f"ses send_email failed: {exc}",
-                safe_reason="mail_provider_failed",
-                retryable=True,
+                "ses send_email failed",
+                safe_reason=safe_reason,
+                retryable=retryable,
+                provider_error_code=provider_error_code,
             ) from exc
 
         return MailDeliveryResult(
@@ -179,3 +184,59 @@ def build_mail_provider(
         f"unsupported provider: {provider_name}",
         safe_reason="mail_provider_not_configured",
     )
+
+
+def _classify_ses_exception(exc: Exception) -> tuple[str, bool, str]:
+    response = getattr(exc, "response", None) or {}
+    error = response.get("Error") or {}
+    code = str(error.get("Code") or exc.__class__.__name__ or "unknown")
+    normalized = code.lower()
+
+    transient_markers = (
+        "throttl",
+        "timeout",
+        "requesttimeout",
+        "serviceunavailable",
+        "internal",
+        "temporar",
+        "too many",
+        "connection",
+        "endpoint",
+    )
+    rejected_markers = (
+        "messageRejected",
+        "mailfromdomainnotverified",
+        "configuration",
+        "invalid",
+        "notverified",
+        "accessdenied",
+        "accountpaused",
+        "sendingpaused",
+    )
+
+    if any(marker.lower() in normalized for marker in transient_markers):
+        return "mail_provider_transient", True, code
+
+    if any(marker.lower() in normalized for marker in rejected_markers):
+        return "mail_provider_rejected", False, code
+
+    return "mail_provider_failed", True, code
+
+
+def _fingerprint(value: str) -> str:
+    if not value:
+        return ""
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_metadata(metadata: dict[str, str]) -> dict[str, str]:
+    safe: dict[str, str] = {}
+    for key, value in metadata.items():
+        normalized_key = key.lower()
+        if "token" in normalized_key or "email" in normalized_key:
+            safe[key] = _fingerprint(value)
+        else:
+            safe[key] = value
+
+    return safe
