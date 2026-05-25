@@ -1,20 +1,128 @@
-
----
-
-# docs/deploy.md
-
-かなり重要。
-
-```md
 # Deploy
 
-## Build
+Cloud Run `report-generator` のリリース手順です。運用確認や障害時手順は `docs/operations.md`、SES 切替の詳細は `docs/ses-cutover-checklist.md` を参照します。
 
-```bash
-docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest .
+## 前提
 
-```Push
-docker push asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest
+- deploy 対象 branch: `main`
+- GCP project: `ice-sh`
+- Region: `asia-northeast1`
+- Runtime service account: `ice-report-runner@ice-sh.iam.gserviceaccount.com`
+- Deploy impersonation service account: `ice-deployer@ice-sh.iam.gserviceaccount.com`
+- Image repository: `asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator`
 
-```Deploy
-gcloud run deploy report-generator --image asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:latest --region asia-northeast1 --memory 2Gi --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com --env-vars-file env.yaml --allow-unauthenticated --impersonate-service-account=ice-deployer@ice-sh.iam.gserviceaccount.com
+## 1. 事前確認
+
+```powershell
+git switch main
+git fetch origin
+git status --short --branch
+git log -1 --oneline
+```
+
+確認ポイント:
+
+- `main` が最新の deploy 対象 commit を指している
+- 作業ツリーが clean
+- deploy 対象 commit SHA を控えている
+
+## 2. Build
+
+Docker build は必ず `--no-cache` を使います。tag は commit SHA にします。
+
+```powershell
+$sha = (git rev-parse HEAD).Trim()
+$image = "asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:$sha"
+docker build --no-cache -t $image .
+```
+
+## 3. Push
+
+```powershell
+docker push $image
+```
+
+push 後に digest が出るため、リリース記録へ残します。
+
+## 4. Deploy
+
+```powershell
+gcloud.cmd run deploy report-generator `
+  --image $image `
+  --region asia-northeast1 `
+  --project ice-sh `
+  --memory 2Gi `
+  --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com `
+  --allow-unauthenticated `
+  --impersonate-service-account=ice-deployer@ice-sh.iam.gserviceaccount.com `
+  --quiet
+```
+
+deploy 結果に表示される revision 名を控えます。
+
+## 5. 反映確認
+
+```powershell
+gcloud.cmd run services describe report-generator `
+  --region=asia-northeast1 `
+  --project=ice-sh `
+  --format='value(spec.template.spec.containers[0].image,status.latestReadyRevisionName,status.traffic[0].percent)'
+```
+
+確認ポイント:
+
+- image tag が deploy 対象 commit SHA
+- latest ready revision が想定の revision
+- traffic が `100`
+
+## 6. Smoke Test
+
+基本確認:
+
+```powershell
+$base = 'https://report-generator-635067190197.asia-northeast1.run.app'
+$health = Invoke-WebRequest -Uri "$base/api-health" -UseBasicParsing
+$admin = Invoke-WebRequest -Uri "$base/admin" -UseBasicParsing
+[pscustomobject]@{
+  healthStatus = $health.StatusCode
+  healthContent = $health.Content
+  adminStatus = $admin.StatusCode
+  adminLength = $admin.RawContentLength
+}
+```
+
+必要に応じて `docs/operations.md` の OTP smoke test を 1 回だけ実行します。実メールが送信されるため、対象 delivery と宛先を事前に確認してください。
+
+## 7. Cloud Logging 確認
+
+```powershell
+$revision = '<deployed-revision>'
+$filter = 'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND resource.labels.revision_name="' + $revision + '" AND (textPayload:"ICE_REPORT_MAIL_DELIVERY_ATTEMPT" OR textPayload:"ICE_REPORT_OTP_DELIVERY_SENT" OR textPayload:"mail_provider_auth_failed")'
+gcloud.cmd logging read $filter `
+  --project=ice-sh `
+  --freshness=30m `
+  --limit=50 `
+  --format='value(timestamp,textPayload)'
+```
+
+確認ポイント:
+
+- OTP smoke 実施時に `ICE_REPORT_MAIL_DELIVERY_ATTEMPT` が出る
+- OTP smoke 実施時に `ICE_REPORT_OTP_DELIVERY_SENT` が出る
+- `mail_provider_auth_failed` が増えていない
+- 生 PIN、生メールアドレス、生 token がログへ出ていない
+
+## 8. Rollback
+
+直前の正常 revision へ戻す場合:
+
+```powershell
+gcloud.cmd run services update-traffic report-generator `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --to-revisions=<stable-revision>=100 `
+  --impersonate-service-account=ice-deployer@ice-sh.iam.gserviceaccount.com `
+  --quiet
+```
+
+rollback 後は `/api-health`、`/admin`、Cloud Logging、必要最小限の OTP smoke を確認します。

@@ -45,6 +45,8 @@ Docker build は必ず `--no-cache` を使用します。
 docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${GITHUB_SHA} .
 ```
 
+詳細なリリース手順は `docs/deploy.md`、本番運用・smoke test・障害時初動・rollback は `docs/operations.md` を参照してください。
+
 ## メール送信 provider 方針
 
 OTP / PIN 送信は provider interface 経由で切り替える前提です。
