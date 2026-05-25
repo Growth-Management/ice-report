@@ -425,7 +425,7 @@ def send_otp_pin_email(
         try:
             provider = build_runtime_mail_provider()
             result = provider.send(request)
-            logging.info(
+            logging.warning(
                 "ICE_REPORT_MAIL_DELIVERY_ATTEMPT result=success flow=otp_pin provider=%s attempt=%s max_attempts=%s delivery_id=%s token_hash=%s recipient_hash=%s provider_message_id=%s",
                 result.provider,
                 attempt,
