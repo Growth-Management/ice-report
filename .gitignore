@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+output/
+*.zip
+artifacts/
+.tmp_chrome_profile/

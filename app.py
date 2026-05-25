@@ -1624,6 +1624,13 @@ def _hash_value(value: str) -> str:
     ).hexdigest()
 
 
+def _log_fingerprint(value: str) -> str:
+    if not value:
+        return ""
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
@@ -1924,11 +1931,11 @@ def _log_security_event(
         logging.exception("failed to write security event")
 
     logging.warning(
-        "ICE_REPORT_SECURITY_EVENT type=%s token=%s delivery_id=%s email=%s reason=%s",
+        "ICE_REPORT_SECURITY_EVENT type=%s token_hash=%s delivery_id=%s email_hash=%s reason=%s",
         event_type,
-        token,
+        _log_fingerprint(token),
         delivery_id,
-        email,
+        _log_fingerprint(email),
         reason,
     )
 
@@ -2118,11 +2125,10 @@ def _issue_pin(token: str, delivery_id: str, email: str) -> dict:
     ref.set(record)
 
     logging.warning(
-        "ICE_REPORT_OTP_PIN issued token=%s delivery_id=%s email=%s pin=%s expires_at=%s revoked_previous=%s",
-        token,
+        "ICE_REPORT_OTP_PIN issued token_hash=%s delivery_id=%s email_hash=%s expires_at=%s revoked_previous=%s",
+        _log_fingerprint(token),
         delivery_id,
-        email,
-        pin,
+        _log_fingerprint(email),
         record["expires_at"].isoformat(),
         revoked_count,
     )
@@ -2136,10 +2142,10 @@ def _issue_pin(token: str, delivery_id: str, email: str) -> dict:
     )
 
     logging.warning(
-        "ICE_REPORT_OTP_DELIVERY_SENT token=%s delivery_id=%s email=%s provider=%s provider_message_id=%s",
-        token,
+        "ICE_REPORT_OTP_DELIVERY_SENT token_hash=%s delivery_id=%s email_hash=%s provider=%s provider_message_id=%s",
+        _log_fingerprint(token),
         delivery_id,
-        email,
+        _log_fingerprint(email),
         delivery_result.provider,
         delivery_result.provider_message_id,
     )
@@ -2337,11 +2343,13 @@ def request_download_pin(token: str):
             reason=exc.safe_reason,
         )
         logging.exception(
-            "failed to deliver otp pin token=%s delivery_id=%s email=%s safe_reason=%s",
-            token,
+            "failed to deliver otp pin token_hash=%s delivery_id=%s email_hash=%s safe_reason=%s retryable=%s provider_error_code=%s",
+            _log_fingerprint(token),
             delivery_id,
-            email,
+            _log_fingerprint(email),
             exc.safe_reason,
+            exc.retryable,
+            exc.provider_error_code,
         )
         return _render_otp_page(
             token,

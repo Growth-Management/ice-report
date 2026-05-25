@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import hashlib
 import time
 from email.utils import formataddr
 from threading import Lock
@@ -138,6 +140,52 @@ def _ses_role_session_duration_seconds() -> int:
     return min(max(value, 900), 3600)
 
 
+def _int_env(name: str, default_value: int, *, min_value: int, max_value: int) -> int:
+    raw = os.environ.get(name, str(default_value)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise MailDeliveryError(
+            f"{name} must be integer",
+            safe_reason="mail_provider_not_configured",
+        ) from exc
+
+    return min(max(value, min_value), max_value)
+
+
+def _float_env(name: str, default_value: float, *, min_value: float, max_value: float) -> float:
+    raw = os.environ.get(name, str(default_value)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise MailDeliveryError(
+            f"{name} must be number",
+            safe_reason="mail_provider_not_configured",
+        ) from exc
+
+    return min(max(value, min_value), max_value)
+
+
+def _mail_delivery_max_attempts() -> int:
+    return _int_env("MAIL_DELIVERY_MAX_ATTEMPTS", 2, min_value=1, max_value=5)
+
+
+def _mail_delivery_retry_base_seconds() -> float:
+    return _float_env(
+        "MAIL_DELIVERY_RETRY_BASE_SECONDS",
+        0.5,
+        min_value=0.0,
+        max_value=10.0,
+    )
+
+
+def _fingerprint(value: str) -> str:
+    if not value:
+        return ""
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 def _require_non_empty(name: str, value: str) -> str:
     if value:
         return value
@@ -163,6 +211,8 @@ def validate_runtime_mail_configuration() -> None:
     _ses_timeout_seconds()
     _ses_role_session_name()
     _ses_role_session_duration_seconds()
+    _mail_delivery_max_attempts()
+    _mail_delivery_retry_base_seconds()
 
 
 def _build_botocore_config():
@@ -361,13 +411,62 @@ def send_otp_pin_email(
         reply_to_emails=_mail_reply_to_emails(),
         metadata={
             "flow": "otp_pin",
-            "token": token,
+            "token_hash": _fingerprint(token),
             "delivery_id": delivery_id,
         },
     )
 
-    provider = build_runtime_mail_provider()
-    return provider.send(request)
+    max_attempts = _mail_delivery_max_attempts()
+    base_delay_seconds = _mail_delivery_retry_base_seconds()
+    last_error: MailDeliveryError | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        provider_name = _mail_provider_name()
+        try:
+            provider = build_runtime_mail_provider()
+            result = provider.send(request)
+            logging.info(
+                "ICE_REPORT_MAIL_DELIVERY_ATTEMPT result=success flow=otp_pin provider=%s attempt=%s max_attempts=%s delivery_id=%s token_hash=%s recipient_hash=%s provider_message_id=%s",
+                result.provider,
+                attempt,
+                max_attempts,
+                delivery_id,
+                _fingerprint(token),
+                _fingerprint(to_email),
+                result.provider_message_id,
+            )
+            return result
+        except MailDeliveryError as exc:
+            last_error = exc
+            should_retry = exc.retryable and attempt < max_attempts
+            logging.warning(
+                "ICE_REPORT_MAIL_DELIVERY_ATTEMPT result=failure flow=otp_pin provider=%s attempt=%s max_attempts=%s delivery_id=%s token_hash=%s recipient_hash=%s safe_reason=%s provider_error_code=%s retryable=%s will_retry=%s",
+                provider_name,
+                attempt,
+                max_attempts,
+                delivery_id,
+                _fingerprint(token),
+                _fingerprint(to_email),
+                exc.safe_reason,
+                exc.provider_error_code,
+                exc.retryable,
+                should_retry,
+            )
+
+            if not should_retry:
+                raise
+
+            delay_seconds = base_delay_seconds * (2 ** (attempt - 1))
+            if delay_seconds > 0:
+                time.sleep(delay_seconds + random.uniform(0, base_delay_seconds))
+
+    if last_error:
+        raise last_error
+
+    raise MailDeliveryError(
+        "mail delivery failed without error",
+        safe_reason="mail_provider_failed",
+    )
 
 
 validate_runtime_mail_configuration()
