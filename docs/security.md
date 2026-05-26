@@ -150,6 +150,8 @@ Slack 通知には delivery_id、顧客名、対象月、email、配布URL、GCS
 - access key 前提の手順書
 - 旧 fallback 名だけを前提にした deploy メモ
 
+棚卸し結果は `docs/env-compatibility.md` に記録します。2026-05-26 時点で本番 Cloud Run に旧 env 名は残っていませんが、Secret Manager には legacy access key secret が残っているため、明示承認後の削除候補として扱います。
+
 ## 権限方針
 
 ### GCP

@@ -45,7 +45,7 @@ Docker build は必ず `--no-cache` を使用します。
 docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${GITHUB_SHA} .
 ```
 
-詳細なリリース手順は `docs/deploy.md`、本番運用・smoke test・障害時初動・rollback は `docs/operations.md`、監視設定は `docs/monitoring.md`、セキュリティ方針は `docs/security.md` を参照してください。
+詳細なリリース手順は `docs/deploy.md`、本番運用・smoke test・障害時初動・rollback は `docs/operations.md`、監視設定は `docs/monitoring.md`、セキュリティ方針は `docs/security.md`、旧 env / access key 棚卸しは `docs/env-compatibility.md` を参照してください。
 
 ## メール送信 provider 方針
 
@@ -88,7 +88,7 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 - `MAIL_REPLY_TO_EMAILS` (optional)
 - `MAIL_SERVICE_NAME` (optional)
 
-移行互換として次の既存名も当面は fallback で読み取ります。
+移行互換として次の既存名も当面は fallback で読み取ります。ただし本番 Cloud Run の新規設定では使いません。
 
 - `MAIL_FROM_EMAIL`
 - `MAIL_FROM_NAME`
@@ -96,7 +96,7 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 - `MAIL_PROVIDER_SES_CONFIGURATION_SET`
 - `MAIL_PROVIDER_TIMEOUT_SECONDS`
 
-長期AWS access key (`AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY`) は本番経路の前提にしません。残っている場合は削除候補として扱い、切替確認後に整理してください。
+長期AWS access key (`AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY`) は本番経路の前提にしません。棚卸し結果と削除候補は `docs/env-compatibility.md` に記録します。
 
 Cloud Run では認証情報をイメージへ埋め込まず、Secret Manager から設定注入する前提です。具体的な切替手順は `docs/ses-cutover-checklist.md` を参照してください。
 
@@ -104,4 +104,4 @@ OTP 送信ログは調査用に `ICE_REPORT_MAIL_DELIVERY_ATTEMPT` / `ICE_REPORT
 
 ### 削除候補の扱い
 
-不要になった設定名や運用手順は即削除せず、確認付きのやることとして管理します。候補は `docs/ses-cutover-checklist.md` に残し、合意後に削除します。
+不要になった設定名や運用手順は即削除せず、確認付きのやることとして管理します。候補は `docs/env-compatibility.md` に残し、合意後に削除します。
