@@ -174,23 +174,28 @@ Slack 通知には delivery_id、顧客名、対象月、email、配布URL、GCS
 - SES 障害時に未検証 provider へ無断で切り替えない
 - 配布URLや Signed URL を公開チャンネルへ貼らない
 
-## 監視・アラート候補
+## 監視・アラート
 
-次タスク `Cloud Monitoring / alerting 実装` で具体化します。
+Cloud Logging の user-defined log-based metrics と Cloud Monitoring alert policies を作成済みです。詳細は `docs/monitoring.md` を参照します。
 
-critical 候補:
+critical 相当:
 
 - OTP 送信停止
 - `mail_provider_auth_failed` 継続
-- Secret 取得失敗
 - Cloud Run revision 起動失敗
 
-warning 候補:
+warning 相当:
 
 - `otp_delivery_failed` 急増
 - `otp_verify_failed` 急増
 - rate limit 急増
 - SES bounce / complaint 増加
+
+未実装:
+
+- `/api-health` uptime check
+- warning と critical の通知先分離
+- SES bounce / complaint の CloudWatch / SES 側監視連携
 
 ## 残論点
 
