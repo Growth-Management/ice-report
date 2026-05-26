@@ -222,12 +222,19 @@ gcloud run services update report-generator \
 
 ## 9. 切替後の削除候補
 
-即削除せず、切替安定後に確認付きで整理します。
+即削除せず、切替安定後に確認付きで整理します。棚卸し結果と確認コマンドは `docs/env-compatibility.md` を正とします。
 
 - `AWS_SES_ACCESS_KEY_ID`
 - `AWS_SES_SECRET_ACCESS_KEY`
 - access key 前提の手順書
 - 旧 fallback 名を前提にした deploy メモ
+
+2026-05-26 棚卸し:
+
+- 本番 Cloud Run `report-generator` に旧 env 名は残っていない
+- Secret Manager に `aws-ses-access-key-id` / `aws-ses-secret-access-key` が残存
+- この 2 Secret は現在の本番 mail runtime では使わない
+- 削除は破壊的操作のため、明示承認後に実施する
 
 ## 10. 監視メモ
 
