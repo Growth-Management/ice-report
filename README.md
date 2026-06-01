@@ -96,7 +96,7 @@ OTP / PIN 送信は provider interface 経由で切り替える前提です。
 - `MAIL_PROVIDER_SES_CONFIGURATION_SET`
 - `MAIL_PROVIDER_TIMEOUT_SECONDS`
 
-長期AWS access key (`AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY`) は本番経路の前提にしません。棚卸し結果と削除候補は `docs/env-compatibility.md` に記録します。
+長期AWS access key (`AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY`) は本番経路の前提にしません。棚卸し結果と legacy Secret Manager secret の削除実績は `docs/env-compatibility.md` に記録します。
 
 Cloud Run では認証情報をイメージへ埋め込まず、Secret Manager から設定注入する前提です。具体的な切替手順は `docs/ses-cutover-checklist.md` を参照してください。
 
