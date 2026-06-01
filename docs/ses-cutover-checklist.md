@@ -229,12 +229,11 @@ gcloud run services update report-generator \
 - access key 前提の手順書
 - 旧 fallback 名を前提にした deploy メモ
 
-2026-05-26 棚卸し:
+2026-05-26 棚卸し / 2026-06-01 削除実績:
 
 - 本番 Cloud Run `report-generator` に旧 env 名は残っていない
-- Secret Manager に `aws-ses-access-key-id` / `aws-ses-secret-access-key` が残存
 - この 2 Secret は現在の本番 mail runtime では使わない
-- 削除は破壊的操作のため、明示承認後に実施する
+- Secret Manager の `aws-ses-access-key-id` / `aws-ses-secret-access-key` は 2026-06-01 に明示承認後削除済み
 
 ## 10. 監視メモ
 

@@ -80,6 +80,7 @@ GCS ファイルは直接公開せず、認証後に短時間の Signed URL へ 
 - custom MAIL FROM: `bounce.ice-sv.jp`
 - `AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY` は本番経路の前提にしない
 - `ice-report-ops` の既存 Access Key は 2 本とも無効化済み
+- legacy Secret Manager secret `aws-ses-access-key-id` / `aws-ses-secret-access-key` は 2026-06-01 に削除済み
 
 ### Logging
 
@@ -143,14 +144,14 @@ Slack 通知には delivery_id、顧客名、対象月、email、配布URL、GCS
 - `BIGQUERY_PROJECT_ID=jumpplus-4a5f4`
 - `PUBLIC_BASE_URL`
 
-本番で削除候補として扱うもの:
+本番で使わないもの:
 
 - `AWS_SES_ACCESS_KEY_ID`
 - `AWS_SES_SECRET_ACCESS_KEY`
 - access key 前提の手順書
 - 旧 fallback 名だけを前提にした deploy メモ
 
-棚卸し結果は `docs/env-compatibility.md` に記録します。2026-05-26 時点で本番 Cloud Run に旧 env 名は残っていませんが、Secret Manager には legacy access key secret が残っているため、明示承認後の削除候補として扱います。
+棚卸し結果は `docs/env-compatibility.md` に記録します。2026-06-01 時点で本番 Cloud Run に旧 env 名は残っておらず、Secret Manager の legacy access key secret 2 件も削除済みです。
 
 ## 権限方針
 
