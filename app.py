@@ -659,7 +659,7 @@ def render_admin_ui() -> str:
       </div>
 
       <div class="faq-note">
-        追加しておくと良い項目: 運用担当者向けの「月次作成手順」、障害時の確認先、期限切れ配布の扱い、overwrite前の確認ルール、Google Drive backup後にGCS cleanupする方針。
+        月次運用では、配布作成前に対象月・顧客名・許可宛先・保存ファイル名を確認します。overwrite ONは現在versionのGCS objectを上書きするため、既存ファイルのGoogle Drive backupと承認記録がある場合だけ使います。期限切れ配布はcleanupでactive=falseにし、GCS削除はbackup後の別承認で扱います。
       </div>
     </div>
   </details>

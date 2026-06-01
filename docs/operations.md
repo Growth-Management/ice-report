@@ -68,6 +68,115 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\capture-admin-deliveries.ps
 
 生成物は `artifacts/` 配下に出ます。`artifacts/` は git 管理しません。
 
+## 月次運用
+
+月次レポート作成、配布URL発行、期限切れ整理、version追加を行うときの基準です。管理画面で操作する場合も、APIで操作する場合もこの順序を正とします。
+
+### 月次作成前確認
+
+1. 対象月を `YYYY-MM` で確定する。未指定でレポート生成すると、実行日の前月が対象月になります。
+2. 顧客名、許可メール、許可ドメインを確認する。許可宛先が空欄の場合は既定ドメインが使われます。
+3. 既存GCSファイルを使うか、BigQueryを再実行して新規生成するかを決める。
+4. 生成時の保存先は `gs://ice-report-files/reports/plus/<yymm>/...xlsx` を基本にする。
+5. 送付前に配布URL、対象月、顧客名、current version、期限、GCS URI を確認する。
+
+GCS URI を空欄にして配布作成すると、backend が BigQuery を再実行して Excel を生成し、GCS へ保存してから delivery を作成します。既に検品済みの Excel を配布する場合は、GCS URI を明示します。
+
+### 月次作成の実施
+
+管理画面では「配布作成」を使います。APIで実施する場合の最小payloadは次です。
+
+```powershell
+$base = 'https://report-generator-635067190197.asia-northeast1.run.app'
+$adminKey = & gcloud.cmd secrets versions access latest --secret=report-generator-admin-api-key --project=ice-sh
+
+Invoke-RestMethod `
+  -Uri "$base/deliveries" `
+  -Headers @{ 'X-Admin-Key' = $adminKey } `
+  -Method Post `
+  -ContentType 'application/json' `
+  -Body (@{
+    customer_name = '一ツ橋企画'
+    report_month = '2026-05'
+    gcs_uri = 'gs://ice-report-files/reports/plus/2605/example.xlsx'
+    allowed_emails = @('user@example.com')
+    allowed_domains = @('example.com')
+    version_note = 'monthly initial'
+  } | ConvertTo-Json)
+```
+
+作成後は次を確認します。
+
+- `/deliveries?limit=100` に delivery が表示される
+- `active=true`
+- `expires_at` が想定どおり
+- `current_version=1`
+- Slack 通知の delivery_id、対象月、GCS URI が操作内容と一致する
+- 配布先へ共有するURLは `public_download_url` だけにする
+
+### 期限切れ配布の扱い
+
+配布レコードの有効性は `active` と `expires_at` で判定します。期限切れ後はURLを再共有せず、必要な場合は新しい delivery を作成します。
+
+- 期限前に止める場合: delivery の停止操作で `active=false` にする
+- 期限後に整理する場合: `/internal/cleanup` で期限切れの active delivery を `active=false` にする
+- cleanup は Firestore の delivery を無効化するだけで、GCS object は削除しない
+- 誤配布や宛先ミスの場合は、cleanup を待たずに即時停止し、Notion または運用記録に理由を残す
+
+cleanup 実行例:
+
+```powershell
+$base = 'https://report-generator-635067190197.asia-northeast1.run.app'
+$adminKey = & gcloud.cmd secrets versions access latest --secret=report-generator-admin-api-key --project=ice-sh
+
+Invoke-RestMethod `
+  -Uri "$base/internal/cleanup" `
+  -Headers @{ 'X-Admin-Key' = $adminKey } `
+  -Method Post
+```
+
+cleanup 後は `updated_count`、`updated_delivery_ids`、`cleanup_at` を確認し、月次作業記録に残します。
+
+### version追加 / overwrite の確認ルール
+
+version追加は、配布URLを変えずに新しい Excel を current version にする操作です。通常は overwrite OFF を使い、既存GCS objectを残したまま新しいファイル名で保存します。
+
+overwrite OFF を標準にする場面:
+
+- 月次データの再集計や差し替え
+- 送付済みファイルの履歴をGCS上でも残したい場合
+- 変更前後を比較できる状態にしたい場合
+
+overwrite ON は現在versionのファイル名を再利用し、同じGCS object名へ保存します。bucket versioning を前提にしないため、上書き前のファイルは Google Drive backup を正とします。
+
+overwrite ON の実行前に必ず確認する項目:
+
+1. delivery_id、顧客名、対象月、current version が対象と一致する
+2. 現在versionの GCS URI と file name を確認済み
+3. 上書き前の Excel を Google Drive の管理フォルダへ backup 済み
+4. 同じファイル名を維持する理由がある
+5. version note に `overwrite`、実施理由、確認者を残す
+
+実行後は、current version が増えていること、GCS URI、ファイル更新時刻、Slack通知を確認します。利用者影響がある差し替えでは、必要に応じて許可済みメールアドレスで OTP からダウンロードまで確認します。
+
+### Google Drive backup 後の GCS cleanup 方針
+
+GCS object の削除は破壊的操作のため、通常の月次手順では実行しません。現時点の方針は次です。
+
+- active delivery の current version が参照する GCS object は削除しない
+- 期限切れ delivery でも、問い合わせ対応や再送に備えて少なくとも `expires_at` から 90 日は保持する
+- GCS削除候補にする前に、Google Drive の管理フォルダへ Excel backup を保存する
+- backup ファイル名には顧客名、対象月、delivery_id、version、元GCS URIが分かる情報を含める
+- 削除候補は Notion に記録し、明示承認後にだけ削除する
+
+削除候補の読み取り確認例:
+
+```powershell
+gcloud.cmd storage ls "gs://ice-report-files/reports/plus/<yymm>/"
+```
+
+実削除コマンドは、対象GCS URI、Drive backup URL、承認者、実施日時を記録してから個別に実行します。
+
 ## リリース手順
 
 詳細コマンドは `docs/deploy.md` を参照します。運用上の順序は次です。

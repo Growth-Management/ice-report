@@ -226,12 +226,17 @@ warning 相当:
 
 ### Archive Lifecycle Management
 
-GCS、Firestore、Slack、Notion に分散する運用記録の保持期間が未整理です。
+月次運用の baseline は `docs/operations.md` の「月次運用」を正とします。GCS、Firestore、Slack、Notion に分散する運用記録は、次の方針で扱います。
 
-追加候補:
+- active delivery の current version が参照する GCS object は削除しない
+- 期限切れ delivery は cleanup で `active=false` にし、Firestore record は即削除しない
+- GCS report object は Google Drive backup と明示承認なしに削除しない
+- 期限切れ delivery の GCS object は、少なくとも `expires_at` から 90 日保持する
+- cleanup 実行、overwrite、GCS削除は Notion または運用記録に実施者、日時、対象、理由を残す
+
+継続課題:
 
 - `security_events` の retention
 - `download_logs` の retention
-- 期限切れ delivery の扱い
-- GCS report object の削除または archive 方針
-- Google Drive backup 後の GCS cleanup 方針
+- Slack 通知履歴の保持期間
+- Google Drive backup フォルダの保持期間
