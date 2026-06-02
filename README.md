@@ -45,7 +45,7 @@ Docker build は必ず `--no-cache` を使用します。
 docker build --no-cache -t asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:${GITHUB_SHA} .
 ```
 
-詳細なリリース手順は `docs/deploy.md`、本番運用・smoke test・障害時初動・rollback は `docs/operations.md`、監視設定は `docs/monitoring.md`、セキュリティ方針は `docs/security.md`、旧 env / access key 棚卸しは `docs/env-compatibility.md` を参照してください。
+セットアップ入口は `docs/setup.md`、詳細なリリース手順は `docs/deploy.md`、本番運用・smoke test・障害時初動・rollback は `docs/operations.md`、監視設定は `docs/monitoring.md`、セキュリティ方針は `docs/security.md`、旧 env / access key 棚卸しは `docs/env-compatibility.md`、今後の整備方針は `docs/roadmap.md` を参照してください。
 
 ## メール送信 provider 方針
 

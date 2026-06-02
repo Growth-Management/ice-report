@@ -1,0 +1,93 @@
+# Roadmap
+
+ICE Report Generator の整備状況と今後の優先課題です。実装・運用の詳細は `docs/setup.md`、`docs/deploy.md`、`docs/operations.md`、`docs/security.md` を参照します。
+
+## 現在の到達点
+
+2026-06-03 時点で、次の基盤整備は完了済みです。
+
+- Cloud Run `report-generator` のdeploy手順を `docs/deploy.md` に整理
+- 本番運用、月次運用、smoke test、OTP送信停止時の一次対応、rollbackを `docs/operations.md` に整理
+- Amazon SES本番送信を Web Identity 経路に切替済み
+- SES production access、DKIM、custom MAIL FROM、送信可能状態を確認済み
+- 長期AWS access key方式を本番経路から除外
+- legacy Secret Manager secret `aws-ses-access-key-id` / `aws-ses-secret-access-key` を削除済み
+- Cloud Monitoring の log-based metrics と alert policies を作成済み
+- セキュリティ方針と残論点を `docs/security.md` に整理
+- setup / roadmap の入口を `docs/setup.md` と本ファイルに整理
+
+## 次の優先課題
+
+### 1. Admin認証の強化
+
+現状の管理APIは `ADMIN_API_KEY` と `X-Admin-Key` header で保護しています。短期運用には十分ですが、利用者単位の追跡や権限分離はできません。
+
+検討対象:
+
+- Google Login / IAP / Cloud Run IAM の導入可否
+- 人間の管理画面利用とAPI/script利用の分離
+- emergency時の break-glass 手順
+- admin key rotation runbook
+
+### 2. Admin audit log
+
+現状は download log と security event が中心で、管理操作の監査ログは十分ではありません。
+
+追加候補:
+
+- delivery 作成
+- version 追加
+- delivery disable / enable
+- cleanup 実行
+- admin key 認証失敗
+
+### 3. Retention / archive lifecycle
+
+月次運用のbaselineは `docs/operations.md` に整理済みです。今後は保持期間と削除実行ルールをより明確にします。
+
+継続課題:
+
+- `security_events` retention
+- `download_logs` retention
+- Slack 通知履歴の保持期間
+- Google Drive backup フォルダの保持期間
+- GCS object削除の承認・実行・検証テンプレート
+
+### 4. Monitoring改善
+
+現状のcritical系 alert は稼働しています。運用負荷を見ながらwarning系と外形監視を追加します。
+
+追加候補:
+
+- `/api-health` uptime check
+- warning と critical の通知先分離
+- alert threshold の実運用ノイズ調整
+- SES bounce / complaint のCloudWatch / SES側監視連携
+
+### 5. 運用確認の自動化
+
+管理画面・配布一覧・月次操作の確認は手順化済みですが、視覚確認と記録の自動化はまだ限定的です。
+
+追加候補:
+
+- headless browserでの管理画面スクリーンショット確認を標準化
+- `/deliveries`、`/download-logs`、Cloud Logging確認を1つのread-only check scriptに集約
+- deploy後のsmoke結果をNotionへ記録する補助スクリプト
+
+### 6. repo hygiene
+
+setupとroadmapは現状に合わせて整理済みです。今後は機密情報を含み得る設定ファイルとサンプル設定を分離します。
+
+追加候補:
+
+- `env.example.yaml` の整備
+- production値を含む可能性があるローカル設定ファイルの扱い見直し
+- docs内の旧env名・旧access key前提手順の定期棚卸し
+
+## 判断済み事項
+
+- 本番メール送信は SES + Web Identity を正とする
+- 長期AWS access key方式へ戻さない
+- `MAIL_PROVIDER=logging` は本番送信経路ではなく、切り分け・一時rollback用として扱う
+- docsのみの変更はCloud Run deploy不要
+- `app.py`、runtime設定、Dockerfile、requirements、テンプレート、SQL変更はdeploy対象として扱う
