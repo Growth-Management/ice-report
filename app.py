@@ -1273,6 +1273,10 @@ def list_gcs_files():
 
 @app.post("/generate")
 def generate():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
     payload = request.get_json(silent=True) or {}
 
     project_id = payload.get("project_id") or _bigquery_project_id()
