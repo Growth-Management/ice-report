@@ -250,21 +250,97 @@ overwrite ON の実行前に必ず確認する項目:
 
 ### Google Drive backup 後の GCS cleanup 方針
 
-GCS object の削除は破壊的操作のため、通常の月次手順では実行しません。現時点の方針は次です。
+GCS object の削除は破壊的操作のため、通常の月次手順では実行しません。保持期間と承認条件は `docs/security.md` の Archive Lifecycle Management を正とします。現時点の方針は次です。
 
 - active delivery の current version が参照する GCS object は削除しない
-- 期限切れ delivery でも、問い合わせ対応や再送に備えて少なくとも `expires_at` から 90 日は保持する
+- 期限切れ delivery でも、問い合わせ対応や再送に備えて `expires_at` から 180 日、かつ対象月から 13 か月の遅い方まで保持する
 - GCS削除候補にする前に、Google Drive の管理フォルダへ Excel backup を保存する
 - backup ファイル名には顧客名、対象月、delivery_id、version、元GCS URIが分かる情報を含める
 - 削除候補は Notion に記録し、明示承認後にだけ削除する
 
-削除候補の読み取り確認例:
+#### Retention review
+
+Retention review は月次運用とは分け、四半期に1回を目安に実施します。incident 対応、顧客問い合わせ、再送依頼が継続している対象は削除候補から外します。
+
+確認対象:
+
+| 対象 | 確認観点 |
+| --- | --- |
+| Firestore `deliveries` | `active=false`、`expires_at`、`current_version`、参照GCS URI |
+| Firestore `download_logs` | 作成日時、delivery_id、問い合わせ対応の有無 |
+| Firestore `security_events` | incident / abuse調査の有無、event_type |
+| Firestore `admin_audit_logs` | 管理操作監査の確認期間、target_id |
+| GCS report object | active/current参照、対象月、Drive backup有無 |
+| Slack通知 | 必要な判断記録がNotionへ転記済みか |
+| Google Drive backup | backup URL、ファイル名、対象月、delivery_id |
+
+#### GCS削除候補の確認
+
+読み取り確認例:
 
 ```powershell
 gcloud.cmd storage ls "gs://ice-report-files/reports/plus/<yymm>/"
 ```
 
-実削除コマンドは、対象GCS URI、Drive backup URL、承認者、実施日時を記録してから個別に実行します。
+delivery の参照確認:
+
+```powershell
+$base = 'https://report-generator-635067190197.asia-northeast1.run.app'
+$adminKey = & gcloud.cmd secrets versions access latest --secret=report-generator-admin-api-key --project=ice-sh
+
+Invoke-RestMethod `
+  -Uri "$base/deliveries?limit=500" `
+  -Headers @{ 'X-Admin-Key' = $adminKey } `
+  -Method Get
+```
+
+確認ルール:
+
+1. active delivery の `current_version` が参照する GCS URI は削除しない
+2. inactive delivery でも `expires_at` から 180 日未満、または対象月から 13 か月未満の場合は削除しない
+3. Google Drive backup URL が確認できない場合は削除しない
+4. Notion に削除候補を記録し、承認者の明示承認を得る
+5. 削除前後の `gcloud.cmd storage ls` 結果を記録する
+
+実削除は承認済みの単一 object に限定して実行します。wildcard や directory 相当の prefix 削除は使いません。
+
+```powershell
+gcloud.cmd storage rm "gs://ice-report-files/reports/plus/<yymm>/<file>.xlsx"
+```
+
+#### Firestore record削除候補の扱い
+
+Firestore record の削除は、GCS object 削除よりも調査影響が大きいため、現時点では原則として手動削除しません。削除が必要な場合は、対象 collection、document id、削除理由、復旧要否を Notion に記録し、個別PRで削除用scriptまたは管理コマンドを用意してから実施します。
+
+削除候補にできる最短条件:
+
+- `deliveries`: `active=false` かつ `expires_at` から 400 日経過
+- `download_logs`: `created_at` から 400 日経過
+- `security_events`: `created_at` から 400 日経過
+- `admin_audit_logs`: `created_at` から 400 日経過
+- `otp_challenges` / `download_sessions`: 期限切れから 30 日経過
+
+#### Notion削除承認テンプレート
+
+```text
+ICE Report Generator 削除承認
+
+対象種別:
+対象ID / GCS URI / collection:
+対象月:
+顧客名:
+現在の active/current 参照確認:
+保持期限を満たしている根拠:
+Drive backup URL:
+削除理由:
+影響範囲:
+復旧可能性:
+承認者:
+実施者:
+実施予定日時:
+削除後確認結果:
+関連 audit log / admin audit log:
+```
 
 ## リリース手順
 
