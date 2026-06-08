@@ -120,7 +120,7 @@ Cloud Logging に出してはいけない値:
 - `security_events` は機微情報を含む operational record として扱う
 - 読み取り権限は運用担当に限定する
 - Notion や Slack へ転記する場合は hash / event_type / delivery_id までに留める
-- retention / archive lifecycle は今後の実装課題として管理する
+- retention / archive lifecycle は下記の Archive Lifecycle Management を正とする
 
 ### Slack 通知
 
@@ -264,17 +264,39 @@ warning 相当:
 
 ### Archive Lifecycle Management
 
-月次運用の baseline は `docs/operations.md` の「月次運用」を正とします。GCS、Firestore、Slack、Notion に分散する運用記録は、次の方針で扱います。
+月次運用の baseline は `docs/operations.md` の「月次運用」を正とします。GCS、Firestore、Slack、Notion、Google Drive に分散する運用記録は、次の方針で扱います。
 
 - active delivery の current version が参照する GCS object は削除しない
 - 期限切れ delivery は cleanup で `active=false` にし、Firestore record は即削除しない
 - GCS report object は Google Drive backup と明示承認なしに削除しない
-- 期限切れ delivery の GCS object は、少なくとも `expires_at` から 90 日保持する
-- cleanup 実行、overwrite、GCS削除は Notion または運用記録に実施者、日時、対象、理由を残す
+- cleanup 実行、overwrite、GCS削除、Firestore record 削除は Notion または運用記録に実施者、日時、対象、理由を残す
+- Slack は通知経路であり、system of record にはしない。必要な判断記録は Notion または docs に転記する
 
-継続課題:
+保持期間の基準:
 
-- `security_events` の retention
-- `download_logs` の retention
-- Slack 通知履歴の保持期間
-- Google Drive backup フォルダの保持期間
+| 対象 | 保存場所 | 最短保持期間 | 削除条件 |
+| --- | --- | --- | --- |
+| active delivery | Firestore `deliveries` | active 中は削除不可 | `active=false`、問い合わせ対応期間終了、Notion承認済み |
+| inactive / expired delivery | Firestore `deliveries` | `expires_at` から 400 日 | 関連GCS objectとDrive backupの状態確認後、Notion承認済み |
+| report Excel object | GCS `gs://ice-report-files/...` | `expires_at` から 180 日、かつ対象月から 13 か月の遅い方 | active/current参照なし、Drive backup確認済み、Notion承認済み |
+| Drive backup | Google Drive 管理フォルダ | 対象月から 7 年目安 | 業務保管方針の明示承認がある場合のみ |
+| download logs | Firestore `download_logs` | 作成から 400 日 | incident / 問い合わせ対応が完了し、Notion承認済み |
+| security events | Firestore `security_events` | 作成から 400 日 | incident / abuse調査が完了し、Notion承認済み |
+| admin audit logs | Firestore `admin_audit_logs` | 作成から 400 日 | 管理操作監査の確認期間終了後、Notion承認済み |
+| OTP challenges / download sessions | Firestore `otp_challenges`, `download_sessions` | 有効期限切れから 30 日 | incident調査中でないこと |
+| Slack通知履歴 | Slack workspace | Slack workspace retention に従う | 削除判断の正本にしない |
+
+削除承認の必須項目:
+
+- 対象種別
+- 対象ID、GCS URI、collection名などの検索キー
+- 保持期限を満たしている根拠
+- Drive backup URL、またはbackup不要と判断した理由
+- active/current参照がないことの確認結果
+- 削除理由
+- 承認者
+- 実施者
+- 実施日時
+- 削除後確認結果
+
+自動削除は現時点では未実装です。削除を行う場合は `docs/operations.md` の runbook に従い、bulk delete や ad hoc script を本番に対して直接実行しません。
