@@ -48,9 +48,12 @@ Flaskをローカルで起動する場合:
 $env:FLASK_APP = 'app'
 $env:MAIL_PROVIDER = 'logging'
 $env:ADMIN_API_KEY = 'local-admin-key'
+$env:ADMIN_AUTH_FAIL_CLOSED = '1'
 $env:OTP_HASH_SECRET = 'local-otp-secret'
 python -m flask run --host 127.0.0.1 --port 8080
 ```
+
+`ADMIN_AUTH_FAIL_CLOSED=1` を設定すると、local/dev でも `ADMIN_API_KEY` 未設定時に管理 API が `401` で閉じます。本番に近い確認では必ず `ADMIN_API_KEY` を明示してください。UI表示だけを確認する一時的なlocal作業では `ADMIN_AUTH_FAIL_CLOSED` を外せますが、その状態を本番手順や運用確認の前提にしないでください。
 
 ローカル実行で BigQuery、GCS、Firestore、Secret Manager を使う場合は、`gcloud auth application-default login` と対象GCP権限が必要です。開発中の疎通だけなら、実送信を避けるため `MAIL_PROVIDER=logging` を使います。
 

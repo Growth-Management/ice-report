@@ -40,6 +40,35 @@ def _bigquery_project_id() -> str:
     )
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _is_cloud_run_runtime() -> bool:
+    return bool(
+        os.environ.get("K_SERVICE")
+        or os.environ.get("K_REVISION")
+        or os.environ.get("K_CONFIGURATION")
+    )
+
+
+def _admin_auth_fail_closed() -> bool:
+    return _is_cloud_run_runtime() or _env_flag("ADMIN_AUTH_FAIL_CLOSED")
+
+
+def _log_admin_auth_failure(reason: str) -> None:
+    _log_security_event(
+        event_type="admin_auth_failed",
+        reason=reason,
+        detail={
+            "path": request.path,
+            "method": request.method,
+            "has_admin_key_header": bool(request.headers.get("X-Admin-Key")),
+            "cloud_run": _is_cloud_run_runtime(),
+        },
+    )
+
+
 @app.route("/healthz", methods=["GET"], strict_slashes=False)
 @app.route("/healthz/", methods=["GET"], strict_slashes=False)
 def healthz():
@@ -55,12 +84,21 @@ def api_health():
 def _check_admin() -> tuple[bool, tuple | None]:
     expected = os.environ.get("ADMIN_API_KEY")
     if not expected:
+        if _admin_auth_fail_closed():
+            logging.error(
+                "ICE_REPORT_ADMIN_AUTH_NOT_CONFIGURED path=%s method=%s",
+                request.path,
+                request.method,
+            )
+            _log_admin_auth_failure("admin_key_not_configured")
+            return False, (jsonify({"error": "unauthorized"}), 401)
         return True, None
 
     provided = request.headers.get("X-Admin-Key")
-    if provided == expected:
+    if provided and hmac.compare_digest(provided, expected):
         return True, None
 
+    _log_admin_auth_failure("missing_admin_key_header" if not provided else "invalid_admin_key")
     return False, (jsonify({"error": "unauthorized"}), 401)
 
 

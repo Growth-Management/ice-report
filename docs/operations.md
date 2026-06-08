@@ -58,6 +58,65 @@ Invoke-RestMethod `
   -Method Get
 ```
 
+Admin 認証の確認ポイント:
+
+- key の値は画面共有、ログ、チャット、Notion、スクリーンショットに残さない
+- 無認証または誤った `X-Admin-Key` は `401` になる
+- 認証失敗は `admin_auth_failed` security event として記録される
+- Cloud Run runtime では `ADMIN_API_KEY` 未設定も `401` で fail closed する
+
+認証失敗イベント確認例:
+
+```powershell
+gcloud.cmd logging read `
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND textPayload:"ICE_REPORT_SECURITY_EVENT type=admin_auth_failed"' `
+  --project=ice-sh `
+  --freshness=30m `
+  --limit=20 `
+  --format='value(timestamp,textPayload)'
+```
+
+### Admin key break-glass / rotation
+
+`ADMIN_API_KEY` は通常の人間向け主認証ではなく、machine/script と break-glass 用の共有鍵として扱います。
+
+break-glass 利用条件:
+
+- IAP / Google identity / Admin UI 移行中の障害で通常経路が使えない
+- 緊急停止、cleanup、配布状態確認など、管理 API 操作が必要
+- 利用理由、実行者、実行時刻、対象 delivery_id を運用記録へ残せる
+
+利用後の必須対応:
+
+1. 実行した管理 API、対象、結果を運用記録へ残す
+2. `admin_auth_failed`、runtime error、想定外のmutationが増えていないか確認する
+3. break-glass で使った Admin key は原則 rotation する
+
+rotation 手順:
+
+```powershell
+$newAdminKey = Read-Host 'New ADMIN_API_KEY' -AsSecureString
+$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($newAdminKey)
+try {
+  $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+  $plain | gcloud.cmd secrets versions add report-generator-admin-api-key `
+    --project=ice-sh `
+    --data-file=-
+} finally {
+  if ($ptr -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+  }
+  $plain = $null
+}
+```
+
+Secret version 追加後は、通常の deploy 手順で新しい Cloud Run revision を作成し、`ADMIN_API_KEY` が新versionで読み込まれる状態にします。deploy後は次を確認します。
+
+- 無認証の管理 API が `401`
+- 新key付きの `GET /deliveries?limit=1` が `200`
+- 古いkeyが `401`
+- `admin_auth_failed` が想定外に増えていない
+
 ### 配布一覧の視覚確認
 
 headless Chrome が使える環境では、補助スクリプトで管理画面のスクリーンショットを取得します。
