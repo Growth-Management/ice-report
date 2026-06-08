@@ -63,6 +63,7 @@ Admin 認証の確認ポイント:
 - key の値は画面共有、ログ、チャット、Notion、スクリーンショットに残さない
 - 無認証または誤った `X-Admin-Key` は `401` になる
 - 認証失敗は `admin_auth_failed` security event として記録される
+- 認証失敗は `ICE_REPORT_ADMIN_AUDIT action=admin_auth result=failure` としても記録される
 - Cloud Run runtime では `ADMIN_API_KEY` 未設定も `401` で fail closed する
 
 認証失敗イベント確認例:
@@ -75,6 +76,34 @@ gcloud.cmd logging read `
   --limit=20 `
   --format='value(timestamp,textPayload)'
 ```
+
+### Admin audit log
+
+管理操作は Firestore の `admin_audit_logs` と Cloud Logging の `ICE_REPORT_ADMIN_AUDIT` に記録されます。対象は `admin_auth`、`generate_report`、`delivery_create`、`delivery_version_add`、`delivery_disable`、`delivery_enable`、`cleanup_expired_deliveries` です。
+
+Cloud Logging での確認例:
+
+```powershell
+gcloud.cmd logging read `
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND textPayload:"ICE_REPORT_ADMIN_AUDIT"' `
+  --project=ice-sh `
+  --freshness=30m `
+  --limit=20 `
+  --format='value(timestamp,textPayload)'
+```
+
+特定操作だけを見る場合:
+
+```powershell
+gcloud.cmd logging read `
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND textPayload:"ICE_REPORT_ADMIN_AUDIT action=delivery_create"' `
+  --project=ice-sh `
+  --freshness=30m `
+  --limit=20 `
+  --format='value(timestamp,textPayload)'
+```
+
+Firestore record は `action`、`result`、`target_id`、`status_code`、`reason`、`created_at` を中心に確認します。Notion や Slack へ転記する場合は、Admin key fingerprint、credential、PIN、token、生メールアドレスを含めません。
 
 ### Admin key break-glass / rotation
 
@@ -89,7 +118,7 @@ break-glass 利用条件:
 利用後の必須対応:
 
 1. 実行した管理 API、対象、結果を運用記録へ残す
-2. `admin_auth_failed`、runtime error、想定外のmutationが増えていないか確認する
+2. `admin_auth_failed`、`ICE_REPORT_ADMIN_AUDIT`、runtime error、想定外のmutationが増えていないか確認する
 3. break-glass で使った Admin key は原則 rotation する
 
 rotation 手順:
@@ -171,6 +200,7 @@ Invoke-RestMethod `
 - `expires_at` が想定どおり
 - `current_version=1`
 - Slack 通知の delivery_id、対象月、GCS URI が操作内容と一致する
+- `ICE_REPORT_ADMIN_AUDIT action=delivery_create result=success` が記録される
 - 配布先へ共有するURLは `public_download_url` だけにする
 
 ### 期限切れ配布の扱い
@@ -194,7 +224,7 @@ Invoke-RestMethod `
   -Method Post
 ```
 
-cleanup 後は `updated_count`、`updated_delivery_ids`、`cleanup_at` を確認し、月次作業記録に残します。
+cleanup 後は `updated_count`、`updated_delivery_ids`、`cleanup_at`、`ICE_REPORT_ADMIN_AUDIT action=cleanup_expired_deliveries result=success` を確認し、月次作業記録に残します。
 
 ### version追加 / overwrite の確認ルール
 
@@ -216,7 +246,7 @@ overwrite ON の実行前に必ず確認する項目:
 4. 同じファイル名を維持する理由がある
 5. version note に `overwrite`、実施理由、確認者を残す
 
-実行後は、current version が増えていること、GCS URI、ファイル更新時刻、Slack通知を確認します。利用者影響がある差し替えでは、必要に応じて許可済みメールアドレスで OTP からダウンロードまで確認します。
+実行後は、current version が増えていること、GCS URI、ファイル更新時刻、Slack通知、`ICE_REPORT_ADMIN_AUDIT action=delivery_version_add result=success` を確認します。利用者影響がある差し替えでは、必要に応じて許可済みメールアドレスで OTP からダウンロードまで確認します。
 
 ### Google Drive backup 後の GCS cleanup 方針
 
