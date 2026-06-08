@@ -57,15 +57,24 @@ def _admin_auth_fail_closed() -> bool:
 
 
 def _log_admin_auth_failure(reason: str) -> None:
+    detail = {
+        "path": request.path,
+        "method": request.method,
+        "has_admin_key_header": bool(request.headers.get("X-Admin-Key")),
+        "cloud_run": _is_cloud_run_runtime(),
+    }
     _log_security_event(
         event_type="admin_auth_failed",
         reason=reason,
-        detail={
-            "path": request.path,
-            "method": request.method,
-            "has_admin_key_header": bool(request.headers.get("X-Admin-Key")),
-            "cloud_run": _is_cloud_run_runtime(),
-        },
+        detail=detail,
+    )
+    _log_admin_audit_event(
+        action="admin_auth",
+        result="failure",
+        target_type="admin_api",
+        status_code=401,
+        reason=reason,
+        detail=detail,
     )
 
 
@@ -1324,9 +1333,23 @@ def generate():
     output_filename = payload.get("output_filename") or payload.get("file_name")
 
     if not project_id:
+        _log_admin_audit_event(
+            action="generate_report",
+            result="failure",
+            target_type="report",
+            status_code=400,
+            reason="project_required",
+        )
         return jsonify({"error": "BIGQUERY_PROJECT_ID or PROJECT_ID is required"}), 400
 
     if not bucket_name:
+        _log_admin_audit_event(
+            action="generate_report",
+            result="failure",
+            target_type="report",
+            status_code=400,
+            reason="bucket_required",
+        )
         return jsonify({"error": "BUCKET_NAME is required"}), 400
 
     today = datetime.strptime(today_text, "%Y-%m-%d").date() if today_text else None
@@ -1338,6 +1361,20 @@ def generate():
         template_path=Path(os.environ.get("TEMPLATE_PATH", str(DEFAULT_TEMPLATE))),
         today=today,
         output_filename=output_filename,
+    )
+
+    _log_admin_audit_event(
+        action="generate_report",
+        result="success",
+        target_type="report",
+        status_code=200,
+        detail={
+            "bucket_name": bucket_name,
+            "object_prefix": object_prefix,
+            "output_filename": output_filename,
+            "gcs_uri": result.get("gcs_uri"),
+            "item_count": len(result.get("items", [])) if isinstance(result.get("items"), list) else None,
+        },
     )
 
     return jsonify({"items": result["items"] if "items" in result else [result], "result": result})
@@ -1357,9 +1394,24 @@ def create_delivery():
     output_filename = payload.get("output_filename") or payload.get("file_name")
 
     if not customer_name:
+        _log_admin_audit_event(
+            action="delivery_create",
+            result="failure",
+            target_type="delivery",
+            status_code=400,
+            reason="customer_name_required",
+        )
         return jsonify({"error": "customer_name is required"}), 400
 
     if not report_month:
+        _log_admin_audit_event(
+            action="delivery_create",
+            result="failure",
+            target_type="delivery",
+            status_code=400,
+            reason="report_month_required",
+            detail={"customer_name": customer_name},
+        )
         return jsonify({"error": "report_month is required"}), 400
 
     if not gcs_uri:
@@ -1369,9 +1421,25 @@ def create_delivery():
         today_text = payload.get("today")
 
         if not project_id:
+            _log_admin_audit_event(
+                action="delivery_create",
+                result="failure",
+                target_type="delivery",
+                status_code=400,
+                reason="project_required",
+                detail={"customer_name": customer_name, "report_month": report_month},
+            )
             return jsonify({"error": "BIGQUERY_PROJECT_ID or PROJECT_ID is required"}), 400
 
         if not bucket_name:
+            _log_admin_audit_event(
+                action="delivery_create",
+                result="failure",
+                target_type="delivery",
+                status_code=400,
+                reason="bucket_required",
+                detail={"customer_name": customer_name, "report_month": report_month},
+            )
             return jsonify({"error": "BUCKET_NAME is required"}), 400
 
         today = datetime.strptime(today_text, "%Y-%m-%d").date() if today_text else None
@@ -1388,6 +1456,14 @@ def create_delivery():
         gcs_uri = generated.get("gcs_uri")
 
         if not gcs_uri:
+            _log_admin_audit_event(
+                action="delivery_create",
+                result="failure",
+                target_type="delivery",
+                status_code=500,
+                reason="gcs_uri_not_generated",
+                detail={"customer_name": customer_name, "report_month": report_month},
+            )
             return jsonify({
                 "error": "gcs_uri was not generated",
                 "generated": generated,
@@ -1406,6 +1482,27 @@ def create_delivery():
             )
         ),
         version_note=payload.get("version_note"),
+    )
+
+    _log_admin_audit_event(
+        action="delivery_create",
+        result="success",
+        target_type="delivery",
+        target_id=result.get("delivery_id", ""),
+        status_code=201,
+        detail={
+            "customer_name": customer_name,
+            "report_month": report_month,
+            "gcs_uri": gcs_uri,
+            "expires_days": int(
+                payload.get(
+                    "expires_days",
+                    os.environ.get("DEFAULT_EXPIRES_DAYS", "7")
+                )
+            ),
+            "allowed_domain_count": len(payload.get("allowed_domains") or []),
+            "allowed_email_count": len(payload.get("allowed_emails") or []),
+        },
     )
 
     return jsonify({
@@ -1458,9 +1555,25 @@ def add_version(delivery_id: str):
     overwrite = bool(payload.get("overwrite", False))
 
     if not project_id:
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=400,
+            reason="project_required",
+        )
         return jsonify({"error": "BIGQUERY_PROJECT_ID or PROJECT_ID is required"}), 400
 
     if not bucket_name:
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=400,
+            reason="bucket_required",
+        )
         return jsonify({"error": "BUCKET_NAME is required"}), 400
 
     if overwrite:
@@ -1471,6 +1584,15 @@ def add_version(delivery_id: str):
         )
 
         if not target:
+            _log_admin_audit_event(
+                action="delivery_version_add",
+                result="failure",
+                target_type="delivery",
+                target_id=delivery_id,
+                status_code=404,
+                reason="delivery_not_found",
+                detail={"overwrite": overwrite},
+            )
             return jsonify({"error": "delivery_id not found"}), 404
 
         versions = target.get("versions") or []
@@ -1481,14 +1603,41 @@ def add_version(delivery_id: str):
         )
 
         if not current:
+            _log_admin_audit_event(
+                action="delivery_version_add",
+                result="failure",
+                target_type="delivery",
+                target_id=delivery_id,
+                status_code=404,
+                reason="current_version_not_found",
+                detail={"overwrite": overwrite, "current_version": current_version},
+            )
             return jsonify({"error": "current version not found"}), 404
 
         output_filename = current.get("file_name")
 
     if not output_filename:
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=400,
+            reason="output_filename_required",
+            detail={"overwrite": overwrite},
+        )
         return jsonify({"error": "output_filename is required"}), 400
 
     if not output_filename.endswith(".xlsx"):
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=400,
+            reason="invalid_output_filename_extension",
+            detail={"overwrite": overwrite, "output_filename": output_filename},
+        )
         return jsonify({"error": "output_filename must end with .xlsx"}), 400
 
     today = datetime.strptime(today_text, "%Y-%m-%d").date() if today_text else None
@@ -1504,6 +1653,15 @@ def add_version(delivery_id: str):
 
     gcs_uri = generated.get("gcs_uri")
     if not gcs_uri:
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=500,
+            reason="gcs_uri_not_generated",
+            detail={"overwrite": overwrite, "output_filename": output_filename},
+        )
         return jsonify({
             "error": "gcs_uri was not generated",
             "generated": generated,
@@ -1517,7 +1675,32 @@ def add_version(delivery_id: str):
             make_current=bool(payload.get("make_current", True)),
         )
     except ValueError as exc:
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=404,
+            reason=str(exc),
+            detail={"overwrite": overwrite, "output_filename": output_filename},
+        )
         return jsonify({"error": str(exc)}), 404
+
+    _log_admin_audit_event(
+        action="delivery_version_add",
+        result="success",
+        target_type="delivery",
+        target_id=delivery_id,
+        status_code=201,
+        detail={
+            "version": result.get("version"),
+            "current_version": result.get("current_version"),
+            "gcs_uri": gcs_uri,
+            "output_filename": output_filename,
+            "overwrite": overwrite,
+            "make_current": bool(payload.get("make_current", True)),
+        },
+    )
 
     return jsonify({
         "items": [result],
@@ -1535,7 +1718,24 @@ def disable_delivery(delivery_id: str):
     try:
         result = set_delivery_active(delivery_id, False)
     except ValueError as exc:
+        _log_admin_audit_event(
+            action="delivery_disable",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=404,
+            reason=str(exc),
+        )
         return jsonify({"error": str(exc)}), 404
+
+    _log_admin_audit_event(
+        action="delivery_disable",
+        result="success",
+        target_type="delivery",
+        target_id=delivery_id,
+        status_code=200,
+        detail={"active": result.get("active")},
+    )
 
     return jsonify({
         "items": [result],
@@ -1552,7 +1752,24 @@ def enable_delivery(delivery_id: str):
     try:
         result = set_delivery_active(delivery_id, True)
     except ValueError as exc:
+        _log_admin_audit_event(
+            action="delivery_enable",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=404,
+            reason=str(exc),
+        )
         return jsonify({"error": str(exc)}), 404
+
+    _log_admin_audit_event(
+        action="delivery_enable",
+        result="success",
+        target_type="delivery",
+        target_id=delivery_id,
+        status_code=200,
+        detail={"active": result.get("active")},
+    )
 
     return jsonify({
         "items": [result],
@@ -1590,37 +1807,60 @@ def cleanup_expired_deliveries():
 
     collection_name = os.environ.get("DELIVERIES_COLLECTION", "deliveries")
     now = datetime.now(timezone.utc)
-    db = firestore.Client()
-    query = (
-        db.collection(collection_name)
-        .where("active", "==", True)
-        .where("expires_at", "<", now)
-    )
-
     updated = []
-    batch = db.batch()
     count = 0
 
-    for doc in query.stream():
-        ref = db.collection(collection_name).document(doc.id)
-        batch.update(
-            ref,
-            {
-                "active": False,
-                "updated_at": now,
-                "cleanup_reason": "expired",
-                "cleanup_at": now,
-            },
+    try:
+        db = firestore.Client()
+        query = (
+            db.collection(collection_name)
+            .where("active", "==", True)
+            .where("expires_at", "<", now)
         )
-        updated.append(doc.id)
-        count += 1
+        batch = db.batch()
 
-        if count % 400 == 0:
+        for doc in query.stream():
+            ref = db.collection(collection_name).document(doc.id)
+            batch.update(
+                ref,
+                {
+                    "active": False,
+                    "updated_at": now,
+                    "cleanup_reason": "expired",
+                    "cleanup_at": now,
+                },
+            )
+            updated.append(doc.id)
+            count += 1
+
+            if count % 400 == 0:
+                batch.commit()
+                batch = db.batch()
+
+        if count % 400 != 0:
             batch.commit()
-            batch = db.batch()
+    except Exception as exc:
+        _log_admin_audit_event(
+            action="cleanup_expired_deliveries",
+            result="failure",
+            target_type="delivery",
+            status_code=500,
+            reason=exc.__class__.__name__,
+            detail={"collection_name": collection_name, "updated_count": count},
+        )
+        raise
 
-    if count % 400 != 0:
-        batch.commit()
+    _log_admin_audit_event(
+        action="cleanup_expired_deliveries",
+        result="success",
+        target_type="delivery",
+        status_code=200,
+        detail={
+            "collection_name": collection_name,
+            "updated_count": count,
+            "updated_delivery_ids": updated,
+        },
+    )
 
     return jsonify({
         "status": "ok",
@@ -1942,6 +2182,56 @@ def _revoke_existing_challenges(token: str, email: str) -> int:
 
 def _security_events_collection_name() -> str:
     return os.environ.get("SECURITY_EVENTS_COLLECTION", "security_events")
+
+
+def _admin_audit_logs_collection_name() -> str:
+    return os.environ.get("ADMIN_AUDIT_LOGS_COLLECTION", "admin_audit_logs")
+
+
+def _log_admin_audit_event(
+    *,
+    action: str,
+    result: str,
+    target_type: str = "",
+    target_id: str = "",
+    status_code: int | None = None,
+    reason: str = "",
+    detail: dict | None = None,
+) -> None:
+    now = _now_utc()
+    admin_key_fingerprint = _log_fingerprint(request.headers.get("X-Admin-Key", ""))
+    record = {
+        "action": action,
+        "result": result,
+        "target_type": target_type,
+        "target_id": target_id,
+        "status_code": status_code,
+        "reason": reason,
+        "detail": detail or {},
+        "actor_type": "admin_key",
+        "admin_key_fingerprint": admin_key_fingerprint,
+        "path": request.path,
+        "method": request.method,
+        "ip": _get_client_ip(),
+        "user_agent": request.headers.get("User-Agent", ""),
+        "created_at": now,
+    }
+
+    try:
+        db = firestore.Client()
+        db.collection(_admin_audit_logs_collection_name()).document().set(record)
+    except Exception:
+        logging.exception("failed to write admin audit log")
+
+    logging.warning(
+        "ICE_REPORT_ADMIN_AUDIT action=%s result=%s target_type=%s target_id=%s status_code=%s reason=%s",
+        action,
+        result,
+        target_type,
+        target_id,
+        status_code,
+        reason,
+    )
 
 
 def _log_security_event(

@@ -81,6 +81,13 @@ python -m flask run --host 127.0.0.1 --port 8080
 - `PUBLIC_BASE_URL`
 - `BUCKET_NAME`
 
+任意設定または既定値のある主要項目:
+
+- `ADMIN_AUDIT_LOGS_COLLECTION`: default `admin_audit_logs`
+- `SECURITY_EVENTS_COLLECTION`: default `security_events`
+- `DELIVERIES_COLLECTION`: default `deliveries`
+- `DOWNLOAD_LOGS_COLLECTION`: default `download_logs`
+
 旧env名とlegacy access key secretの扱いは `docs/env-compatibility.md` を正とします。
 
 ## Build / Deploy
