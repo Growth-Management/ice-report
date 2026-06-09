@@ -64,7 +64,7 @@ function Send-CdpCommand(
     $payload = @{ id = $id; method = $method; params = $params } |
         ConvertTo-Json -Depth 20 -Compress
     $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
-    $socket.SendAsync(
+    $null = $socket.SendAsync(
         [System.ArraySegment[byte]]::new($bytes),
         [System.Net.WebSockets.WebSocketMessageType]::Text,
         $true,
@@ -111,7 +111,7 @@ try {
 
     $page = @($targets | Where-Object { $_.type -eq "page" } | Select-Object -First 1)[0]
     $ws = [System.Net.WebSockets.ClientWebSocket]::new()
-    $ws.ConnectAsync(
+    $null = $ws.ConnectAsync(
         [Uri]$page.webSocketDebuggerUrl,
         [Threading.CancellationToken]::None
     ).GetAwaiter().GetResult()
