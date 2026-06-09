@@ -490,6 +490,45 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-direct.ps1 -Profi
 - 復旧日時
 - 恒久対応要否
 
+## /api-health uptime alert 一次対応
+
+Cloud Monitoring の `ICE Report Generator - api-health uptime failure` が発火した場合は、外形監視で `/api-health` が失敗しています。利用者影響の有無を最初に切り分けます。
+
+確認順:
+
+1. `/api-health` を直接確認する
+2. Cloud Run の latest ready revision と traffic 100% revision を確認する
+3. 直近 deploy、Secret 更新、Cloud Run 環境変数変更の有無を確認する
+4. 対象 revision の ERROR log と起動失敗 log を確認する
+5. 直前の正常 revision へ rollback するか判断する
+
+確認コマンド:
+
+```powershell
+$base = 'https://report-generator-635067190197.asia-northeast1.run.app'
+Invoke-WebRequest -Uri "$base/api-health" -UseBasicParsing |
+  Select-Object StatusCode,Content
+
+gcloud.cmd run services describe report-generator `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --format='json(status.latestReadyRevisionName,status.traffic,status.url)'
+```
+
+Cloud Logging 確認:
+
+```powershell
+$revision = '<latest-ready-revision>'
+$filter = 'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND resource.labels.revision_name="' + $revision + '" AND severity>=ERROR'
+gcloud.cmd logging read $filter `
+  --project=ice-sh `
+  --freshness=30m `
+  --limit=50 `
+  --format='value(timestamp,severity,textPayload)'
+```
+
+rollback が必要な場合は `docs/deploy.md` の rollback 手順に従います。
+
 ## Critical 通知テンプレート
 
 初報:

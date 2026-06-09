@@ -198,7 +198,6 @@ warning 相当:
 
 未実装:
 
-- `/api-health` uptime check
 - warning と critical の通知先分離
 - SES bounce / complaint の CloudWatch / SES 側監視連携
 
