@@ -148,13 +148,52 @@ Secret version 追加後は、通常の deploy 手順で新しい Cloud Run revi
 
 ### 配布一覧の視覚確認
 
-headless Chrome が使える環境では、補助スクリプトで管理画面のスクリーンショットを取得します。
+headless Chrome または Edge が使える環境では、補助スクリプトで管理画面のスクリーンショットを取得します。
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File scripts\capture-admin-deliveries.ps1
 ```
 
-生成物は `artifacts/` 配下に出ます。`artifacts/` は git 管理しません。
+生成物は `artifacts/` 配下に出ます。`artifacts/` は git 管理しません。確認観点は次です。
+
+- desktop と mobile の両方で配布一覧 table が表示される
+- 横スクロールが必要な項目は `.table-wrap` 内に収まり、body 全体を押し広げない
+- 配布URLとGCS URIは長い文字列でも表示が破綻しない
+- screenshot には Admin key、PIN、生メールアドレス、token を転記しない
+
+### Read-only operational check
+
+日常確認、deploy後smoke、Notionへの結果記録補助には read-only script を使います。管理 API は `GET` のみ、Cloud Logging / Cloud Run / Cloud Monitoring は読み取りのみです。Admin key は Secret Manager から取得しますが、出力には含めません。
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-operations-readonly.ps1
+```
+
+JSONで保存する場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-operations-readonly.ps1 -AsJson |
+  Set-Content -Encoding UTF8 artifacts\operations-readonly-check.json
+```
+
+管理画面スクリーンショットも同時に取得する場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-operations-readonly.ps1 -CaptureScreenshots
+```
+
+確認対象:
+
+- `/api-health`
+- `/admin`
+- `/deliveries?limit=<n>` の無認証、誤Admin key、正Admin key
+- `/download-logs?limit=<n>` の正Admin key
+- Cloud Run latest ready revision、image、traffic
+- latest revision の ERROR logs
+- admin audit、admin auth failure、mail attempt、OTP sent の Cloud Logging count
+- `/api-health` uptime check と alert policy の存在
+
+Notion へ貼る場合は、script の `notionSummary` を使います。API応答本文、Admin key、PIN、生メールアドレス、token は貼りません。
 
 ## 月次運用
 
@@ -372,6 +411,12 @@ $admin = Invoke-WebRequest -Uri "$base/admin" -UseBasicParsing
   adminStatus = $admin.StatusCode
   adminLength = $admin.RawContentLength
 }
+```
+
+deploy後の読み取り確認は、必要に応じて read-only operational check に置き換えます。
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-operations-readonly.ps1
 ```
 
 ### OTP smoke
