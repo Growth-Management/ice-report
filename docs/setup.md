@@ -36,6 +36,13 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+ローカル設定ファイル:
+
+- `env.example.yaml` は安全なサンプルです。必要に応じて `env.yaml` へコピーして、ローカル専用の値を入れます。
+- `env.yaml`、`webhook.txt`、`.env*`、`tools.yaml`、`*_accessKeys.csv` はローカル/private設定として扱い、gitに追加しません。
+- 既存の `env.yaml` / `webhook.txt` がローカルに残っていても、そのまま作業者専用ファイルとして扱います。
+- 実値入りの `ADMIN_API_KEY`、`OTP_HASH_SECRET`、Slack webhook URL、AWS credential は、サンプルやdocsへ転記しません。
+
 基本的な構文確認:
 
 ```powershell
@@ -60,6 +67,7 @@ python -m flask run --host 127.0.0.1 --port 8080
 ## 機密情報の扱い
 
 - credential、access key、admin key、OTP secret の値をリポジトリ、ログ、チャット、Notion に残さない
+- 実値入りのローカル設定は `env.yaml` などのignore対象ファイルに置き、共有用には `env.example.yaml` のplaceholderだけを使う
 - 本番 secret は Secret Manager からCloud Runへ注入する
 - `AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY` は本番経路で使わない
 - SES本番送信は Cloud Run service account から AWS STS `AssumeRoleWithWebIdentity` を使う

@@ -5,3 +5,13 @@ output/
 *.zip
 artifacts/
 .tmp_chrome_profile/
+
+# Local/private configuration. Keep real values out of git.
+.env
+.env.*
+env.yaml
+webhook.txt
+tools.yaml
+*.local.yaml
+*.local.yml
+*_accessKeys.csv

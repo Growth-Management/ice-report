@@ -1,0 +1,3 @@
+# Local/private configuration may contain secrets. Do not render text diffs.
+env.yaml -diff
+webhook.txt -diff
