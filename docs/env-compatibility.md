@@ -133,3 +133,18 @@ $legacySecretNames = @(
 gcloud.cmd secrets list --project=ice-sh --format='value(name)' |
   Where-Object { $legacySecretNames -contains $_ }
 ```
+
+値を読まないメタデータ監査:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-secret-exposure-metadata.ps1 -AsJson
+```
+
+このscriptは次だけを確認し、secret値や `env.yaml` / `webhook.txt` の内容は出力しません。
+
+- `env.yaml` / `webhook.txt` が HEAD で追跡対象か
+- 対象pathがgit履歴に存在するか
+- Cloud Run env の名前、Secret Manager参照名、literal設定の有無
+- Secret Manager secret の存在とversion状態
+
+`env.yaml` / `webhook.txt` に有効なsecretが含まれていた可能性がある場合は、履歴削除より先にrotation/失効確認を行います。

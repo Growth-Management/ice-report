@@ -179,6 +179,24 @@ Slack 通知には delivery_id、顧客名、対象月、email、配布URL、GCS
 - SES 障害時に未検証 provider へ無断で切り替えない
 - 配布URLや Signed URL を公開チャンネルへ貼らない
 
+## Secret Exposure Response
+
+`env.yaml`、`webhook.txt`、`.env*`、access key CSV などに本番値が含まれていた可能性がある場合は、値を読んで共有するのではなく、次の順で扱います。
+
+1. 対象ファイルの内容をチャット、ログ、Notionへ転記しない
+2. `scripts/check-secret-exposure-metadata.ps1 -AsJson` で、git履歴・Cloud Run env・Secret Manager versionのメタデータだけを確認する
+3. 有効なsecretが含まれていた可能性があるものは、先にrotationまたは失効確認を行う
+4. 本番疎通を `scripts/check-operations-readonly.ps1 -AsJson` で確認する
+5. 履歴削除が必要か、rotation済みとして履歴保持を許容するかを明示判断する
+
+2026-06-11 時点の対応:
+
+- `report-generator-admin-api-key` version 1 は旧versionとして disabled
+- `report-generator-admin-api-key` version 2 は enabled
+- 無効化後の read-only operational check は PASS
+- `aws-ses-access-key-id` / `aws-ses-secret-access-key` は GCP Secret Manager 上では存在しない
+- Slack webhook URL は Slack側で旧webhookの無効化/再発行済み確認が必要
+
 ## 監視・アラート
 
 Cloud Logging の user-defined log-based metrics と Cloud Monitoring alert policies を作成済みです。詳細は `docs/monitoring.md` を参照します。
