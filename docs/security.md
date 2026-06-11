@@ -131,6 +131,14 @@ Slack 通知には delivery_id、顧客名、対象月、email、配布URL、GCS
 - 通知本文は外部共有しない
 - webhook secret の更新時は疎通確認後に旧値を無効化する
 
+webhook URL の露出疑いがある場合:
+
+- webhook URL 本文をチャット、Notion、ログ、PR本文に貼らない
+- Slack側で旧webhookを revoke / delete できる権限者が対応する
+- 新webhookを使う場合は Secret Manager に新versionとして登録し、Cloud Run はSecret名だけを参照する
+- 疎通確認後、旧webhookが利用不能であることをSlack側で確認する
+- 確認記録にはchannel名、実施日時、実施者、成功/失敗だけを残し、URL値は残さない
+
 ## 本番必須設定
 
 本番 Cloud Run で未設定を許容しないもの:
@@ -196,6 +204,14 @@ Slack 通知には delivery_id、顧客名、対象月、email、配布URL、GCS
 - 無効化後の read-only operational check は PASS
 - `aws-ses-access-key-id` / `aws-ses-secret-access-key` は GCP Secret Manager 上では存在しない
 - Slack webhook URL は Slack側で旧webhookの無効化/再発行済み確認が必要
+
+Slack webhook の確認完了条件:
+
+- 旧webhookがSlack側で revoke / delete 済み、または既に無効である
+- 新webhookが必要な場合は、Secret Manager に保存済みで、ローカルファイルやdocsに値が残っていない
+- ICE Report Generator の `SLACK_WEBHOOK_SECRET_NAME` はSecret名だけを保持している
+- テスト通知または代替確認で、運用担当channelへの通知経路が確認済み
+- Notion記録にはURL実値を含めない
 
 ## 監視・アラート
 

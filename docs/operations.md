@@ -666,6 +666,69 @@ gcloud.cmd run services update report-generator `
 
 rollback 後は `/api-health`、`/admin`、必要最小限の OTP smoke、Cloud Logging を確認します。
 
+## Slack Webhook Rotation
+
+`webhook.txt`、画面共有、ログ、PR差分などにSlack webhook URLが含まれていた可能性がある場合の手順です。URL値はこの手順中でも記録しません。
+
+### 1. 事前確認
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-secret-exposure-metadata.ps1 -AsJson
+```
+
+確認観点:
+
+- `SLACK_WEBHOOK_SECRET_NAME` はSecret名だけで、URL実値ではない
+- `slack-download-webhook-url` が対象projectのSecret Managerに存在するか
+- `webhook.txt` はgit管理対象から外れているか
+
+### 2. Slack側の旧webhook無効化
+
+Slack app / Incoming Webhooks の管理画面で、露出疑いのある旧webhookを revoke または delete します。
+
+記録する内容:
+
+- 実施日時
+- 実施者
+- 対象channel名
+- 旧webhookの状態: revoked / deleted / already inactive
+
+記録しない内容:
+
+- webhook URL実値
+- token断片
+- secret payload
+
+### 3. 新webhookが必要な場合
+
+Secret Manager に新しい値を登録します。値は標準入力または一時ファイルから渡し、コマンド履歴に残しません。
+
+```powershell
+# URL実値は貼り付け後に表示・保存しない
+$secure = Read-Host 'New Slack webhook URL' -AsSecureString
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try {
+  $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  $plain | gcloud.cmd secrets versions add slack-download-webhook-url `
+    --project=ice-sh `
+    --data-file=-
+} finally {
+  if ($bstr -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  }
+  $plain = $null
+}
+```
+
+Cloud Run では `SLACK_WEBHOOK_SECRET_NAME=slack-download-webhook-url` のようにSecret名だけを保持します。URL実値をenv literalにしません。
+
+### 4. 確認
+
+- Secret Manager のversion状態を確認する
+- 必要に応じてCloud Runをredeployし、latest secretを読み込ませる
+- delivery作成やversion追加など、最小の安全な操作で通知経路を確認する
+- 確認後、NotionへURL実値なしで結果を記録する
+
 ## セキュリティ注意
 
 - Access Key、Secret、Admin Key、PIN、token、生メールアドレスをログやチケットに残さない
