@@ -239,7 +239,7 @@ warning 相当:
 
 ### Google Login for Admin
 
-現状の admin 認証は `ADMIN_API_KEY` です。次段階では Google Login / IAP / Cloud Run IAM などの導入可否を検討します。
+現状の admin 認証は `ADMIN_API_KEY` です。短期は API key hardening を継続し、中期は人間向け Admin UI を Admin 専用 Cloud Run service へ分離して IAP で保護する方針です。
 
 確認観点:
 
@@ -250,8 +250,27 @@ warning 相当:
 短期方針:
 
 - `ADMIN_API_KEY` は machine/script と break-glass 用に継続する
-- 人間向け Admin UI の主認証は中期的に Admin 専用 service + IAP を第一候補にする
+- `ADMIN_AUTH_FAIL_CLOSED=1` または Cloud Run runtime では Admin API を fail closed する
+- 認証失敗は `admin_auth_failed` security event と `ICE_REPORT_ADMIN_AUDIT action=admin_auth result=failure` に記録する
 - break-glass 利用後は Admin key rotation を原則とし、手順は `docs/operations.md` を正とする
+
+中期方針:
+
+- Admin UI は `report-generator-admin` のような Admin 専用 Cloud Run service に分離する
+- public service は `/d/*`、OTP、`/api-health` など利用者向け経路を維持し、IAPの影響範囲から外す
+- Admin専用serviceは Cloud Run direct IAP を第一候補にする
+- IAP service agent に `roles/run.invoker` を付与し、管理者user/groupへ `roles/iap.httpsResourceAccessor` を付与する
+- script/API向けには `X-Admin-Key` を break-glass / machine 経路として残す
+
+非採用:
+
+- 現行単一service全体へIAPを直接適用する案は、public download / OTP 経路へ影響するため採用しない
+- 長期AWS access key方式への復帰、旧fallback env名を前提にした復旧手順は採用しない
+
+参考:
+
+- Google Cloud: `Configure IAP for Cloud Run` https://docs.cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run
+- Google Cloud: `Enable IAP for Cloud Run` https://docs.cloud.google.com/iap/docs/enabling-cloud-run
 
 ### Admin Audit Logs
 

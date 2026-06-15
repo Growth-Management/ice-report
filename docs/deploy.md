@@ -126,3 +126,59 @@ gcloud.cmd run services update-traffic report-generator `
 ```
 
 rollback 後は `/api-health`、`/admin`、Cloud Logging、必要最小限の OTP smoke を確認します。
+
+## Admin専用service + IAP 移行時
+
+通常の `report-generator` はpublic download、OTP、healthを含む利用者向けserviceとして維持します。人間向けAdmin UIをIAP化する場合は、別service `report-generator-admin` を作成して影響範囲を分離します。
+
+前提:
+
+- Cloud Run direct IAPを使う
+- IAP APIが有効
+- Admin専用serviceは `--no-allow-unauthenticated` と `--iap` でdeployする
+- IAP service agent `service-<PROJECT_NUMBER>@gcp-sa-iap.iam.gserviceaccount.com` に `roles/run.invoker` を付与する
+- 管理者user/groupに `roles/iap.httpsResourceAccessor` を付与する
+- public service全体へIAPを直接適用しない
+
+検証用deploy例:
+
+```powershell
+$sha = (git rev-parse HEAD).Trim()
+$image = "asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator:$sha"
+
+gcloud.cmd run deploy report-generator-admin `
+  --image $image `
+  --region asia-northeast1 `
+  --project ice-sh `
+  --memory 2Gi `
+  --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com `
+  --no-allow-unauthenticated `
+  --iap `
+  --impersonate-service-account=ice-deployer@ice-sh.iam.gserviceaccount.com `
+  --quiet
+```
+
+IAP service agentのInvoker付与例:
+
+```powershell
+$projectNumber = gcloud.cmd projects describe ice-sh --format='value(projectNumber)'
+gcloud.cmd run services add-iam-policy-binding report-generator-admin `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --member="serviceAccount:service-$projectNumber@gcp-sa-iap.iam.gserviceaccount.com" `
+  --role=roles/run.invoker
+```
+
+smoke:
+
+- 許可済みuserで Admin UI に到達できる
+- 未許可userまたは未ログインでは Admin UI に到達できない
+- public service の `/api-health` が `200`
+- public service の `/d/*` と OTP flow がIAPの影響を受けない
+- `X-Admin-Key` を使うscript/API経路が必要範囲で継続する
+
+rollback:
+
+- `report-generator-admin` の直前正常revisionへtrafficを戻す
+- IAP policy変更が原因なら、Admin専用serviceのIAP policyだけを戻す
+- public service `report-generator` へIAP設定を広げていないことを確認する
