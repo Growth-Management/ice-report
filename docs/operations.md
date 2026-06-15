@@ -146,6 +146,30 @@ Secret version 追加後は、通常の deploy 手順で新しい Cloud Run revi
 - 古いkeyが `401`
 - `admin_auth_failed` が想定外に増えていない
 
+### Admin UI 中期移行方針
+
+人間向け Admin UI は、中期的に Admin 専用 Cloud Run service + IAP へ分離します。
+
+通常運用:
+
+- 人間の管理画面利用は Admin 専用service + IAP を主経路にする
+- script/API利用、障害時break-glass、migration中の緊急操作は `X-Admin-Key` を継続する
+- `ADMIN_API_KEY` はSecret Managerで管理し、利用後はrotationを原則とする
+
+IAP移行時の確認:
+
+1. public service の `/api-health`、`/d/*`、OTP request / verify がIAP影響を受けない
+2. Admin専用serviceの `/admin` はIAP許可user/groupだけが到達できる
+3. IAP service agent に `roles/run.invoker` が付与されている
+4. 管理者user/group に `roles/iap.httpsResourceAccessor` が付与されている
+5. `X-Admin-Key` 付きのscript/API経路が必要範囲で継続する
+
+IAP移行rollback:
+
+- Admin専用serviceのtrafficを直前の正常revisionへ戻す
+- IAP設定に問題がある場合はAdmin専用service側だけで切り戻し、public serviceへ影響を広げない
+- 緊急操作が必要な場合はbreak-glassとして `X-Admin-Key` を使い、操作後にAdmin key rotationを行う
+
 ### 配布一覧の視覚確認
 
 headless Chrome または Edge が使える環境では、補助スクリプトで管理画面のスクリーンショットを取得します。

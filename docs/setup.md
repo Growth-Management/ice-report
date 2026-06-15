@@ -98,6 +98,17 @@ python -m flask run --host 127.0.0.1 --port 8080
 
 旧env名とlegacy access key secretの扱いは `docs/env-compatibility.md` を正とします。
 
+## Admin認証 local/dev
+
+local/devでも本番に近い確認を行う場合は、次を明示します。
+
+- `ADMIN_API_KEY`
+- `ADMIN_AUTH_FAIL_CLOSED=1`
+
+`ADMIN_AUTH_FAIL_CLOSED=1` では、`ADMIN_API_KEY` 未設定時に管理APIが `401` で閉じます。UI表示だけの一時確認でfail-openにする場合でも、その状態を本番手順、smoke、運用確認の前提にしません。
+
+中期的なAdmin UIの主経路は Admin専用 Cloud Run service + IAP です。IAP検証ではGoogle Cloud公式の Cloud Run direct IAP 手順を確認し、public download / OTP 経路に影響しない別serviceで行います。
+
 ## Build / Deploy
 
 本番deployは `docs/deploy.md` の手順に従います。要点は次です。
