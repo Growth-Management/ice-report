@@ -133,3 +133,36 @@ $legacySecretNames = @(
 gcloud.cmd secrets list --project=ice-sh --format='value(name)' |
   Where-Object { $legacySecretNames -contains $_ }
 ```
+
+値を読まないメタデータ監査:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-secret-exposure-metadata.ps1 -AsJson
+```
+
+このscriptは次だけを確認し、secret値や `env.yaml` / `webhook.txt` の内容は出力しません。
+
+- `env.yaml` / `webhook.txt` が HEAD で追跡対象か
+- 対象pathがgit履歴に存在するか
+- Cloud Run env の名前、Secret Manager参照名、literal設定の有無
+- Secret Manager secret の存在とversion状態
+
+`env.yaml` / `webhook.txt` に有効なsecretが含まれていた可能性がある場合は、履歴削除より先にrotation/失効確認を行います。
+
+## 定期棚卸しルール
+
+旧 env 名、長期 access key 前提、旧 fallback 名、古い rollback 記述の棚卸しは月1回を目安に実施します。
+
+実行コマンド:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-doc-legacy-references.ps1 -AsJson
+```
+
+確認ルール:
+
+- `docs/env-compatibility.md`、`docs/security.md`、`docs/ses-cutover-checklist.md`、`docs/roadmap.md`、`README.md` は旧名や非採用方式を説明するための許容場所とする
+- `docs/deploy.md`、`docs/operations.md`、`docs/setup.md` に旧 env 名や access key 前提の実行手順が出た場合は原則修正対象とする
+- `MAIL_PROVIDER=logging` は本番送信経路ではなく、切り分け・一時 rollback 用としてのみ許容する
+- `rollback` という語自体は許容するが、access key方式へ戻す記述や旧 fallback 名だけを前提にした復旧手順は許容しない
+- 棚卸し結果はNotionに件数、想定内/想定外、対応有無を記録し、secret値やローカルファイル内容は転記しない
