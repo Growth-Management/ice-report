@@ -180,6 +180,29 @@ smoke:
 
 rollback:
 
+Admin dedicated service cutover / rollback quick reference:
+
+- Keep public service `report-generator` untouched for Admin-only cutover and
+  rollback.
+- Before cutover, run `scripts\check-admin-iap-readonly.ps1` and complete
+  allowed-user browser smoke on `report-generator-admin`.
+- For traffic rollback, use:
+
+```powershell
+gcloud.cmd run services update-traffic report-generator-admin `
+  --project ice-sh `
+  --region asia-northeast1 `
+  --to-revisions=<PREVIOUS_GOOD_REVISION>=100
+```
+
+- For IAP policy rollback, restore
+  `user:sinohara@impress.co.jp` with `roles/iap.httpsResourceAccessor` on
+  `report-generator-admin`, then remove the faulty group binding if needed.
+- Do not grant `roles/run.invoker` directly to users or groups. Keep Cloud Run
+  invoker limited to the IAP service agent.
+- Full procedure: `docs/operations.md` section
+  `Admin dedicated service cutover / rollback`.
+
 - `report-generator-admin` の直前正常revisionへtrafficを戻す
 - IAP policy変更が原因なら、Admin専用serviceのIAP policyだけを戻す
 - public service `report-generator` へIAP設定を広げていないことを確認する
