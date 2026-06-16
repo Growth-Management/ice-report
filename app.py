@@ -61,6 +61,8 @@ def _log_admin_auth_failure(reason: str) -> None:
         "path": request.path,
         "method": request.method,
         "has_admin_key_header": bool(request.headers.get("X-Admin-Key")),
+        "has_iap_user_email_header": bool(request.headers.get("X-Goog-Authenticated-User-Email")),
+        "iap_auth_enabled": _admin_iap_auth_enabled(),
         "cloud_run": _is_cloud_run_runtime(),
     }
     _log_security_event(
@@ -91,9 +93,24 @@ def api_health():
 
 
 def _check_admin() -> tuple[bool, tuple | None]:
+    iap_auth = _check_admin_iap()
+    if iap_auth:
+        return True, None
+
     expected = os.environ.get("ADMIN_API_KEY")
     if not expected:
         if _admin_auth_fail_closed():
+            if _admin_iap_auth_enabled():
+                reason = _admin_iap_auth_failure_reason()
+                logging.warning(
+                    "ICE_REPORT_ADMIN_IAP_AUTH_FAILED path=%s method=%s reason=%s",
+                    request.path,
+                    request.method,
+                    reason,
+                )
+                _log_admin_auth_failure(reason)
+                return False, (jsonify({"error": "unauthorized"}), 401)
+
             logging.error(
                 "ICE_REPORT_ADMIN_AUTH_NOT_CONFIGURED path=%s method=%s",
                 request.path,
@@ -109,6 +126,56 @@ def _check_admin() -> tuple[bool, tuple | None]:
 
     _log_admin_auth_failure("missing_admin_key_header" if not provided else "invalid_admin_key")
     return False, (jsonify({"error": "unauthorized"}), 401)
+
+
+def _admin_iap_allowed_emails() -> set[str]:
+    raw = os.environ.get("ADMIN_IAP_ALLOWED_EMAILS", "")
+    return {
+        _normalize_email(item)
+        for item in raw.replace(";", ",").split(",")
+        if _normalize_email(item)
+    }
+
+
+def _admin_iap_auth_enabled() -> bool:
+    if not _env_flag("ADMIN_IAP_AUTH_ENABLED"):
+        return False
+
+    if not _admin_iap_allowed_emails():
+        return False
+
+    current_service = os.environ.get("K_SERVICE", "").strip()
+    expected_service = os.environ.get("ADMIN_IAP_SERVICE_NAME", "").strip() or "report-generator-admin"
+    if not current_service:
+        return False
+
+    return current_service == expected_service
+
+
+def _request_iap_email() -> str:
+    raw = request.headers.get("X-Goog-Authenticated-User-Email", "")
+    if ":" in raw:
+        raw = raw.split(":", 1)[1]
+    return _normalize_email(raw)
+
+
+def _check_admin_iap() -> bool:
+    if not _admin_iap_auth_enabled():
+        return False
+
+    email = _request_iap_email()
+    return bool(email and email in _admin_iap_allowed_emails())
+
+
+def _admin_iap_auth_failure_reason() -> str:
+    if not request.headers.get("X-Goog-Authenticated-User-Email"):
+        return "iap_user_email_header_missing"
+
+    email = _request_iap_email()
+    if not email:
+        return "iap_user_email_invalid"
+
+    return "iap_user_email_not_allowed"
 
 
 def render_admin_ui() -> str:
@@ -1913,6 +1980,23 @@ def _log_fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
+def _admin_actor_context() -> dict:
+    if _admin_iap_auth_enabled():
+        email = _request_iap_email()
+        if email:
+            return {
+                "actor_type": "iap_user" if email in _admin_iap_allowed_emails() else "iap_user_denied",
+                "admin_key_fingerprint": "",
+                "iap_email_hash": _log_fingerprint(email),
+            }
+
+    return {
+        "actor_type": "admin_key",
+        "admin_key_fingerprint": _log_fingerprint(request.headers.get("X-Admin-Key", "")),
+        "iap_email_hash": "",
+    }
+
+
 def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
@@ -2199,7 +2283,7 @@ def _log_admin_audit_event(
     detail: dict | None = None,
 ) -> None:
     now = _now_utc()
-    admin_key_fingerprint = _log_fingerprint(request.headers.get("X-Admin-Key", ""))
+    actor = _admin_actor_context()
     record = {
         "action": action,
         "result": result,
@@ -2208,8 +2292,9 @@ def _log_admin_audit_event(
         "status_code": status_code,
         "reason": reason,
         "detail": detail or {},
-        "actor_type": "admin_key",
-        "admin_key_fingerprint": admin_key_fingerprint,
+        "actor_type": actor["actor_type"],
+        "admin_key_fingerprint": actor["admin_key_fingerprint"],
+        "iap_email_hash": actor["iap_email_hash"],
         "path": request.path,
         "method": request.method,
         "ip": _get_client_ip(),
