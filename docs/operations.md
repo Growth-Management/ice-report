@@ -781,6 +781,158 @@ Admin専用serviceで人間向け管理操作をIAPログインに寄せる場�
 4. public serviceの `/api-health`、`/d/*`、OTP flowに影響がない
 5. `X-Admin-Key` 経路はscript/APIまたはbreak-glass用として必要範囲で継続する
 
+## Admin dedicated service cutover / rollback
+
+This procedure is for `report-generator-admin` only. The public `report-generator`
+service remains the user-facing service for download, OTP, and public health
+checks.
+
+### Cutover baseline
+
+Before changing traffic, IAP policy, or Admin allowlist settings, record these
+values in the task log:
+
+- source PR, commit SHA, image tag, and Cloud Run revision
+- latest ready revision and previous ready revision for `report-generator-admin`
+- IAP IAM policy for `report-generator-admin`
+- Cloud Run IAM policy for `report-generator-admin`
+- output from `scripts\check-admin-iap-readonly.ps1`
+- allowed-user browser smoke result for Admin UI, delivery create, version add,
+  disable/enable, and download log views
+- public service `/api-health` and `/admin` status
+
+Baseline commands:
+
+```powershell
+gcloud.cmd run revisions list `
+  --service report-generator-admin `
+  --project ice-sh `
+  --region asia-northeast1 `
+  --format='table(metadata.name,status.conditions[0].status,status.conditions[0].type,metadata.creationTimestamp)'
+
+gcloud.cmd run services describe report-generator-admin `
+  --project ice-sh `
+  --region asia-northeast1 `
+  --format='value(status.latestReadyRevisionName)'
+
+gcloud.cmd iap web get-iam-policy `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --resource-type=cloud-run `
+  --service=report-generator-admin
+
+gcloud.cmd run services get-iam-policy report-generator-admin `
+  --project ice-sh `
+  --region asia-northeast1
+```
+
+Current known baseline:
+
+- current good revision: `report-generator-admin-00002-59c`
+- previous ready revision: `report-generator-admin-00001-jvk`
+
+`report-generator-admin-00001-jvk` was created during early IAP validation. It
+may not contain all production runtime env and secret settings. If traffic is
+rolled back to this revision and Admin API operations fail closed, use the public
+service `X-Admin-Key` break-glass path for urgent operations.
+
+### Traffic rollback
+
+Move all Admin service traffic to the last known good revision:
+
+```powershell
+gcloud.cmd run services update-traffic report-generator-admin `
+  --project ice-sh `
+  --region asia-northeast1 `
+  --to-revisions=<PREVIOUS_GOOD_REVISION>=100
+```
+
+Restore traffic to the latest ready revision after verification:
+
+```powershell
+gcloud.cmd run services update-traffic report-generator-admin `
+  --project ice-sh `
+  --region asia-northeast1 `
+  --to-latest
+```
+
+Do not update traffic for the public `report-generator` service as part of an
+Admin-only rollback unless a separate public-service incident requires it.
+
+### IAP policy rollback
+
+If group-based IAP access causes an outage, restore the personal break-glass
+accessor first:
+
+```powershell
+gcloud.cmd iap web add-iam-policy-binding `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --resource-type=cloud-run `
+  --service=report-generator-admin `
+  --member=user:sinohara@impress.co.jp `
+  --role=roles/iap.httpsResourceAccessor
+```
+
+After the personal accessor is confirmed, remove the faulty group binding if
+needed:
+
+```powershell
+gcloud.cmd iap web remove-iam-policy-binding `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --resource-type=cloud-run `
+  --service=report-generator-admin `
+  --member=group:<GROUP_EMAIL_ADDRESS> `
+  --role=roles/iap.httpsResourceAccessor
+```
+
+Do not grant `roles/run.invoker` directly to users or groups. The Admin service
+Cloud Run invoker binding remains limited to the IAP service agent:
+`service-635067190197@gcp-sa-iap.iam.gserviceaccount.com`.
+
+### Admin allowlist rollback
+
+If a valid IAP login reaches the service but receives Admin `401`, check
+`ADMIN_IAP_ALLOWED_EMAILS` on `report-generator-admin`. Roll back by either
+redeploying the Admin service with the correct actual user emails or moving
+traffic back to the previous known good Admin revision.
+
+Do not set `ADMIN_IAP_AUTH_ENABLED` on the public `report-generator` service. If
+that setting is accidentally deployed to public service, roll back public service
+traffic immediately and verify `/api-health`, `/admin`, and the OTP/download
+flow.
+
+### Break-glass operation
+
+Use the public service `X-Admin-Key` path only when IAP, Google login, or the
+Admin service is unavailable and urgent Admin operations cannot wait for normal
+rollback.
+
+Before use, record the target, reason, operator, and expected time window in the
+Notion task. After use, check Admin audit logs, Admin auth failure logs, runtime
+errors, and rotate the Admin key by default.
+
+### Rollback verification
+
+After traffic or policy rollback, run:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-admin-iap-readonly.ps1
+```
+
+The expected result is:
+
+- Admin no-auth `/admin` returns an IAP-generated `302` to Google login
+- public `/api-health` returns `200`
+- public `/admin` returns `200`
+- Admin service latest revision has no new runtime `ERROR` logs
+- IAP accessor policy contains the intended user or group
+- Cloud Run invoker policy remains limited to the IAP service agent
+
+Record the rollback reason, target revision, policy changes, command result, and
+human smoke result in the Notion task.
+
 ## Admin IAP Read-Only Smoke
 
 Admin専用service + IAP の設定確認には、secret値を読まない read-only script を使います。
