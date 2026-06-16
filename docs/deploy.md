@@ -152,6 +152,7 @@ gcloud.cmd run deploy report-generator-admin `
   --project ice-sh `
   --memory 2Gi `
   --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com `
+  --set-env-vars ADMIN_IAP_AUTH_ENABLED=1,ADMIN_IAP_ALLOWED_EMAILS=sinohara@impress.co.jp,ADMIN_IAP_SERVICE_NAME=report-generator-admin `
   --no-allow-unauthenticated `
   --iap `
   --impersonate-service-account=ice-deployer@ice-sh.iam.gserviceaccount.com `

@@ -352,3 +352,15 @@ warning 相当:
 - 削除後確認結果
 
 自動削除は現時点では未実装です。削除を行う場合は `docs/operations.md` の runbook に従い、bulk delete や ad hoc script を本番に対して直接実行しません。
+
+## Admin IAP user auth addendum
+
+Admin専用serviceでは、`ADMIN_IAP_AUTH_ENABLED=1` と `ADMIN_IAP_ALLOWED_EMAILS` を設定した場合に限り、IAPが付与する `X-Goog-Authenticated-User-Email` を管理API認証に使えます。
+
+安全条件:
+
+- `ADMIN_IAP_SERVICE_NAME` のdefaultは `report-generator-admin`
+- public service `report-generator` には `ADMIN_IAP_AUTH_ENABLED` を設定しない
+- 許可メールは `ADMIN_IAP_ALLOWED_EMAILS` で明示する
+- 監査ログには生メールを保存せず、`iap_email_hash` のみ保存する
+- `ADMIN_API_KEY` はmachine/scriptとbreak-glass用として継続する
