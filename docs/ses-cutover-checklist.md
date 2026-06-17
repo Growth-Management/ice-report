@@ -194,3 +194,40 @@ warning 候補:
 - `otp_delivery_failed` 急増
 - `otp_verify_failed` 急増
 - rate limit 急増
+- SES bounce / complaint reputation warning
+
+## 11. SES bounce / complaint monitoring
+
+2026-06-18 JSTにAWS側CloudWatch alarmを設定済みです。
+
+### Current setup
+
+| 項目 | 値 |
+| --- | --- |
+| AWS account | `855532282119` |
+| Region | `ap-northeast-1` |
+| SES identity | `ice-sv.jp` |
+| Custom MAIL FROM | `bounce.ice-sv.jp` |
+| SNS topic | `arn:aws:sns:ap-northeast-1:855532282119:ice-report-ses-reputation-alerts` |
+| Notification endpoint | `info-ice-gm@impress.co.jp` |
+
+### Alarms
+
+| Alarm | Metric | Threshold | Period | EvaluationPeriods | TreatMissingData |
+| --- | --- | ---: | ---: | ---: | --- |
+| `ice-report-ses-bounce-rate-warning` | `AWS/SES` `Reputation.BounceRate` | `0.02` | `300` | `1` | `notBreaching` |
+| `ice-report-ses-complaint-rate-warning` | `AWS/SES` `Reputation.ComplaintRate` | `0.001` | `300` | `1` | `notBreaching` |
+
+Alarm ARNs:
+
+- `arn:aws:cloudwatch:ap-northeast-1:855532282119:alarm:ice-report-ses-bounce-rate-warning`
+- `arn:aws:cloudwatch:ap-northeast-1:855532282119:alarm:ice-report-ses-complaint-rate-warning`
+
+### Notes
+
+- Alarm作成後の初期状態は `INSUFFICIENT_DATA`。
+- Missing dataは `notBreaching` として扱う。
+- Cloud Run callback endpointは追加しない。
+- SES configuration set event publishingは初期非採用。
+- docs-only更新のためCloud Run deployは不要。
+- Notion / Slack / docsへ raw recipient email、provider event payload、message body、credential、PIN、tokenを転記しない。
