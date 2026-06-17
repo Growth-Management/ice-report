@@ -153,6 +153,54 @@ warning候補:
 
 ## SES Bounce / Complaint
 
+### Operating decision
+
+Use AWS-side monitoring for SES bounce and complaint events. Do not add a
+public Cloud Run endpoint to receive SES callbacks.
+
+Decision:
+
+- Primary path: SES identity or configuration set notifications to Amazon SNS,
+  or SES event publishing to an AWS-native destination.
+- Warning path: CloudWatch reputation or event metrics, if the AWS operations
+  side adopts CloudWatch alarms.
+- Out of scope for Cloud Run: inbound bounce / complaint webhook endpoint.
+- Out of scope for Notion/Slack records: raw recipient email, message payload,
+  MIME content, or provider event JSON with personal data.
+
+Required AWS-side information before implementation:
+
+- SES region: `ap-northeast-1`
+- SES account: `855532282119`
+- Sending identity: `ice-sv.jp`
+- Custom MAIL FROM: `bounce.ice-sv.jp`
+- Configuration set name, if event publishing is used
+- SNS topic ARN or CloudWatch alarm names
+- Notification destination and owner
+- Whether email feedback forwarding remains enabled or is replaced by SNS /
+  event publishing
+
+Recommended first implementation:
+
+1. Confirm whether SES identity-level feedback notifications or configuration
+   set event publishing will be the source of truth.
+2. If using SNS, create or select a topic for bounce / complaint events and
+   subscribe the operational notification destination.
+3. If using event publishing, ensure the SES configuration set is applied by
+   `AWS_SES_CONFIGURATION_SET` and is present on all OTP send requests.
+4. If using CloudWatch alarms, keep alarm thresholds as warning-level signals
+   until live volume and noise are known.
+5. Record event counts only. Use recipient hashes or aggregate counts when
+   transferring details to Notion or chat tools.
+6. Add the selected topic/alarm names to this document after AWS-side setup.
+
+Official references:
+
+- AWS SES event notifications:
+  https://docs.aws.amazon.com/ses/latest/dg/monitor-sending-activity-using-notifications.html
+- AWS SES sender reputation monitoring:
+  https://docs.aws.amazon.com/ses/latest/dg/monitor-sender-reputation.html
+
 SES bounce / complaint は採用候補ですが、現時点では ICE Report Generator 側の実装対象外です。
 
 採用方針:
