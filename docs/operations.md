@@ -559,6 +559,95 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-direct.ps1 -Profi
 - 復旧日時
 - 恒久対応要否
 
+## SES bounce / complaint warning response
+
+SES bounce / complaint is an AWS-side warning signal. Do not add a Cloud Run
+callback endpoint for SES notifications.
+
+### 1. Initial triage
+
+Confirm these items before changing runtime configuration:
+
+- whether the event is bounce, complaint, or sender reputation warning
+- affected time window
+- affected SES identity: `ice-sv.jp`
+- affected custom MAIL FROM: `bounce.ice-sv.jp`
+- whether OTP delivery failures or `mail_provider_auth_failed` increased at the
+  same time
+- whether SES account status remains healthy
+
+Cloud Logging check:
+
+```powershell
+gcloud.cmd logging read `
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="report-generator" AND (textPayload:"ICE_REPORT_MAIL_DELIVERY_ATTEMPT" OR textPayload:"ICE_REPORT_SECURITY_EVENT type=otp_delivery_failed" OR textPayload:"mail_provider_auth_failed")' `
+  --project=ice-sh `
+  --freshness=120m `
+  --limit=100 `
+  --format='value(timestamp,textPayload)'
+```
+
+SES account / identity check:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-web-identity.ps1
+```
+
+If a direct AWS profile is explicitly prepared for read-only confirmation:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-direct.ps1 -Profile ice-report-ops
+```
+
+Do not recreate persistent AWS credentials only for routine investigation.
+
+### 2. Severity decision
+
+Treat as warning when:
+
+- bounce / complaint count increased, but OTP delivery and `/api-health` remain
+  normal
+- SES account remains `HEALTHY`
+- sending is still enabled
+
+Escalate to critical OTP delivery incident when:
+
+- OTP delivery failures increase
+- SES account status is not healthy
+- SES sending is paused or enforcement indicates account-level risk
+- multiple recipients report no OTP arrival
+
+### 3. Containment
+
+For warning-level cases:
+
+1. Identify the affected delivery or recipient group using hashes or aggregate
+   counts only.
+2. Disable or narrow the affected delivery if a specific list is causing
+   repeated bounces.
+3. Stop any repeated manual resend that is increasing complaint risk.
+4. Keep the public download and OTP security controls unchanged.
+
+For critical cases, follow the OTP delivery incident response in this playbook.
+
+### 4. Recording rules
+
+Record these fields in Notion:
+
+- event type: bounce / complaint / reputation warning
+- detected source: SES notification / CloudWatch alarm / manual AWS console
+  check
+- time window
+- aggregate count
+- affected delivery_id, if known
+- Cloud Run revision
+- SES account / identity status
+- containment action
+- whether rollback or provider change was required
+
+Do not record raw recipient email, MIME payload, message body, provider event
+JSON, PIN, token, or AWS credential values.
+
 ## /api-health uptime alert 一次対応
 
 Cloud Monitoring の `ICE Report Generator - api-health uptime failure` が発火した場合は、外形監視で `/api-health` が失敗しています。利用者影響の有無を最初に切り分けます。

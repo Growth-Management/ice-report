@@ -248,3 +248,32 @@ warning 候補:
 - `otp_delivery_failed` 急増
 - `otp_verify_failed` 急増
 - rate limit 急増
+
+## 11. SES bounce / complaint monitoring
+
+Bounce / complaint monitoring is handled on the AWS side. Do not add a public
+Cloud Run callback endpoint for SES notification payloads.
+
+Current decision:
+
+- Use SES identity or configuration set notifications to Amazon SNS, or SES
+  event publishing to an AWS-native destination.
+- Use CloudWatch reputation or event metrics as warning-level signals if AWS
+  operations adopts CloudWatch alarms.
+- Keep Notion / chat records to aggregate counts, hashes, delivery_id, and
+  status only. Do not copy raw recipient email or provider event payloads.
+
+Before enabling this monitoring path, confirm:
+
+- SNS topic ARN or CloudWatch alarm names
+- notification destination and owner
+- whether `AWS_SES_CONFIGURATION_SET` is applied to all OTP send requests when
+  configuration set event publishing is used
+- whether email feedback forwarding remains enabled or is intentionally replaced
+  by SNS / event publishing
+
+Runbook:
+
+- Monitoring design: `docs/monitoring.md` section `SES Bounce / Complaint`
+- First response: `docs/operations.md` section
+  `SES bounce / complaint warning response`
