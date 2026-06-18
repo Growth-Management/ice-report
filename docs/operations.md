@@ -564,6 +564,17 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-direct.ps1 -Profi
 SES bounce / complaint is an AWS-side warning signal. Do not add a Cloud Run
 callback endpoint for SES notifications.
 
+### Monitoring resources
+
+| Item | Value |
+| --- | --- |
+| SNS topic | `arn:aws:sns:ap-northeast-1:855532282119:ice-report-ses-reputation-alerts` |
+| Notification owner | ICE GM department mailing list |
+| Notification endpoint | `info-ice-gm@impress.co.jp` |
+| Bounce alarm | `ice-report-ses-bounce-rate-warning` |
+| Complaint alarm | `ice-report-ses-complaint-rate-warning` |
+| Missing data handling | `notBreaching` |
+
 ### 1. Initial triage
 
 Confirm these items before changing runtime configuration:
@@ -600,6 +611,20 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-ses-direct.ps1 -Profi
 ```
 
 Do not recreate persistent AWS credentials only for routine investigation.
+
+CloudWatch alarm / SNS subscription check:
+
+```powershell
+aws cloudwatch describe-alarms `
+  --profile ice-report-ops `
+  --region ap-northeast-1 `
+  --alarm-names ice-report-ses-bounce-rate-warning ice-report-ses-complaint-rate-warning
+
+aws sns list-subscriptions-by-topic `
+  --profile ice-report-ops `
+  --region ap-northeast-1 `
+  --topic-arn arn:aws:sns:ap-northeast-1:855532282119:ice-report-ses-reputation-alerts
+```
 
 ### 2. Severity decision
 

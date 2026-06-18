@@ -37,7 +37,7 @@ $benignRegex = @(
 
 $knownBenignRefs = @(
     "docs/operations.md:523",
-    "docs/operations.md:847",
+    "docs/operations.md:872",
     "docs/setup.md:69",
     "docs/setup.md:72"
 )
