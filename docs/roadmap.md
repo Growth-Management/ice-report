@@ -101,11 +101,12 @@ critical系 alert、`/api-health` 外形監視、SES bounce / complaint warning
 - SES bounce warning alarm: `ice-report-ses-bounce-rate-warning`
 - SES complaint warning alarm: `ice-report-ses-complaint-rate-warning`
 - SES reputation warning一次対応runbook
+- Monitoring noise review: `scripts/check-monitoring-noise.ps1`
+- warning / critical 通知分離とthreshold変更条件の判断記録
 
 継続課題:
 
-- warning と critical の通知先分離
-- alert threshold の実運用ノイズ調整
+- 実運用後の通知先・threshold微調整
 
 ### 5. 運用確認の自動化
 
