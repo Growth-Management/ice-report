@@ -194,6 +194,65 @@ Recommended first implementation:
    transferring details to Notion or chat tools.
 6. Add the selected topic/alarm names to this document after AWS-side setup.
 
+### Current AWS setup
+
+Configured on 2026-06-18 JST.
+
+| Item | Value |
+| --- | --- |
+| AWS account | `855532282119` |
+| Region | `ap-northeast-1` |
+| SES identity | `ice-sv.jp` |
+| Sender | `report-noreply@ice-sv.jp` |
+| Custom MAIL FROM | `bounce.ice-sv.jp` |
+
+SNS notification:
+
+| Item | Value |
+| --- | --- |
+| SNS topic | `arn:aws:sns:ap-northeast-1:855532282119:ice-report-ses-reputation-alerts` |
+| Subscription endpoint | `info-ice-gm@impress.co.jp` |
+| Subscription status | Confirmed |
+| Owner | ICE GM department mailing list |
+
+CloudWatch alarms:
+
+| Alarm | Metric | Threshold | Period | Evaluation periods | Treat missing data | Action |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| `ice-report-ses-bounce-rate-warning` | `AWS/SES` `Reputation.BounceRate` | `0.02` | `300` | `1` | `notBreaching` | SNS topic |
+| `ice-report-ses-complaint-rate-warning` | `AWS/SES` `Reputation.ComplaintRate` | `0.001` | `300` | `1` | `notBreaching` | SNS topic |
+
+Alarm ARNs:
+
+- `arn:aws:cloudwatch:ap-northeast-1:855532282119:alarm:ice-report-ses-bounce-rate-warning`
+- `arn:aws:cloudwatch:ap-northeast-1:855532282119:alarm:ice-report-ses-complaint-rate-warning`
+
+Verification:
+
+- SES identity `ice-sv.jp` is verified for sending.
+- DKIM status is `SUCCESS`.
+- Custom MAIL FROM `bounce.ice-sv.jp` status is `SUCCESS`.
+- CloudWatch `AWS/SES` metrics include `Reputation.BounceRate` and
+  `Reputation.ComplaintRate`.
+- SNS subscription is confirmed.
+- Both alarms initially entered `INSUFFICIENT_DATA`. Because
+  `TreatMissingData=notBreaching`, missing initial data is not treated as a
+  breach.
+
+AWS read-only check commands:
+
+```powershell
+aws cloudwatch describe-alarms `
+  --profile ice-report-ops `
+  --region ap-northeast-1 `
+  --alarm-names ice-report-ses-bounce-rate-warning ice-report-ses-complaint-rate-warning
+
+aws sns list-subscriptions-by-topic `
+  --profile ice-report-ops `
+  --region ap-northeast-1 `
+  --topic-arn arn:aws:sns:ap-northeast-1:855532282119:ice-report-ses-reputation-alerts
+```
+
 Official references:
 
 - AWS SES event notifications:

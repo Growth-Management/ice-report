@@ -277,3 +277,26 @@ Runbook:
 - Monitoring design: `docs/monitoring.md` section `SES Bounce / Complaint`
 - First response: `docs/operations.md` section
   `SES bounce / complaint warning response`
+
+Current AWS setup, configured on 2026-06-18 JST:
+
+| Item | Value |
+| --- | --- |
+| AWS account | `855532282119` |
+| Region | `ap-northeast-1` |
+| SES identity | `ice-sv.jp` |
+| Custom MAIL FROM | `bounce.ice-sv.jp` |
+| SNS topic | `arn:aws:sns:ap-northeast-1:855532282119:ice-report-ses-reputation-alerts` |
+| Notification endpoint | `info-ice-gm@impress.co.jp` |
+| Subscription status | Confirmed |
+
+CloudWatch alarms:
+
+| Alarm | Metric | Threshold | Treat missing data |
+| --- | --- | ---: | --- |
+| `ice-report-ses-bounce-rate-warning` | `AWS/SES` `Reputation.BounceRate` | `0.02` | `notBreaching` |
+| `ice-report-ses-complaint-rate-warning` | `AWS/SES` `Reputation.ComplaintRate` | `0.001` | `notBreaching` |
+
+Initial alarm state after creation was `INSUFFICIENT_DATA` for both alarms.
+This is expected immediately after setup and is not treated as breaching because
+missing data is configured as `notBreaching`.
