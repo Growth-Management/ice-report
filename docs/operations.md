@@ -323,6 +323,23 @@ GCS object の削除は破壊的操作のため、通常の月次手順では実
 
 #### Retention review
 
+候補抽出は read-only dry-run の補助 script を使います。この script は
+Firestore record や GCS object を削除しません。
+
+```powershell
+python scripts\check-retention-candidates.py
+```
+
+GCS object の存在確認まで含める場合:
+
+```powershell
+python scripts\check-retention-candidates.py --check-gcs-exists
+```
+
+出力には secret 値、token、PIN、生メールアドレス、message body、
+provider event JSON を含めません。GCS / Firestore の実削除は、この候補
+抽出結果を Notion に記録し、明示承認を得てから別手順で実施します。
+
 Retention review は月次運用とは分け、四半期に1回を目安に実施します。incident 対応、顧客問い合わせ、再送依頼が継続している対象は削除候補から外します。
 
 確認対象:
