@@ -133,7 +133,17 @@ $uptimeChecks = Invoke-RestMethod `
 
 ## Warning / Critical 方針
 
-現時点では notification channel は email 1本です。warning と critical の通知先分離は、Slack webhook、Google Chat、PagerDuty などの別 channel を採用する段階で実装します。
+現時点の GCP notification channel は email 1本です。AWS SES bounce /
+complaint warning は AWS SNS topic `ice-report-ses-reputation-alerts` から
+ICE GM department mailing list へ通知します。
+
+判断:
+
+- GCP critical alert は現状の email channel を維持する
+- AWS SES reputation warning は既存 SNS topic / mailing list を維持する
+- GCP warning channel は、GCP側でwarning alertを追加する段階まで新設しない
+- Slack webhook、Google Chat、PagerDuty などの追加 channel は、運用担当者と
+  一次対応SLAが決まってから採用する
 
 critical:
 
@@ -150,6 +160,70 @@ warning候補:
 - admin auth failure の急増
 
 既存 critical alert は、単発でも利用者影響または送信停止につながるため 5分窓で1件以上を維持します。実運用でノイズが出た場合は、対象 policy の発火履歴と incident 内容を確認してから threshold を変更します。
+
+### Noise review
+
+GCP側のalert関連ログ件数は read-only helper で確認します。この script は
+Cloud Logging を読むだけで、notification channel、alert policy、threshold を
+変更しません。
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-monitoring-noise.ps1
+```
+
+JSONで保存する場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-monitoring-noise.ps1 -AsJson |
+  Set-Content -Encoding UTF8 artifacts\monitoring-noise-review.json
+```
+
+確認頻度:
+
+- 定期: 月1回
+- alert発火後: incident close後
+- deploy後: runtime error alert が発火した場合
+
+Notionへ転記する項目:
+
+- 確認日時、確認者、対象期間
+- signal別件数
+- incident化した件数
+- 利用者影響の有無
+- 直近deploy、設定変更、手動操作との関係
+- threshold変更要否と理由
+
+転記しない項目:
+
+- PIN、token、生メールアドレス
+- message body、provider event JSON
+- secret値、credential、access key
+- raw log payload全体
+
+### Threshold decision
+
+threshold は件数だけで変更しません。次を満たす場合にだけ変更候補にします。
+
+- 同一policyが2週間で3回以上発火している
+- いずれも利用者影響または運用対応を必要としない
+- deploy、手動smoke、意図した誤key確認など既知作業と対応付けられる
+- threshold変更後も本当のOTP送信停止、SES認証失敗、runtime errorを検知できる
+
+現時点の判断:
+
+- `/api-health`、OTP delivery failure、SES auth failure、runtime errors は
+  criticalのまま維持する
+- critical threshold は 5分窓で1件以上を維持する
+- admin auth failure は warning観測対象に留め、alert化しない
+- SES bounce / complaint はAWS側warningとして維持し、GCP側alertへ重複実装しない
+
+threshold を変更する場合は、変更前に Notion へ次を記録します。
+
+- policy名、現在のthreshold、変更案
+- 直近の発火履歴とincident化有無
+- 変更理由
+- 変更後の検知漏れリスク
+- rollback条件
 
 ## SES Bounce / Complaint
 
