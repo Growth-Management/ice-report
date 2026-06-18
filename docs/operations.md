@@ -105,6 +105,60 @@ gcloud.cmd logging read `
 
 Firestore record は `action`、`result`、`target_id`、`status_code`、`reason`、`created_at` を中心に確認します。Notion や Slack へ転記する場合は、Admin key fingerprint、credential、PIN、token、生メールアドレスを含めません。
 
+#### Admin audit log検索view
+
+定期確認や月次作業後の監査確認では、Cloud Logging の概要件数を一次確認に
+使います。Firestore `admin_audit_logs` は、対象 delivery_id、target_id、
+失敗理由、時系列を追加調査するときに参照します。
+
+操作別の件数確認:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-admin-audit-logs.ps1
+```
+
+JSONで保存する場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-admin-audit-logs.ps1 -AsJson |
+  Set-Content -Encoding UTF8 artifacts\admin-audit-log-review.json
+```
+
+確認単位:
+
+| 観点 | 主な確認先 | Notion転記 |
+| --- | --- | --- |
+| action別件数 | Cloud Logging `ICE_REPORT_ADMIN_AUDIT` | 件数と対象期間 |
+| failure件数 | Cloud Logging `result=failure` | action、件数、reason概要 |
+| admin認証失敗 | Cloud Logging / `security_events` | 件数、想定内外、対応結果 |
+| 対象delivery | Firestore `admin_audit_logs.target_id` | delivery_id、操作、結果 |
+| 詳細調査 | Firestore `admin_audit_logs.detail` | 必要な業務キーのみ |
+
+Notionへ転記する項目:
+
+- 確認日時、確認者、対象期間
+- Cloud Run service、latest ready revision、対象action
+- action別 total / success / failure 件数
+- failure がある場合の reason 概要と一次対応
+- 対象 delivery_id / target_id
+- 関連PR、deploy、月次作業、incident との対応関係
+
+Notion、Slack、GitHub、スクリーンショットへ転記しない項目:
+
+- Admin key fingerprint
+- credential、secret値、access key
+- PIN、token、signed URL の token 断片
+- 生メールアドレス
+- message body、provider event JSON
+- IP address、user agent
+
+監査確認の目安:
+
+- 月次作業後: `delivery_create`、`delivery_version_add`、`cleanup_expired_deliveries`
+- 緊急停止後: `delivery_disable`、`delivery_enable`
+- break-glass利用後: `admin_auth` failure、対象操作、runtime ERROR
+- 定期read-only check後: audit件数が想定外に増えていないこと
+
 ### Admin key break-glass / rotation
 
 `ADMIN_API_KEY` は通常の人間向け主認証ではなく、machine/script と break-glass 用の共有鍵として扱います。
