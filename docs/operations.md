@@ -219,6 +219,50 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-operations-readonly.p
 
 Notion へ貼る場合は、script の `notionSummary` を使います。API応答本文、Admin key、PIN、生メールアドレス、token は貼りません。
 
+### Read-only operational check 定期実行
+
+初期運用では、定期実行は週1回とし、deploy後は都度実行します。自動化
+基盤を追加するまでは、システム管理室の運用端末または明示的に権限を
+付与した実行環境から実行します。
+
+標準頻度:
+
+- 定期: 毎週月曜 10:00 JST 目安
+- deploy後: Cloud Run traffic切替後に1回
+- incident後: 復旧確認後に1回
+
+定期実行向け wrapper:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-scheduled.ps1
+```
+
+この wrapper は次を `artifacts/operations-readonly/` へ保存します。
+`artifacts/` は git 管理しません。
+
+- `operations-readonly-check-<timestamp>.json`
+- `operations-readonly-check-<timestamp>-summary.txt`
+
+Notion へ転記する場合は summary text のみを使います。JSON artifact はローカル
+確認用とし、API応答本文、Admin key、PIN、生メールアドレス、token を
+チケットやチャットへ貼り付けません。
+
+失敗時対応:
+
+1. wrapper の `passed=false` または exit code 1 を確認する
+2. `failedChecks` と summary text の `Failed checks` を確認する
+3. `/api-health`、Cloud Run latest ready revision、runtime ERROR log を優先確認する
+4. Admin認証失敗が増えているだけの場合は、誤key check由来かを確認する
+5. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
+6. Notion には summary、failedChecks、確認者、確認日時、一次対応結果を記録する
+
+定期実行の前提:
+
+- `gcloud` が対象project `ice-sh` を読める
+- `report-generator-admin-api-key` の Secret Manager read 権限がある
+- Cloud Run / Cloud Logging / Cloud Monitoring の read 権限がある
+- 実行環境に保存される artifact はローカル運用記録として扱い、git commitしない
+
 ## 月次運用
 
 月次レポート作成、配布URL発行、期限切れ整理、version追加を行うときの基準です。管理画面で操作する場合も、APIで操作する場合もこの順序を正とします。
