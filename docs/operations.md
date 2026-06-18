@@ -418,6 +418,34 @@ gcloud.cmd storage rm "gs://ice-report-files/reports/plus/<yymm>/<file>.xlsx"
 
 Firestore record の削除は、GCS object 削除よりも調査影響が大きいため、現時点では原則として手動削除しません。削除が必要な場合は、対象 collection、document id、削除理由、復旧要否を Notion に記録し、個別PRで削除用scriptまたは管理コマンドを用意してから実施します。
 
+dry-run で候補だけを確認する場合:
+
+```powershell
+New-Item -ItemType Directory -Force artifacts | Out-Null
+python scripts\check-retention-candidates.py --scope firestore |
+  Tee-Object -FilePath artifacts\firestore-retention-candidates.json
+```
+
+確認する JSON 項目:
+
+- `dryRun=true`
+- `scope=firestore`
+- `candidateCounts.deliveries`
+- `candidateCounts.download_logs`
+- `candidateCounts.security_events`
+- `candidateCounts.admin_audit_logs`
+- `candidateCounts.otp_challenges`
+- `candidateCounts.download_sessions`
+- `candidates.*[].id`
+- `candidates.*[].date_field`
+- `candidates.*[].date`
+- `candidates.*[].delivery_id`
+
+Firestore record 候補に secret 値、token、PIN、生メールアドレス、message
+body、provider event JSON が含まれていないことを確認します。incident対応中、
+abuse調査中、顧客問い合わせ中、再送依頼中の delivery_id に紐づく record は
+削除候補から外します。
+
 削除候補にできる最短条件:
 
 - `deliveries`: `active=false` かつ `expires_at` から 400 日経過
