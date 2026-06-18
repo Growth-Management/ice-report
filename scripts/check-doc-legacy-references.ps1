@@ -24,6 +24,7 @@ $patterns = @(
 
 $allowedFiles = @(
     "docs/env-compatibility.md",
+    "docs/retention-deletion-approval-template.md",
     "docs/security.md",
     "docs/ses-cutover-checklist.md",
     "docs/roadmap.md",
@@ -36,8 +37,8 @@ $benignRegex = @(
 ) -join "|"
 
 $knownBenignRefs = @(
-    "docs/operations.md:619",
-    "docs/operations.md:968",
+    "docs/operations.md:623",
+    "docs/operations.md:972",
     "docs/setup.md:69",
     "docs/setup.md:72"
 )
