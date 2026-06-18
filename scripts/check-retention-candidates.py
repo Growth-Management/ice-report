@@ -314,6 +314,8 @@ def build_result(args: argparse.Namespace) -> dict[str, Any]:
         gcs_report_month_months=args.gcs_report_month_months,
         ephemeral_days=args.ephemeral_days,
     )
+    include_firestore = args.scope in ("all", "firestore")
+    include_gcs = args.scope in ("all", "gcs")
     now = utcnow()
     firestore_cutoff = now - timedelta(days=policy.firestore_days)
     ephemeral_cutoff = now - timedelta(days=policy.ephemeral_days)
@@ -325,94 +327,100 @@ def build_result(args: argparse.Namespace) -> dict[str, Any]:
         limit=args.delivery_scan_limit,
     )
 
-    download_logs = list_documents(
-        db,
-        args.download_logs_collection,
-        limit=args.record_scan_limit,
-    )
-    security_events = list_documents(
-        db,
-        args.security_events_collection,
-        limit=args.record_scan_limit,
-    )
-    admin_audit_logs = list_documents(
-        db,
-        args.admin_audit_logs_collection,
-        limit=args.record_scan_limit,
-    )
-    otp_challenges = list_documents(
-        db,
-        args.otp_collection,
-        limit=args.record_scan_limit,
-    )
-    download_sessions = list_documents(
-        db,
-        args.download_sessions_collection,
-        limit=args.record_scan_limit,
-    )
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    scanned = {
+        "deliveries": len(deliveries),
+    }
 
-    gcs_candidates = gcs_object_candidates(
-        deliveries,
-        bucket_name=args.bucket,
-        prefix=args.prefix,
-        policy=policy,
-        limit=args.candidate_limit,
-    )
-    if args.check_gcs_exists and gcs_candidates:
-        annotate_gcs_existence(gcs_candidates, project=args.project)
-
-    candidates = {
-        "deliveries": delivery_record_candidates(
+    if include_firestore:
+        download_logs = list_documents(
+            db,
+            args.download_logs_collection,
+            limit=args.record_scan_limit,
+        )
+        security_events = list_documents(
+            db,
+            args.security_events_collection,
+            limit=args.record_scan_limit,
+        )
+        admin_audit_logs = list_documents(
+            db,
+            args.admin_audit_logs_collection,
+            limit=args.record_scan_limit,
+        )
+        otp_challenges = list_documents(
+            db,
+            args.otp_collection,
+            limit=args.record_scan_limit,
+        )
+        download_sessions = list_documents(
+            db,
+            args.download_sessions_collection,
+            limit=args.record_scan_limit,
+        )
+        candidates["deliveries"] = delivery_record_candidates(
             deliveries,
             cutoff=firestore_cutoff,
             limit=args.candidate_limit,
-        ),
-        "download_logs": firestore_record_candidates(
+        )
+        candidates["download_logs"] = firestore_record_candidates(
             download_logs,
             date_fields=("downloaded_at", "created_at"),
             cutoff=firestore_cutoff,
             limit=args.candidate_limit,
-        ),
-        "security_events": firestore_record_candidates(
+        )
+        candidates["security_events"] = firestore_record_candidates(
             security_events,
             date_fields=("created_at",),
             cutoff=firestore_cutoff,
             limit=args.candidate_limit,
-        ),
-        "admin_audit_logs": firestore_record_candidates(
+        )
+        candidates["admin_audit_logs"] = firestore_record_candidates(
             admin_audit_logs,
             date_fields=("created_at",),
             cutoff=firestore_cutoff,
             limit=args.candidate_limit,
-        ),
-        "otp_challenges": firestore_record_candidates(
+        )
+        candidates["otp_challenges"] = firestore_record_candidates(
             otp_challenges,
             date_fields=("expires_at", "created_at"),
             cutoff=ephemeral_cutoff,
             limit=args.candidate_limit,
-        ),
-        "download_sessions": firestore_record_candidates(
+        )
+        candidates["download_sessions"] = firestore_record_candidates(
             download_sessions,
             date_fields=("expires_at", "created_at"),
             cutoff=ephemeral_cutoff,
             limit=args.candidate_limit,
-        ),
-        "gcs_report_objects": gcs_candidates,
-    }
+        )
+        scanned.update(
+            {
+                "download_logs": len(download_logs),
+                "security_events": len(security_events),
+                "admin_audit_logs": len(admin_audit_logs),
+                "otp_challenges": len(otp_challenges),
+                "download_sessions": len(download_sessions),
+            }
+        )
+
+    if include_gcs:
+        gcs_candidates = gcs_object_candidates(
+            deliveries,
+            bucket_name=args.bucket,
+            prefix=args.prefix,
+            policy=policy,
+            limit=args.candidate_limit,
+        )
+        if args.check_gcs_exists and gcs_candidates:
+            annotate_gcs_existence(gcs_candidates, project=args.project)
+        candidates["gcs_report_objects"] = gcs_candidates
 
     counts = {name: len(items) for name, items in candidates.items()}
-    scanned = {
-        "deliveries": len(deliveries),
-        "download_logs": len(download_logs),
-        "security_events": len(security_events),
-        "admin_audit_logs": len(admin_audit_logs),
-        "otp_challenges": len(otp_challenges),
-        "download_sessions": len(download_sessions),
-    }
 
     return {
         "generatedAt": iso(now),
         "dryRun": True,
+        "scope": args.scope,
         "project": args.project,
         "bucket": args.bucket,
         "prefix": args.prefix,
@@ -446,6 +454,15 @@ def build_result(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Read-only retention candidate report for ICE Report Generator."
+    )
+    parser.add_argument(
+        "--scope",
+        choices=("all", "gcs", "firestore"),
+        default="all",
+        help=(
+            "Candidate scope to inspect. Use 'gcs' for report object dry-runs "
+            "that only need delivery metadata."
+        ),
     )
     parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
