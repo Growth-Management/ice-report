@@ -213,6 +213,50 @@ Slack webhook の確認完了条件:
 - テスト通知または代替確認で、運用担当channelへの通知経路が確認済み
 - Notion記録にはURL実値を含めない
 
+Repo hygiene 残件確認:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-secret-exposure-metadata.ps1 -AsJson |
+  Set-Content -Encoding UTF8 artifacts\secret-exposure-metadata.json
+
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-doc-legacy-references.ps1
+```
+
+確認対象:
+
+- `env.yaml`
+- `webhook.txt`
+- `.env`
+- `.env.*`
+- `tools.yaml`
+- `*_accessKeys.csv`
+- GCP Secret Manager の関連secret metadata
+- Cloud Run env の secret参照名と literal value有無
+- docs内の旧env名・旧access key前提手順
+
+記録する項目:
+
+- 対象ファイルが現在のHEADでtrackingされているか
+- git履歴上のcommit件数、first / latest commit
+- legacy AWS access key env がCloud Run envに残っていないこと
+- legacy Secret Manager secret が存在しない、または不要versionがdisabled/destroyedであること
+- Slack webhook旧値の無効化/再発行済み確認結果
+- docs legacy reference check の `unexpectedMatches`
+
+記録しない項目:
+
+- secret値、webhook URL実値、access key値
+- `env.yaml`、`webhook.txt`、`.env*`、access key CSV の内容
+- Secret Manager payload
+
+判断:
+
+- 有効なsecret値が露出していた可能性が残る場合は、履歴削除より先にrotation
+  またはrevokeを完了する
+- 既にrotation / revoke済みで、履歴に残るのが無効値だけと判断できる場合は、
+  履歴rewriteを必須にしない
+- `unexpectedMatches` が1件以上ある場合は、該当docsを修正してから作業終了にする
+
 ## 監視・アラート
 
 Cloud Logging の user-defined log-based metrics と Cloud Monitoring alert policies を作成済みです。詳細は `docs/monitoring.md` を参照します。

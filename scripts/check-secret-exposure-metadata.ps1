@@ -2,7 +2,14 @@ param(
     [string]$Project = "ice-sh",
     [string]$Region = "asia-northeast1",
     [string]$Service = "report-generator",
-    [string[]]$SensitivePaths = @("env.yaml", "webhook.txt"),
+    [string[]]$SensitivePaths = @(
+        "env.yaml",
+        "webhook.txt",
+        ".env",
+        ".env.*",
+        "tools.yaml",
+        "*_accessKeys.csv"
+    ),
     [string[]]$SecretNames = @(
         "report-generator-admin-api-key",
         "slack-download-webhook-url",
@@ -20,12 +27,21 @@ function Invoke-JsonCommand {
     param([string[]]$Command)
 
     $previousErrorActionPreference = $ErrorActionPreference
+    $previousFileLogging = $env:CLOUDSDK_CORE_DISABLE_FILE_LOGGING
     $ErrorActionPreference = "Continue"
     try {
-        $output = & $Command[0] $Command[1..($Command.Length - 1)] 2>$null
+        $env:CLOUDSDK_CORE_DISABLE_FILE_LOGGING = "true"
+        $executable = $Command[0]
+        $arguments = @($Command | Select-Object -Skip 1)
+        $output = & $executable @arguments 2>$null
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        if ($null -eq $previousFileLogging) {
+            Remove-Item Env:\CLOUDSDK_CORE_DISABLE_FILE_LOGGING -ErrorAction SilentlyContinue
+        } else {
+            $env:CLOUDSDK_CORE_DISABLE_FILE_LOGGING = $previousFileLogging
+        }
     }
 
     if ($exitCode -ne 0 -or -not $output) {
@@ -66,7 +82,7 @@ function Get-CloudRunEnvMetadata {
         [string]$Service
     )
 
-    $serviceJson = Invoke-JsonCommand @(
+    $serviceJson = Invoke-JsonCommand -Command @(
         "gcloud.cmd",
         "run",
         "services",
@@ -104,7 +120,7 @@ function Get-SecretVersionMetadata {
 
     $rows = @()
     foreach ($name in $Names) {
-        $secret = Invoke-JsonCommand @(
+        $secret = Invoke-JsonCommand -Command @(
             "gcloud.cmd",
             "secrets",
             "describe",
@@ -124,7 +140,7 @@ function Get-SecretVersionMetadata {
             continue
         }
 
-        $versions = Invoke-JsonCommand @(
+        $versions = Invoke-JsonCommand -Command @(
             "gcloud.cmd",
             "secrets",
             "versions",
@@ -195,7 +211,7 @@ $result = [pscustomobject]@{
     legacyAwsEnvRefCount = $legacyAwsEnvRefs.Count
     secrets = $secrets
     enabledSecretVersions = $enabledSecretVersions
-    note = "This report intentionally omits secret values and file contents."
+    note = "This report intentionally omits secret values and file contents. Git checks use path metadata only."
 }
 
 if ($AsJson) {
