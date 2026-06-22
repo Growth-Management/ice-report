@@ -303,6 +303,27 @@ Notion へ転記する場合は summary text のみを使います。JSON artifa
 確認用とし、API応答本文、Admin key、PIN、生メールアドレス、token を
 チケットやチャットへ貼り付けません。
 
+Notion API へ直接追記する場合:
+
+```powershell
+$env:NOTION_READONLY_CHECK_PAGE_ID = '<NOTION_PAGE_ID>'
+$env:NOTION_API_TOKEN_SECRET_NAME = '<SECRET_NAME_CONTAINING_NOTION_API_TOKEN>'
+powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-scheduled.ps1 `
+  -RecordToNotion
+```
+
+または、実行環境だけに `NOTION_API_TOKEN` を設定して実行します。token値は
+ローカルファイル、artifact、Notion本文、ログ、チャットへ残しません。
+
+Notion直接記録の前提:
+
+- Notion integration が対象ページへ共有されている
+- integration に insert content 権限がある
+- `NOTION_READONLY_CHECK_PAGE_ID` は追記先ページのIDを指定する
+- Notion API token は `NOTION_API_TOKEN` または Secret Manager secret から読む
+- Notion API version は wrapper 既定の `2026-03-11` を使う
+- 追記する内容は `notionSummary` とローカルartifact pathだけに限定する
+
 失敗時対応:
 
 1. wrapper の `passed=false` または exit code 1 を確認する
