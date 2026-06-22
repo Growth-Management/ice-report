@@ -708,6 +708,11 @@ script の安全条件:
 Notion へ貼り付ける際も、credential、token、PIN、生メールアドレス、message
 body、provider event JSON は記録しません。
 
+2026-06-22 時点では、削除承認テンプレートを専用 Notion DB へ移行せず、
+本テンプレートによる手動記録を継続します。削除承認が継続的に発生する、
+複数承認を横断検索する必要がある、または監査上の集計要件が出た場合に
+DB化を再起票します。
+
 ```text
 ICE Report Generator 削除承認
 
