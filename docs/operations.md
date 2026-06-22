@@ -126,6 +126,10 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-admin-audit-logs.ps1 
   Set-Content -Encoding UTF8 artifacts\admin-audit-log-review.json
 ```
 
+定期 read-only operational check では、`scripts\run-operations-readonly-scheduled.ps1`
+がこの audit review も同時に実行し、同じ artifact folder に保存します。
+一時的に除外する場合だけ `-SkipAdminAuditReview` を指定します。
+
 確認単位:
 
 | 観点 | 主な確認先 | Notion転記 |
@@ -297,6 +301,8 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-sch
 
 - `operations-readonly-check-<timestamp>.json`
 - `operations-readonly-check-<timestamp>-summary.txt`
+- `admin-audit-log-review-<timestamp>.json`
+- `admin-audit-log-review-<timestamp>-summary.txt`
 
 GitHub Actions では同じ内容を `operations-readonly-check-<run_id>` artifact
 として保存します。workflow上でcheckが失敗した場合も、失敗内容を確認できる
@@ -341,6 +347,7 @@ Notion直接記録の前提:
 - `gcloud` が対象project `ice-sh` を読める
 - `report-generator-admin-api-key` の Secret Manager read 権限がある
 - Cloud Run / Cloud Logging / Cloud Monitoring の read 権限がある
+- Admin audit log review のため Cloud Logging read 権限がある
 - GitHub Actionsで実行する場合は、deploy用workload identityのservice accountに
   上記read権限と `report-generator-admin-api-key` のSecret Manager read権限がある
 - 実行環境に保存される artifact はローカル運用記録として扱い、git commitしない

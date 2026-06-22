@@ -48,7 +48,8 @@ $knownBenignRefs = @(
 
 $knownBenignTextPatterns = @(
     "ice-report-ops.*Access Key",
-    "Access Key.*Secret.*Admin Key.*PIN.*token"
+    "Access Key.*Secret.*Admin Key.*PIN.*token",
+    "credential.*secret.*access key"
 )
 $knownBenignTextRegex = [string]::Join("|", $knownBenignTextPatterns)
 
