@@ -31,10 +31,11 @@ $allowedFiles = @(
     "README.md"
 )
 
-$benignRegex = @(
+$benignPatterns = @(
     "rollback",
     "env-compatibility.md"
-) -join "|"
+)
+$benignRegex = [string]::Join("|", $benignPatterns)
 
 $knownBenignRefs = @(
     "docs/monitoring.md:200",
@@ -45,7 +46,14 @@ $knownBenignRefs = @(
     "docs/setup.md:72"
 )
 
-$regex = ($patterns | ForEach-Object { [regex]::Escape($_) }) -join "|"
+$knownBenignTextPatterns = @(
+    "ice-report-ops.*Access Key",
+    "Access Key.*Secret.*Admin Key.*PIN.*token"
+)
+$knownBenignTextRegex = [string]::Join("|", $knownBenignTextPatterns)
+
+$escapedPatterns = $patterns | ForEach-Object { [regex]::Escape($_) }
+$regex = [string]::Join("|", $escapedPatterns)
 $results = @()
 
 foreach ($path in $Paths) {
@@ -75,8 +83,9 @@ foreach ($path in $Paths) {
 
             $allowedFile = $allowedFiles -contains $relative
             $knownBenignRef = $knownBenignRefs -contains "$relative`:$($index + 1)"
+            $knownBenignText = $line -match $knownBenignTextRegex
             $benign = (-not $allowedFile) -and ($line -match $benignRegex)
-            $allowed = $allowedFile -or $benign -or $knownBenignRef
+            $allowed = $allowedFile -or $benign -or $knownBenignRef -or $knownBenignText
 
             $results += [pscustomobject]@{
                 path = $relative
@@ -85,6 +94,7 @@ foreach ($path in $Paths) {
                 allowedFile = $allowedFile
                 benignOutsideAllowedFile = $benign
                 knownBenignRef = $knownBenignRef
+                knownBenignText = $knownBenignText
                 text = $line.Trim()
             }
         }

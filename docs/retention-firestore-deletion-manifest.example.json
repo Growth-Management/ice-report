@@ -1,0 +1,13 @@
+{
+  "approvalId": "RET-YYYYMMDD-001",
+  "approvedBy": "篠原邦昭",
+  "approvedAt": "2026-06-22T10:00:00+09:00",
+  "reason": "Retention period satisfied, exclusion checks completed, and deletion approved in Notion.",
+  "records": [
+    {
+      "collection": "download_logs",
+      "id": "example-document-id",
+      "reason": "created_at is older than the approved retention threshold"
+    }
+  ]
+}
