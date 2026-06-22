@@ -5,10 +5,76 @@ param(
     [string]$PublicBaseUrl = "https://report-generator-635067190197.asia-northeast1.run.app",
     [string]$AdminBaseUrl = "https://report-generator-admin-635067190197.asia-northeast1.run.app",
     [string]$Freshness = "30m",
+    [string[]]$ExpectedIapUsers = @("sinohara@impress.co.jp"),
     [switch]$AsJson
 )
 
 $ErrorActionPreference = "Stop"
+
+$gcloudInfo = Get-Command "gcloud.cmd" -ErrorAction SilentlyContinue
+if (-not $gcloudInfo) {
+    $gcloudInfo = Get-Command "gcloud" -ErrorAction SilentlyContinue
+}
+if (-not $gcloudInfo) {
+    throw "gcloud command was not found."
+}
+$GcloudCommand = $gcloudInfo.Source
+
+function Normalize-Email {
+    param([string]$Value)
+
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return ""
+    }
+    if ($text.StartsWith("accounts.google.com:")) {
+        $text = $text.Substring("accounts.google.com:".Length)
+    }
+    if ($text.StartsWith("user:")) {
+        $text = $text.Substring("user:".Length)
+    }
+    return $text.Trim().ToLowerInvariant()
+}
+
+function Normalize-IamMember {
+    param([string]$Value)
+
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return ""
+    }
+    if ($text.StartsWith("user:")) {
+        return "user:$(Normalize-Email $text)"
+    }
+    return $text.ToLowerInvariant()
+}
+
+function Split-AllowlistEmails {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return @()
+    }
+    return @(
+        $Value.Replace(";", ",").Split(",") |
+            ForEach-Object { Normalize-Email $_ } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
+}
+
+function Get-EnvValue {
+    param(
+        [object[]]$EnvItems,
+        [string]$Name
+    )
+
+    $match = @($EnvItems | Where-Object { $_.name -eq $Name } | Select-Object -First 1)
+    if ($match.Count -eq 0) {
+        return ""
+    }
+    return [string]$match[0].value
+}
 
 function Invoke-HttpNoRedirect {
     param([string]$Uri)
@@ -111,7 +177,7 @@ function Get-LogCount {
     )
 
     $lines = @(
-        & gcloud.cmd logging read $Filter `
+        & $GcloudCommand logging read $Filter `
             --project=$Project `
             --freshness=$Freshness `
             --limit=$Limit `
@@ -128,7 +194,7 @@ $adminBase = $AdminBaseUrl.TrimEnd("/")
 $publicBase = $PublicBaseUrl.TrimEnd("/")
 
 $serviceState = Invoke-GcloudJson {
-    gcloud.cmd run services describe $AdminService `
+    & $GcloudCommand run services describe $AdminService `
         --project=$Project `
         --region=$Region `
         --format=json
@@ -139,7 +205,8 @@ $iapServiceAgent = "serviceAccount:service-$projectNumber@gcp-sa-iap.iam.gservic
 $latestRevision = $serviceState.status.latestReadyRevisionName
 $image = $serviceState.spec.template.spec.containers[0].image
 $iapEnabled = (($serviceState.metadata.annotations."run.googleapis.com/iap-enabled") -eq "true")
-$envNames = @($serviceState.spec.template.spec.containers[0].env | ForEach-Object { $_.name } | Sort-Object)
+$envItems = @($serviceState.spec.template.spec.containers[0].env)
+$envNames = @($envItems | ForEach-Object { $_.name } | Sort-Object)
 $traffic = @($serviceState.status.traffic | ForEach-Object {
     [pscustomobject]@{
         revisionName = $_.revisionName
@@ -149,14 +216,14 @@ $traffic = @($serviceState.status.traffic | ForEach-Object {
 })
 
 $runIam = Invoke-GcloudJson {
-    gcloud.cmd run services get-iam-policy $AdminService `
+    & $GcloudCommand run services get-iam-policy $AdminService `
         --project=$Project `
         --region=$Region `
         --format=json
 }
 
 $iapIam = Invoke-GcloudJson {
-    gcloud.cmd iap web get-iam-policy `
+    & $GcloudCommand iap web get-iam-policy `
         --project=$Project `
         --region=$Region `
         --resource-type=cloud-run `
@@ -175,6 +242,20 @@ $iapAccessorMembers = @((
         Where-Object { $_.role -eq "roles/iap.httpsResourceAccessor" } |
         ForEach-Object { @($_.members) }
 ) | Sort-Object -Unique)
+
+$expectedIapUsersNormalized = @(
+    $ExpectedIapUsers |
+        ForEach-Object { Normalize-Email $_ } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique
+)
+$expectedIapUserMembers = @($expectedIapUsersNormalized | ForEach-Object { "user:$_" })
+$iapAccessorMembersNormalized = @($iapAccessorMembers | ForEach-Object { Normalize-IamMember $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+$missingExpectedIapAccessors = @($expectedIapUserMembers | Where-Object { $iapAccessorMembersNormalized -notcontains $_ })
+$unexpectedIapAccessors = @($iapAccessorMembersNormalized | Where-Object { $expectedIapUserMembers -notcontains $_ })
+$serviceAllowlistUsers = @(Split-AllowlistEmails (Get-EnvValue $envItems "ADMIN_IAP_ALLOWED_EMAILS"))
+$missingServiceAllowlistUsers = @($expectedIapUsersNormalized | Where-Object { $serviceAllowlistUsers -notcontains $_ })
+$unexpectedServiceAllowlistUsers = @($serviceAllowlistUsers | Where-Object { $expectedIapUsersNormalized -notcontains $_ })
 
 $adminNoAuth = Invoke-HttpNoRedirect -Uri "$adminBase/admin"
 $publicHealth = Invoke-HttpCheck -Uri "$publicBase/api-health"
@@ -206,6 +287,10 @@ $checks = [ordered]@{
         ($runInvokerMembers[0] -eq $iapServiceAgent)
     )
     iapAccessorConfigured = ($iapAccessorMembers.Count -ge 1)
+    expectedIapUsersHaveAccessor = ($missingExpectedIapAccessors.Count -eq 0)
+    noUnexpectedIapAccessors = ($unexpectedIapAccessors.Count -eq 0)
+    expectedIapUsersInServiceAllowlist = ($missingServiceAllowlistUsers.Count -eq 0)
+    noUnexpectedServiceAllowlistUsers = ($unexpectedServiceAllowlistUsers.Count -eq 0)
     adminNoAuthRedirectsToGoogle = (
         ($adminNoAuth.statusCode -eq 302) -and
         $adminNoAuth.iapGeneratedResponse -and
@@ -234,6 +319,12 @@ IAP / IAM:
 - IAP enabled: $iapEnabled
 - Cloud Run invoker members: $($runInvokerMembers -join ", ")
 - IAP accessor members: $($iapAccessorMembers -join ", ")
+- expected IAP users: $($expectedIapUsersNormalized -join ", ")
+- missing expected IAP accessors: $(if ($missingExpectedIapAccessors.Count -eq 0) { "none" } else { $missingExpectedIapAccessors -join ", " })
+- unexpected IAP accessors: $(if ($unexpectedIapAccessors.Count -eq 0) { "none" } else { $unexpectedIapAccessors -join ", " })
+- service allowlist users: $($serviceAllowlistUsers -join ", ")
+- missing service allowlist users: $(if ($missingServiceAllowlistUsers.Count -eq 0) { "none" } else { $missingServiceAllowlistUsers -join ", " })
+- unexpected service allowlist users: $(if ($unexpectedServiceAllowlistUsers.Count -eq 0) { "none" } else { $unexpectedServiceAllowlistUsers -join ", " })
 - required IAP env missing: $(if ($missingEnvNames.Count -eq 0) { "none" } else { $missingEnvNames -join ", " })
 
 HTTP:
@@ -268,8 +359,15 @@ $result = [pscustomobject]@{
     traffic = $traffic
     iam = [pscustomobject]@{
         expectedIapServiceAgent = $iapServiceAgent
+        expectedIapUsers = $expectedIapUsersNormalized
         runInvokerMembers = $runInvokerMembers
         iapAccessorMembers = $iapAccessorMembers
+        iapAccessorMembersNormalized = $iapAccessorMembersNormalized
+        missingExpectedIapAccessors = $missingExpectedIapAccessors
+        unexpectedIapAccessors = $unexpectedIapAccessors
+        serviceAllowlistUsers = $serviceAllowlistUsers
+        missingServiceAllowlistUsers = $missingServiceAllowlistUsers
+        unexpectedServiceAllowlistUsers = $unexpectedServiceAllowlistUsers
     }
     endpointStatus = [pscustomobject]@{
         adminNoAuth = $adminNoAuth

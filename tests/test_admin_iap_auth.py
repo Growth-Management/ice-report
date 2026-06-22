@@ -9,6 +9,7 @@ class _RequestStub:
     headers = {}
     path = "/"
     method = "GET"
+    remote_addr = ""
 
 
 class _RequestContextStub:
@@ -155,6 +156,43 @@ class AdminIapAuthTest(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIsNone(error)
+
+    def test_iap_allowed_email_accepts_multiple_explicit_users(self):
+        with self._env(
+            ADMIN_IAP_AUTH_ENABLED="1",
+            ADMIN_IAP_ALLOWED_EMAILS="sinohara@impress.co.jp; admin2@example.com",
+            K_SERVICE="report-generator-admin",
+        ):
+            with app_module.app.test_request_context(
+                "/deliveries",
+                headers={
+                    "X-Goog-Authenticated-User-Email": "accounts.google.com:ADMIN2@example.com"
+                },
+            ):
+                ok, error = app_module._check_admin()
+
+        self.assertTrue(ok)
+        self.assertIsNone(error)
+
+    def test_iap_disallows_user_outside_explicit_allowlist(self):
+        with self._env(
+            ADMIN_IAP_AUTH_ENABLED="1",
+            ADMIN_IAP_ALLOWED_EMAILS="sinohara@impress.co.jp,admin2@example.com",
+            K_SERVICE="report-generator-admin",
+        ):
+            with app_module.app.test_request_context(
+                "/deliveries",
+                headers={
+                    "X-Goog-Authenticated-User-Email": "accounts.google.com:outsider@example.com"
+                },
+            ):
+                with patch.object(app_module, "_log_security_event"), patch.object(
+                    app_module, "_log_admin_audit_event"
+                ):
+                    ok, error = app_module._check_admin()
+
+        self.assertFalse(ok)
+        self.assertIsNotNone(error)
 
     def test_iap_auth_requires_admin_service(self):
         with self._env(
