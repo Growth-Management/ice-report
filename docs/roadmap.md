@@ -124,10 +124,12 @@ critical系 alert、`/api-health` 外形監視、SES bounce / complaint warning
 - read-only check 定期実行方針: 週1回、deploy後、incident後
 - Notion API への直接記録オプション
 - deploy pipeline からのread-only check自動実行
+- pipeline check run metadata artifact: duration、exit code、failed checks、audit review成否
+- pipeline check失敗時の確認順と所要時間見直し条件
 
 継続課題:
 
-- 実運用後のpipeline check所要時間・失敗時運用の微調整
+- 実運用後の複数回実績に基づくpipeline timeout / 権限 / threshold微調整
 
 ### 6. repo hygiene
 

@@ -100,6 +100,7 @@ function Write-NotionReadOnlySummary {
         [string]$SummaryText,
         [string]$JsonPath,
         [string]$SummaryPath,
+        [string]$RunMetadataPath = "",
         [string]$AuditJsonPath = "",
         [string]$AuditSummaryPath = ""
     )
@@ -131,6 +132,9 @@ function Write-NotionReadOnlySummary {
     }
 
     $artifactSummary = "Local artifacts:`n- JSON: $JsonPath`n- Summary: $SummaryPath"
+    if (-not [string]::IsNullOrWhiteSpace($RunMetadataPath)) {
+        $artifactSummary += "`n- Run metadata: $RunMetadataPath"
+    }
     if (-not [string]::IsNullOrWhiteSpace($AuditJsonPath)) {
         $artifactSummary += "`n- Admin audit JSON: $AuditJsonPath"
     }
@@ -178,10 +182,13 @@ $PowerShellCommand = if (Get-Command pwsh -ErrorAction SilentlyContinue) {
 }
 
 $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+$runStartedAt = (Get-Date).ToUniversalTime()
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $jsonPath = Join-Path $resolvedOutDir "operations-readonly-check-$timestamp.json"
 $summaryPath = Join-Path $resolvedOutDir "operations-readonly-check-$timestamp-summary.txt"
 $auditJsonPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp.json"
 $auditSummaryPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp-summary.txt"
+$runMetadataPath = Join-Path $resolvedOutDir "operations-readonly-run-metadata-$timestamp.json"
 
 $checkScript = Join-Path $workspace "scripts\check-operations-readonly.ps1"
 $args = @(
@@ -247,6 +254,7 @@ if ($RecordToNotion) {
         -SummaryText $combinedSummary `
         -JsonPath $jsonPath `
         -SummaryPath $summaryPath `
+        -RunMetadataPath $runMetadataPath `
         -AuditJsonPath $(if ($auditResult) { $auditJsonPath } else { "" }) `
         -AuditSummaryPath $(if ($auditResult) { $auditSummaryPath } else { "" })
     $notionToken = $null
@@ -257,20 +265,50 @@ if (($null -ne $auditExitCode) -and ($auditExitCode -ne 0)) {
     $finalExitCode = $auditExitCode
 }
 
-[pscustomobject]@{
-    generatedAt = (Get-Date).ToUniversalTime().ToString("o")
-    passed = if ($result) {
-        [bool]$result.passed -and (($null -eq $auditResult) -or [bool]$auditResult.querySucceeded)
+$stopwatch.Stop()
+$runEndedAt = (Get-Date).ToUniversalTime()
+$runPassed = if ($result) {
+        [bool]$result.passed -and
+            (($null -eq $auditExitCode) -or ($auditExitCode -eq 0)) -and
+            (($null -eq $auditResult) -or [bool]$auditResult.querySucceeded)
     } else { $false }
+$failedChecks = @()
+if ($result -and ($null -ne $result.failedChecks)) {
+    $failedChecks = @($result.failedChecks)
+} else {
+    $failedChecks = @("operations_result_missing")
+}
+$auditSucceeded = if ($null -eq $auditResult) { $null } else { [bool]$auditResult.querySucceeded }
+$auditFailureReason = if ($auditResult -and $auditResult.error) {
+    [string]$auditResult.error
+} elseif (($null -ne $auditExitCode) -and ($auditExitCode -ne 0) -and ($null -eq $auditResult)) {
+    "admin_audit_review_failed_without_json"
+} else {
+    $null
+}
+
+$runMetadata = [pscustomObject]@{
+    generatedAt = $runEndedAt.ToString("o")
+    runStartedAt = $runStartedAt.ToString("o")
+    runEndedAt = $runEndedAt.ToString("o")
+    durationSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
+    passed = $runPassed
     jsonPath = $jsonPath
     summaryPath = $summaryPath
     auditJsonPath = if ($auditResult) { $auditJsonPath } else { $null }
     auditSummaryPath = if ($auditResult) { $auditSummaryPath } else { $null }
+    runMetadataPath = $runMetadataPath
     notionRecorded = ($null -ne $notionWrite)
     notionWrite = $notionWrite
     exitCode = $finalExitCode
     operationsExitCode = $exitCode
     auditExitCode = $auditExitCode
+    failedChecks = [object[]]$failedChecks
+    auditQuerySucceeded = $auditSucceeded
+    auditFailureReason = $auditFailureReason
 }
+
+$runMetadata | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 -LiteralPath $runMetadataPath
+$runMetadata
 
 exit $finalExitCode
