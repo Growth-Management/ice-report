@@ -75,7 +75,12 @@ function Get-NotionApiToken {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($TokenSecret)) {
-        $secretToken = (& gcloud.cmd secrets versions access latest --secret=$TokenSecret --project=$TokenSecretProject 2>$null)
+        $gcloudCommand = if (Get-Command gcloud.cmd -ErrorAction SilentlyContinue) {
+            "gcloud.cmd"
+        } else {
+            "gcloud"
+        }
+        $secretToken = (& $gcloudCommand secrets versions access latest --secret=$TokenSecret --project=$TokenSecretProject 2>$null)
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($secretToken)) {
             throw "Failed to read Notion API token from Secret Manager."
         }
@@ -155,6 +160,13 @@ function Write-NotionReadOnlySummary {
 $workspace = (Resolve-Path ".").Path
 $resolvedOutDir = Join-Path $workspace $OutDir
 New-Item -ItemType Directory -Force -Path $resolvedOutDir | Out-Null
+$PowerShellCommand = if (Get-Command pwsh -ErrorAction SilentlyContinue) {
+    "pwsh"
+} elseif (Get-Command powershell.exe -ErrorAction SilentlyContinue) {
+    "powershell.exe"
+} else {
+    throw "PowerShell executable not found."
+}
 
 $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
 $jsonPath = Join-Path $resolvedOutDir "operations-readonly-check-$timestamp.json"
@@ -172,7 +184,7 @@ if ($CaptureScreenshots) {
     $args += $resolvedOutDir
 }
 
-$jsonText = & powershell.exe @args
+$jsonText = & $PowerShellCommand @args
 $exitCode = $LASTEXITCODE
 
 if (-not [string]::IsNullOrWhiteSpace(($jsonText | Out-String))) {
