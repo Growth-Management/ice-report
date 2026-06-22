@@ -106,7 +106,7 @@ function Get-LogCount {
     )
 
     $lines = @(
-        & gcloud.cmd logging read $Filter `
+        & $GcloudCommand logging read $Filter `
             --project=$Project `
             --freshness=$Freshness `
             --limit=$Limit `
@@ -121,15 +121,20 @@ function Get-LogCount {
 $workspace = (Resolve-Path ".").Path
 $base = $BaseUrl.TrimEnd("/")
 $generatedAt = (Get-Date).ToUniversalTime().ToString("o")
+$GcloudCommand = if (Get-Command gcloud.cmd -ErrorAction SilentlyContinue) {
+    "gcloud.cmd"
+} else {
+    "gcloud"
+}
 
-$adminKey = (& gcloud.cmd secrets versions access latest --secret=$AdminSecret --project=$Project 2>$null)
+$adminKey = (& $GcloudCommand secrets versions access latest --secret=$AdminSecret --project=$Project 2>$null)
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($adminKey)) {
     throw "Failed to read admin key from Secret Manager."
 }
 $adminKey = $adminKey.Trim()
 
 $serviceState = Invoke-GcloudJson {
-    gcloud.cmd run services describe $Service `
+    & $GcloudCommand run services describe $Service `
         --project=$Project `
         --region=$Region `
         --format=json
@@ -174,7 +179,7 @@ $otpSentCount = Get-LogCount ($revisionFilter + ' AND textPayload:ICE_REPORT_OTP
 $uptimeConfig = $null
 if (-not [string]::IsNullOrWhiteSpace($UptimeCheck)) {
     $uptimeConfig = Invoke-GcloudJson {
-        gcloud.cmd monitoring uptime describe $UptimeCheck `
+        & $GcloudCommand monitoring uptime describe $UptimeCheck `
             --project=$Project `
             --format=json
     }
@@ -183,7 +188,7 @@ if (-not [string]::IsNullOrWhiteSpace($UptimeCheck)) {
 $uptimePolicy = $null
 if (-not [string]::IsNullOrWhiteSpace($UptimeAlertPolicy)) {
     $uptimePolicy = Invoke-GcloudJson {
-        gcloud.cmd monitoring policies describe $UptimeAlertPolicy `
+        & $GcloudCommand monitoring policies describe $UptimeAlertPolicy `
             --project=$Project `
             --format=json
     }

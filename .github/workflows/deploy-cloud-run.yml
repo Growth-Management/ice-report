@@ -41,3 +41,15 @@ jobs:
             --memory 2Gi \
             --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com \
             --allow-unauthenticated
+
+      - name: Run read-only operational check
+        shell: pwsh
+        run: ./scripts/run-operations-readonly-scheduled.ps1
+
+      - name: Upload read-only check artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operations-readonly-check-${{ github.run_id }}
+          path: artifacts/operations-readonly/
+          if-no-files-found: warn
