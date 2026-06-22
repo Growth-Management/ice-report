@@ -338,12 +338,19 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-sch
 
 - `operations-readonly-check-<timestamp>.json`
 - `operations-readonly-check-<timestamp>-summary.txt`
+- `operations-readonly-run-metadata-<timestamp>.json`
 - `admin-audit-log-review-<timestamp>.json`
 - `admin-audit-log-review-<timestamp>-summary.txt`
 
 GitHub Actions では同じ内容を `operations-readonly-check-<run_id>` artifact
 として保存します。workflow上でcheckが失敗した場合も、失敗内容を確認できる
 ようartifact upload stepは `always()` で実行します。
+
+`operations-readonly-run-metadata-<timestamp>.json` には、wrapper全体の
+`durationSeconds`、`exitCode`、`operationsExitCode`、`auditExitCode`、
+`failedChecks`、Admin audit review の成否を記録します。pipeline上で失敗した
+場合は、まずこの metadata と summary text を見て、失敗箇所と所要時間を確認
+します。
 
 Notion へ転記する場合は summary text のみを使います。JSON artifact はローカル
 確認用とし、API応答本文、Admin key、PIN、生メールアドレス、token を
@@ -373,11 +380,22 @@ Notion直接記録の前提:
 失敗時対応:
 
 1. wrapper の `passed=false` または exit code 1 を確認する
-2. `failedChecks` と summary text の `Failed checks` を確認する
-3. `/api-health`、Cloud Run latest ready revision、runtime ERROR log を優先確認する
-4. Admin認証失敗が増えているだけの場合は、誤key check由来かを確認する
-5. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
-6. Notion には summary、failedChecks、確認者、確認日時、一次対応結果を記録する
+2. `operations-readonly-run-metadata-<timestamp>.json` の `durationSeconds`、
+   `operationsExitCode`、`auditExitCode`、`failedChecks` を確認する
+3. summary text の `Failed checks` を確認する
+4. `/api-health`、Cloud Run latest ready revision、runtime ERROR log を優先確認する
+5. Admin認証失敗が増えているだけの場合は、誤key check由来かを確認する
+6. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
+7. Notion には summary、failedChecks、durationSeconds、確認者、確認日時、一次対応結果を記録する
+
+所要時間の扱い:
+
+- 単発の遅延だけではthresholdやworkflowを変更しない
+- 複数回連続して `durationSeconds` が大きく伸びる場合は、Cloud Logging read、
+  Cloud Monitoring read、Admin API read、Admin audit review のどこで時間を
+  使っているかを切り分ける
+- GitHub Actionsのtimeoutや権限を変更する場合は、失敗artifactと変更理由を
+  Notionへ記録してから別PRで扱う
 
 定期実行の前提:
 

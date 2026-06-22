@@ -58,12 +58,12 @@ $authFailureFilter = 'resource.type="cloud_run_revision" AND ' + $serviceFilter 
 
 $rows = @()
 foreach ($action in $Actions) {
-    $actionFilter = $baseFilter + ' AND textPayload:"action=' + $action + '"'
+    $actionFilter = $baseFilter + ' AND textPayload:"' + $action + '"'
     $rows += [pscustomobject]@{
         action = $action
         total = Get-LogCount $actionFilter
-        success = Get-LogCount ($actionFilter + ' AND textPayload:"result=success"')
-        failure = Get-LogCount ($actionFilter + ' AND textPayload:"result=failure"')
+        success = Get-LogCount ($actionFilter + ' AND textPayload:"result" AND textPayload:"success"')
+        failure = Get-LogCount ($actionFilter + ' AND textPayload:"result" AND textPayload:"failure"')
     }
 }
 
