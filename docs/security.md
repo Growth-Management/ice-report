@@ -368,6 +368,17 @@ warning 相当:
 - cleanup 実行、overwrite、GCS削除、Firestore record 削除は Notion または運用記録に実施者、日時、対象、理由を残す
 - Slack は通知経路であり、system of record にはしない。必要な判断記録は Notion または docs に転記する
 
+Drive backup の運用上の正本:
+
+- path: `データ設計・イベント設計 / 最終出力置き場 / ICE_20230825_report`
+- folder URL: `https://drive.google.com/drive/folders/1f4vMoGZnteUlRuejnywZuR0pDtIb6D36`
+- monthly folder URL: `https://drive.google.com/drive/folders/1WMNummfgWjZSBmYhkyuE6DEFYjNCJuM2`
+- operational owner: システム管理室
+- primary operator: 篠原邦昭
+
+この管理フォルダ配下に確認できない backup は例外扱いとし、個別 backup URL、
+閲覧確認者、確認日時、例外理由を削除承認記録へ残します。
+
 保持期間の基準:
 
 | 対象 | 保存場所 | 最短保持期間 | 削除条件 |
