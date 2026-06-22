@@ -119,11 +119,11 @@ critical系 alert、`/api-health` 外形監視、SES bounce / complaint warning
 - `scripts/check-operations-readonly.ps1`
 - `scripts/run-operations-readonly-scheduled.ps1`
 - read-only check 定期実行方針: 週1回、deploy後、incident後
+- Notion API への直接記録オプション
 
 継続課題:
 
 - deploy pipeline からの自動実行
-- Notion API への直接記録
 
 ### 6. repo hygiene
 
