@@ -368,16 +368,18 @@ warning 相当:
 - cleanup 実行、overwrite、GCS削除、Firestore record 削除は Notion または運用記録に実施者、日時、対象、理由を残す
 - Slack は通知経路であり、system of record にはしない。必要な判断記録は Notion または docs に転記する
 
-Drive backup の運用上の正本:
+Drive backup / レポート保存先の運用上の正本:
 
-- path: `データ設計・イベント設計 / 最終出力置き場 / ICE_20230825_report`
-- folder URL: `https://drive.google.com/drive/folders/1f4vMoGZnteUlRuejnywZuR0pDtIb6D36`
-- monthly folder URL: `https://drive.google.com/drive/folders/1WMNummfgWjZSBmYhkyuE6DEFYjNCJuM2`
+- 現在の対象レポート: `OMFダウンロード数報告`
+- current path: `99_共有用 / OMFダウンロード数報告`
+- current folder URL: `https://drive.google.com/drive/folders/126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt`
 - operational owner: システム管理室
 - primary operator: 篠原邦昭
 
-この管理フォルダ配下に確認できない backup は例外扱いとし、個別 backup URL、
-閲覧確認者、確認日時、例外理由を削除承認記録へ残します。
+レポートごとに格納箇所は変更する前提です。上記URLを全レポート共通の固定
+保存先として扱わず、削除承認時は対象レポートの実際の保存先 folder URL を
+記録します。対象レポートの保存先配下に確認できない backup は例外扱いとし、
+個別 backup URL、閲覧確認者、確認日時、例外理由を削除承認記録へ残します。
 
 保持期間の基準:
 
@@ -386,7 +388,7 @@ Drive backup の運用上の正本:
 | active delivery | Firestore `deliveries` | active 中は削除不可 | `active=false`、問い合わせ対応期間終了、Notion承認済み |
 | inactive / expired delivery | Firestore `deliveries` | `expires_at` から 400 日 | 関連GCS objectとDrive backupの状態確認後、Notion承認済み |
 | report Excel object | GCS `gs://ice-report-files/...` | `expires_at` から 180 日、かつ対象月から 13 か月の遅い方 | active/current参照なし、Drive backup確認済み、Notion承認済み |
-| Drive backup | Google Drive 管理フォルダ | 対象月から 7 年目安 | 業務保管方針の明示承認がある場合のみ |
+| Drive backup | 対象レポートの Drive 保存先 | 対象月から 7 年目安 | 業務保管方針の明示承認がある場合のみ |
 | download logs | Firestore `download_logs` | 作成から 400 日 | incident / 問い合わせ対応が完了し、Notion承認済み |
 | security events | Firestore `security_events` | 作成から 400 日 | incident / abuse調査が完了し、Notion承認済み |
 | admin audit logs | Firestore `admin_audit_logs` | 作成から 400 日 | 管理操作監査の確認期間終了後、Notion承認済み |
