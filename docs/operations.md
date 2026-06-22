@@ -183,6 +183,42 @@ break-glass 利用条件:
 
 rotation 手順:
 
+通常は helper script を使います。default は dry-run で、Secret Manager へ
+書き込みません。
+
+dry-run / 現行key確認:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\rotate-admin-key.ps1
+```
+
+新しい Secret version を追加する場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\rotate-admin-key.ps1 `
+  -Execute `
+  -PromptForNewKey `
+  -SkipHttpVerification
+```
+
+`-Execute` では新しい Admin key を対話入力します。key はファイル、artifact、
+Notion、ログ、チャットへ残しません。Secret version 追加後は、通常の deploy
+手順で新しい Cloud Run revision を作成し、`ADMIN_API_KEY` が新versionで
+読み込まれる状態にします。
+
+deploy後の確認:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\rotate-admin-key.ps1 `
+  -VerifyOnly `
+  -PromptForOldKey
+```
+
+`-PromptForOldKey` は旧keyが `401` になることを確認するための任意確認です。
+旧keyも値を出力・保存しません。
+
+手動で Secret version を追加する場合:
+
 ```powershell
 $newAdminKey = Read-Host 'New ADMIN_API_KEY' -AsSecureString
 $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($newAdminKey)
@@ -199,12 +235,13 @@ try {
 }
 ```
 
-Secret version 追加後は、通常の deploy 手順で新しい Cloud Run revision を作成し、`ADMIN_API_KEY` が新versionで読み込まれる状態にします。deploy後は次を確認します。
+deploy後は次を確認します。
 
 - 無認証の管理 API が `401`
 - 新key付きの `GET /deliveries?limit=1` が `200`
 - 古いkeyが `401`
 - `admin_auth_failed` が想定外に増えていない
+- runtime ERROR が増えていない
 
 ### Admin UI 中期移行方針
 
