@@ -406,5 +406,7 @@ Admin専用serviceでは、`ADMIN_IAP_AUTH_ENABLED=1` と `ADMIN_IAP_ALLOWED_EMA
 - `ADMIN_IAP_SERVICE_NAME` のdefaultは `report-generator-admin`
 - public service `report-generator` には `ADMIN_IAP_AUTH_ENABLED` を設定しない
 - 許可メールは `ADMIN_IAP_ALLOWED_EMAILS` で明示する
+- 複数管理者が必要な場合も、当面は Google Group ではなくIAP policyと `ADMIN_IAP_ALLOWED_EMAILS` への明示user追加で対応する
+- Cloud Run `roles/run.invoker` はIAP service agentのみに限定し、管理者user/groupへ直接付与しない
 - 監査ログには生メールを保存せず、`iap_email_hash` のみ保存する
 - `ADMIN_API_KEY` はmachine/scriptとbreak-glass用として継続する
