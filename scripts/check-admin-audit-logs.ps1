@@ -17,6 +17,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$GcloudCommand = if (Get-Command gcloud.cmd -ErrorAction SilentlyContinue) {
+    "gcloud.cmd"
+} else {
+    "gcloud"
+}
+
 function Join-ServiceFilter {
     param([string[]]$ServiceNames)
 
@@ -33,7 +39,7 @@ function Get-LogCount {
     param([string]$Filter)
 
     $lines = @(
-        & gcloud.cmd logging read $Filter `
+        & $GcloudCommand logging read $Filter `
             --project=$Project `
             --freshness=$Freshness `
             --limit=$Limit `

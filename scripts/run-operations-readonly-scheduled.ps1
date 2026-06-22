@@ -1,6 +1,7 @@
 param(
     [string]$OutDir = "artifacts\operations-readonly",
     [switch]$CaptureScreenshots,
+    [switch]$SkipAdminAuditReview,
     [switch]$RecordToNotion,
     [string]$NotionPageId = $env:NOTION_READONLY_CHECK_PAGE_ID,
     [string]$NotionTokenEnv = "NOTION_API_TOKEN",
@@ -98,7 +99,9 @@ function Write-NotionReadOnlySummary {
         $CheckResult,
         [string]$SummaryText,
         [string]$JsonPath,
-        [string]$SummaryPath
+        [string]$SummaryPath,
+        [string]$AuditJsonPath = "",
+        [string]$AuditSummaryPath = ""
     )
 
     if ([string]::IsNullOrWhiteSpace($PageId)) {
@@ -128,6 +131,12 @@ function Write-NotionReadOnlySummary {
     }
 
     $artifactSummary = "Local artifacts:`n- JSON: $JsonPath`n- Summary: $SummaryPath"
+    if (-not [string]::IsNullOrWhiteSpace($AuditJsonPath)) {
+        $artifactSummary += "`n- Admin audit JSON: $AuditJsonPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AuditSummaryPath)) {
+        $artifactSummary += "`n- Admin audit summary: $AuditSummaryPath"
+    }
     $children += (New-NotionParagraph -Content $artifactSummary)
 
     $body = @{
@@ -171,6 +180,8 @@ $PowerShellCommand = if (Get-Command pwsh -ErrorAction SilentlyContinue) {
 $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
 $jsonPath = Join-Path $resolvedOutDir "operations-readonly-check-$timestamp.json"
 $summaryPath = Join-Path $resolvedOutDir "operations-readonly-check-$timestamp-summary.txt"
+$auditJsonPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp.json"
+$auditSummaryPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp-summary.txt"
 
 $checkScript = Join-Path $workspace "scripts\check-operations-readonly.ps1"
 $args = @(
@@ -193,6 +204,32 @@ if (-not [string]::IsNullOrWhiteSpace(($jsonText | Out-String))) {
     $result.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $summaryPath
 }
 
+$auditResult = $null
+$auditExitCode = $null
+if (-not $SkipAdminAuditReview) {
+    $auditScript = Join-Path $workspace "scripts\check-admin-audit-logs.ps1"
+    $auditArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", $auditScript,
+        "-AsJson"
+    )
+    $auditJsonText = & $PowerShellCommand @auditArgs
+    $auditExitCode = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace(($auditJsonText | Out-String))) {
+        $auditJsonText | Set-Content -Encoding UTF8 -LiteralPath $auditJsonPath
+        $auditResult = $auditJsonText | ConvertFrom-Json
+        $auditResult.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $auditSummaryPath
+    }
+}
+
+$combinedSummary = if ($result) { [string]$result.notionSummary } else { "" }
+if ($auditResult) {
+    if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
+        $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
+    }
+    $combinedSummary += [string]$auditResult.notionSummary
+}
+
 $notionWrite = $null
 if ($RecordToNotion) {
     if (-not $result) {
@@ -207,20 +244,33 @@ if ($RecordToNotion) {
         -Token $notionToken `
         -Version $NotionVersion `
         -CheckResult $result `
-        -SummaryText $result.notionSummary `
+        -SummaryText $combinedSummary `
         -JsonPath $jsonPath `
-        -SummaryPath $summaryPath
+        -SummaryPath $summaryPath `
+        -AuditJsonPath $(if ($auditResult) { $auditJsonPath } else { "" }) `
+        -AuditSummaryPath $(if ($auditResult) { $auditSummaryPath } else { "" })
     $notionToken = $null
+}
+
+$finalExitCode = $exitCode
+if (($null -ne $auditExitCode) -and ($auditExitCode -ne 0)) {
+    $finalExitCode = $auditExitCode
 }
 
 [pscustomobject]@{
     generatedAt = (Get-Date).ToUniversalTime().ToString("o")
-    passed = if ($result) { [bool]$result.passed } else { $false }
+    passed = if ($result) {
+        [bool]$result.passed -and (($null -eq $auditResult) -or [bool]$auditResult.querySucceeded)
+    } else { $false }
     jsonPath = $jsonPath
     summaryPath = $summaryPath
+    auditJsonPath = if ($auditResult) { $auditJsonPath } else { $null }
+    auditSummaryPath = if ($auditResult) { $auditSummaryPath } else { $null }
     notionRecorded = ($null -ne $notionWrite)
     notionWrite = $notionWrite
-    exitCode = $exitCode
+    exitCode = $finalExitCode
+    operationsExitCode = $exitCode
+    auditExitCode = $auditExitCode
 }
 
-exit $exitCode
+exit $finalExitCode
