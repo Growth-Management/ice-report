@@ -3,6 +3,7 @@ param(
     [switch]$CaptureScreenshots,
     [switch]$SkipAdminAuditReview,
     [switch]$SkipAdminIapReview,
+    [switch]$SkipDocLegacyReview,
     [string[]]$ExpectedIapUsers = @("sinohara@impress.co.jp"),
     [switch]$RecordToNotion,
     [string]$NotionPageId = $env:NOTION_READONLY_CHECK_PAGE_ID,
@@ -106,7 +107,9 @@ function Write-NotionReadOnlySummary {
         [string]$AuditJsonPath = "",
         [string]$AuditSummaryPath = "",
         [string]$AdminIapJsonPath = "",
-        [string]$AdminIapSummaryPath = ""
+        [string]$AdminIapSummaryPath = "",
+        [string]$DocLegacyJsonPath = "",
+        [string]$DocLegacySummaryPath = ""
     )
 
     if ([string]::IsNullOrWhiteSpace($PageId)) {
@@ -150,6 +153,12 @@ function Write-NotionReadOnlySummary {
     }
     if (-not [string]::IsNullOrWhiteSpace($AdminIapSummaryPath)) {
         $artifactSummary += "`n- Admin IAP summary: $AdminIapSummaryPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DocLegacyJsonPath)) {
+        $artifactSummary += "`n- Docs legacy JSON: $DocLegacyJsonPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DocLegacySummaryPath)) {
+        $artifactSummary += "`n- Docs legacy summary: $DocLegacySummaryPath"
     }
     $children += (New-NotionParagraph -Content $artifactSummary)
 
@@ -200,6 +209,8 @@ $auditJsonPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp.js
 $auditSummaryPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp-summary.txt"
 $adminIapJsonPath = Join-Path $resolvedOutDir "admin-iap-readonly-check-$timestamp.json"
 $adminIapSummaryPath = Join-Path $resolvedOutDir "admin-iap-readonly-check-$timestamp-summary.txt"
+$docLegacyJsonPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$timestamp.json"
+$docLegacySummaryPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$timestamp-summary.txt"
 $runMetadataPath = Join-Path $resolvedOutDir "operations-readonly-run-metadata-$timestamp.json"
 
 $checkScript = Join-Path $workspace "scripts\check-operations-readonly.ps1"
@@ -260,6 +271,24 @@ if (-not $SkipAdminIapReview) {
     }
 }
 
+$docLegacyResult = $null
+$docLegacyExitCode = $null
+if (-not $SkipDocLegacyReview) {
+    $docLegacyScript = Join-Path $workspace "scripts\check-doc-legacy-references.ps1"
+    $docLegacyArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", $docLegacyScript,
+        "-AsJson"
+    )
+    $docLegacyJsonText = & $PowerShellCommand @docLegacyArgs
+    $docLegacyExitCode = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace(($docLegacyJsonText | Out-String))) {
+        $docLegacyJsonText | Set-Content -Encoding UTF8 -LiteralPath $docLegacyJsonPath
+        $docLegacyResult = $docLegacyJsonText | ConvertFrom-Json
+        $docLegacyResult.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $docLegacySummaryPath
+    }
+}
+
 $combinedSummary = if ($result) { [string]$result.notionSummary } else { "" }
 if ($auditResult) {
     if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
@@ -272,6 +301,12 @@ if ($adminIapResult) {
         $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
     }
     $combinedSummary += [string]$adminIapResult.notionSummary
+}
+if ($docLegacyResult) {
+    if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
+        $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
+    }
+    $combinedSummary += [string]$docLegacyResult.notionSummary
 }
 
 $notionWrite = $null
@@ -295,7 +330,9 @@ if ($RecordToNotion) {
         -AuditJsonPath $(if ($auditResult) { $auditJsonPath } else { "" }) `
         -AuditSummaryPath $(if ($auditResult) { $auditSummaryPath } else { "" }) `
         -AdminIapJsonPath $(if ($adminIapResult) { $adminIapJsonPath } else { "" }) `
-        -AdminIapSummaryPath $(if ($adminIapResult) { $adminIapSummaryPath } else { "" })
+        -AdminIapSummaryPath $(if ($adminIapResult) { $adminIapSummaryPath } else { "" }) `
+        -DocLegacyJsonPath $(if ($docLegacyResult) { $docLegacyJsonPath } else { "" }) `
+        -DocLegacySummaryPath $(if ($docLegacyResult) { $docLegacySummaryPath } else { "" })
     $notionToken = $null
 }
 
@@ -306,6 +343,9 @@ if (($null -ne $auditExitCode) -and ($auditExitCode -ne 0)) {
 if (($null -ne $adminIapExitCode) -and ($adminIapExitCode -ne 0)) {
     $finalExitCode = $adminIapExitCode
 }
+if (($null -ne $docLegacyExitCode) -and ($docLegacyExitCode -ne 0)) {
+    $finalExitCode = $docLegacyExitCode
+}
 
 $stopwatch.Stop()
 $runEndedAt = (Get-Date).ToUniversalTime()
@@ -314,7 +354,9 @@ $runPassed = if ($result) {
             (($null -eq $auditExitCode) -or ($auditExitCode -eq 0)) -and
             (($null -eq $auditResult) -or [bool]$auditResult.querySucceeded) -and
             (($null -eq $adminIapExitCode) -or ($adminIapExitCode -eq 0)) -and
-            (($null -eq $adminIapResult) -or [bool]$adminIapResult.passed)
+            (($null -eq $adminIapResult) -or [bool]$adminIapResult.passed) -and
+            (($null -eq $docLegacyExitCode) -or ($docLegacyExitCode -eq 0)) -and
+            (($null -eq $docLegacyResult) -or [bool]$docLegacyResult.passed)
     } else { $false }
 $failedChecks = @()
 if ($result -and ($null -ne $result.failedChecks)) {
@@ -324,6 +366,7 @@ if ($result -and ($null -ne $result.failedChecks)) {
 }
 $auditSucceeded = if ($null -eq $auditResult) { $null } else { [bool]$auditResult.querySucceeded }
 $adminIapSucceeded = if ($null -eq $adminIapResult) { $null } else { [bool]$adminIapResult.passed }
+$docLegacySucceeded = if ($null -eq $docLegacyResult) { $null } else { [bool]$docLegacyResult.passed }
 $auditFailureReason = if ($auditResult -and $auditResult.error) {
     [string]$auditResult.error
 } elseif (($null -ne $auditExitCode) -and ($auditExitCode -ne 0) -and ($null -eq $auditResult)) {
@@ -333,6 +376,11 @@ $auditFailureReason = if ($auditResult -and $auditResult.error) {
 }
 $adminIapFailureReason = if (($null -ne $adminIapExitCode) -and ($adminIapExitCode -ne 0) -and ($null -eq $adminIapResult)) {
     "admin_iap_review_failed_without_json"
+} else {
+    $null
+}
+$docLegacyFailureReason = if (($null -ne $docLegacyExitCode) -and ($docLegacyExitCode -ne 0) -and ($null -eq $docLegacyResult)) {
+    "docs_legacy_review_failed_without_json"
 } else {
     $null
 }
@@ -349,6 +397,8 @@ $runMetadata = [pscustomObject]@{
     auditSummaryPath = if ($auditResult) { $auditSummaryPath } else { $null }
     adminIapJsonPath = if ($adminIapResult) { $adminIapJsonPath } else { $null }
     adminIapSummaryPath = if ($adminIapResult) { $adminIapSummaryPath } else { $null }
+    docLegacyJsonPath = if ($docLegacyResult) { $docLegacyJsonPath } else { $null }
+    docLegacySummaryPath = if ($docLegacyResult) { $docLegacySummaryPath } else { $null }
     runMetadataPath = $runMetadataPath
     notionRecorded = ($null -ne $notionWrite)
     notionWrite = $notionWrite
@@ -356,11 +406,15 @@ $runMetadata = [pscustomObject]@{
     operationsExitCode = $exitCode
     auditExitCode = $auditExitCode
     adminIapExitCode = $adminIapExitCode
+    docLegacyExitCode = $docLegacyExitCode
     failedChecks = [object[]]$failedChecks
     auditQuerySucceeded = $auditSucceeded
     auditFailureReason = $auditFailureReason
     adminIapCheckPassed = $adminIapSucceeded
     adminIapFailureReason = $adminIapFailureReason
+    docLegacyCheckPassed = $docLegacySucceeded
+    docLegacyUnexpectedMatches = if ($docLegacyResult) { [int]$docLegacyResult.unexpectedMatches } else { $null }
+    docLegacyFailureReason = $docLegacyFailureReason
     expectedIapUsers = [object[]]$ExpectedIapUsers
 }
 
