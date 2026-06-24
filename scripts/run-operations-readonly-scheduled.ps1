@@ -2,6 +2,8 @@ param(
     [string]$OutDir = "artifacts\operations-readonly",
     [switch]$CaptureScreenshots,
     [switch]$SkipAdminAuditReview,
+    [switch]$SkipAdminIapReview,
+    [string[]]$ExpectedIapUsers = @("sinohara@impress.co.jp"),
     [switch]$RecordToNotion,
     [string]$NotionPageId = $env:NOTION_READONLY_CHECK_PAGE_ID,
     [string]$NotionTokenEnv = "NOTION_API_TOKEN",
@@ -102,7 +104,9 @@ function Write-NotionReadOnlySummary {
         [string]$SummaryPath,
         [string]$RunMetadataPath = "",
         [string]$AuditJsonPath = "",
-        [string]$AuditSummaryPath = ""
+        [string]$AuditSummaryPath = "",
+        [string]$AdminIapJsonPath = "",
+        [string]$AdminIapSummaryPath = ""
     )
 
     if ([string]::IsNullOrWhiteSpace($PageId)) {
@@ -140,6 +144,12 @@ function Write-NotionReadOnlySummary {
     }
     if (-not [string]::IsNullOrWhiteSpace($AuditSummaryPath)) {
         $artifactSummary += "`n- Admin audit summary: $AuditSummaryPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AdminIapJsonPath)) {
+        $artifactSummary += "`n- Admin IAP JSON: $AdminIapJsonPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AdminIapSummaryPath)) {
+        $artifactSummary += "`n- Admin IAP summary: $AdminIapSummaryPath"
     }
     $children += (New-NotionParagraph -Content $artifactSummary)
 
@@ -188,6 +198,8 @@ $jsonPath = Join-Path $resolvedOutDir "operations-readonly-check-$timestamp.json
 $summaryPath = Join-Path $resolvedOutDir "operations-readonly-check-$timestamp-summary.txt"
 $auditJsonPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp.json"
 $auditSummaryPath = Join-Path $resolvedOutDir "admin-audit-log-review-$timestamp-summary.txt"
+$adminIapJsonPath = Join-Path $resolvedOutDir "admin-iap-readonly-check-$timestamp.json"
+$adminIapSummaryPath = Join-Path $resolvedOutDir "admin-iap-readonly-check-$timestamp-summary.txt"
 $runMetadataPath = Join-Path $resolvedOutDir "operations-readonly-run-metadata-$timestamp.json"
 
 $checkScript = Join-Path $workspace "scripts\check-operations-readonly.ps1"
@@ -229,12 +241,37 @@ if (-not $SkipAdminAuditReview) {
     }
 }
 
+$adminIapResult = $null
+$adminIapExitCode = $null
+if (-not $SkipAdminIapReview) {
+    $adminIapScript = Join-Path $workspace "scripts\check-admin-iap-readonly.ps1"
+    $adminIapArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", $adminIapScript,
+        "-AsJson",
+        "-ExpectedIapUsers"
+    ) + @($ExpectedIapUsers)
+    $adminIapJsonText = & $PowerShellCommand @adminIapArgs
+    $adminIapExitCode = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace(($adminIapJsonText | Out-String))) {
+        $adminIapJsonText | Set-Content -Encoding UTF8 -LiteralPath $adminIapJsonPath
+        $adminIapResult = $adminIapJsonText | ConvertFrom-Json
+        $adminIapResult.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $adminIapSummaryPath
+    }
+}
+
 $combinedSummary = if ($result) { [string]$result.notionSummary } else { "" }
 if ($auditResult) {
     if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
         $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
     }
     $combinedSummary += [string]$auditResult.notionSummary
+}
+if ($adminIapResult) {
+    if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
+        $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
+    }
+    $combinedSummary += [string]$adminIapResult.notionSummary
 }
 
 $notionWrite = $null
@@ -256,7 +293,9 @@ if ($RecordToNotion) {
         -SummaryPath $summaryPath `
         -RunMetadataPath $runMetadataPath `
         -AuditJsonPath $(if ($auditResult) { $auditJsonPath } else { "" }) `
-        -AuditSummaryPath $(if ($auditResult) { $auditSummaryPath } else { "" })
+        -AuditSummaryPath $(if ($auditResult) { $auditSummaryPath } else { "" }) `
+        -AdminIapJsonPath $(if ($adminIapResult) { $adminIapJsonPath } else { "" }) `
+        -AdminIapSummaryPath $(if ($adminIapResult) { $adminIapSummaryPath } else { "" })
     $notionToken = $null
 }
 
@@ -264,13 +303,18 @@ $finalExitCode = $exitCode
 if (($null -ne $auditExitCode) -and ($auditExitCode -ne 0)) {
     $finalExitCode = $auditExitCode
 }
+if (($null -ne $adminIapExitCode) -and ($adminIapExitCode -ne 0)) {
+    $finalExitCode = $adminIapExitCode
+}
 
 $stopwatch.Stop()
 $runEndedAt = (Get-Date).ToUniversalTime()
 $runPassed = if ($result) {
         [bool]$result.passed -and
             (($null -eq $auditExitCode) -or ($auditExitCode -eq 0)) -and
-            (($null -eq $auditResult) -or [bool]$auditResult.querySucceeded)
+            (($null -eq $auditResult) -or [bool]$auditResult.querySucceeded) -and
+            (($null -eq $adminIapExitCode) -or ($adminIapExitCode -eq 0)) -and
+            (($null -eq $adminIapResult) -or [bool]$adminIapResult.passed)
     } else { $false }
 $failedChecks = @()
 if ($result -and ($null -ne $result.failedChecks)) {
@@ -279,10 +323,16 @@ if ($result -and ($null -ne $result.failedChecks)) {
     $failedChecks = @("operations_result_missing")
 }
 $auditSucceeded = if ($null -eq $auditResult) { $null } else { [bool]$auditResult.querySucceeded }
+$adminIapSucceeded = if ($null -eq $adminIapResult) { $null } else { [bool]$adminIapResult.passed }
 $auditFailureReason = if ($auditResult -and $auditResult.error) {
     [string]$auditResult.error
 } elseif (($null -ne $auditExitCode) -and ($auditExitCode -ne 0) -and ($null -eq $auditResult)) {
     "admin_audit_review_failed_without_json"
+} else {
+    $null
+}
+$adminIapFailureReason = if (($null -ne $adminIapExitCode) -and ($adminIapExitCode -ne 0) -and ($null -eq $adminIapResult)) {
+    "admin_iap_review_failed_without_json"
 } else {
     $null
 }
@@ -297,15 +347,21 @@ $runMetadata = [pscustomObject]@{
     summaryPath = $summaryPath
     auditJsonPath = if ($auditResult) { $auditJsonPath } else { $null }
     auditSummaryPath = if ($auditResult) { $auditSummaryPath } else { $null }
+    adminIapJsonPath = if ($adminIapResult) { $adminIapJsonPath } else { $null }
+    adminIapSummaryPath = if ($adminIapResult) { $adminIapSummaryPath } else { $null }
     runMetadataPath = $runMetadataPath
     notionRecorded = ($null -ne $notionWrite)
     notionWrite = $notionWrite
     exitCode = $finalExitCode
     operationsExitCode = $exitCode
     auditExitCode = $auditExitCode
+    adminIapExitCode = $adminIapExitCode
     failedChecks = [object[]]$failedChecks
     auditQuerySucceeded = $auditSucceeded
     auditFailureReason = $auditFailureReason
+    adminIapCheckPassed = $adminIapSucceeded
+    adminIapFailureReason = $adminIapFailureReason
+    expectedIapUsers = [object[]]$ExpectedIapUsers
 }
 
 $runMetadata | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 -LiteralPath $runMetadataPath
