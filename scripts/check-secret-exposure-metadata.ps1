@@ -201,6 +201,28 @@ $enabledSecretVersions = @(
         }
 )
 
+$trackedSensitivePaths = @($gitPaths | Where-Object { $_.trackedInHead })
+$historySensitivePaths = @($gitPaths | Where-Object { $_.commitCount -gt 0 })
+$legacyAwsSecrets = @(
+    $secrets | Where-Object {
+        $_.name -in @("aws-ses-access-key-id", "aws-ses-secret-access-key") -and $_.exists
+    }
+)
+$slackWebhookSecret = @($secrets | Where-Object { $_.name -eq "slack-download-webhook-url" } | Select-Object -First 1)
+$repoHygieneSummary = [pscustomobject]@{
+    trackedSensitivePathCount = $trackedSensitivePaths.Count
+    historySensitivePathCount = $historySensitivePaths.Count
+    legacyAwsEnvRefCount = $legacyAwsEnvRefs.Count
+    legacyAwsSecretExistsCount = $legacyAwsSecrets.Count
+    slackDownloadWebhookSecretExists = if ($slackWebhookSecret.Count -gt 0) { [bool]$slackWebhookSecret[0].exists } else { $false }
+    rewriteRequiredByCurrentMetadata = (
+        ($trackedSensitivePaths.Count -gt 0) -or
+        ($legacyAwsEnvRefs.Count -gt 0) -or
+        ($legacyAwsSecrets.Count -gt 0)
+    )
+    note = "historySensitivePathCount only means the paths existed in git history. Decide history rewrite after confirming affected secret values were rotated, revoked, or inactive."
+}
+
 $result = [pscustomobject]@{
     generatedAt = (Get-Date).ToUniversalTime().ToString("o")
     project = $Project
@@ -211,6 +233,7 @@ $result = [pscustomobject]@{
     legacyAwsEnvRefCount = $legacyAwsEnvRefs.Count
     secrets = $secrets
     enabledSecretVersions = $enabledSecretVersions
+    repoHygieneSummary = $repoHygieneSummary
     note = "This report intentionally omits secret values and file contents. Git checks use path metadata only."
 }
 

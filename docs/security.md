@@ -197,13 +197,16 @@ webhook URL の露出疑いがある場合:
 4. 本番疎通を `scripts/check-operations-readonly.ps1 -AsJson` で確認する
 5. 履歴削除が必要か、rotation済みとして履歴保持を許容するかを明示判断する
 
-2026-06-11 時点の対応:
+2026-06-24 時点の対応:
 
 - `report-generator-admin-api-key` version 1 は旧versionとして disabled
 - `report-generator-admin-api-key` version 2 は enabled
 - 無効化後の read-only operational check は PASS
 - `aws-ses-access-key-id` / `aws-ses-secret-access-key` は GCP Secret Manager 上では存在しない
-- Slack webhook URL は Slack側で旧webhookの無効化/再発行済み確認が必要
+- `env.yaml` / `webhook.txt` は HEAD でgit管理対象外
+- Slack側の Incoming Webhook は現行1件のみであることを確認済み
+- 旧webhookは revoke / delete 済み、または既に無効として扱う
+- 現時点のメタデータでは git履歴rewriteを必須にしない
 
 Slack webhook の確認完了条件:
 
@@ -212,6 +215,7 @@ Slack webhook の確認完了条件:
 - ICE Report Generator の `SLACK_WEBHOOK_SECRET_NAME` はSecret名だけを保持している
 - テスト通知または代替確認で、運用担当channelへの通知経路が確認済み
 - Notion記録にはURL実値を含めない
+- Slack側の管理画面で現行webhookが1件のみであることを確認する
 
 Repo hygiene 残件確認:
 
@@ -242,6 +246,7 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-doc-legacy-references
 - legacy Secret Manager secret が存在しない、または不要versionがdisabled/destroyedであること
 - Slack webhook旧値の無効化/再発行済み確認結果
 - docs legacy reference check の `unexpectedMatches`
+- `repoHygieneSummary.rewriteRequiredByCurrentMetadata`
 
 記録しない項目:
 
@@ -255,6 +260,8 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-doc-legacy-references
   またはrevokeを完了する
 - 既にrotation / revoke済みで、履歴に残るのが無効値だけと判断できる場合は、
   履歴rewriteを必須にしない
+- `repoHygieneSummary.rewriteRequiredByCurrentMetadata=false` かつ Slack側の旧webhook
+  無効化が確認済みであれば、通常運用では履歴rewriteを行わない
 - `unexpectedMatches` が1件以上ある場合は、該当docsを修正してから作業終了にする
 
 ## 監視・アラート
