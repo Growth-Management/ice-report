@@ -343,6 +343,8 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-sch
 - `admin-audit-log-review-<timestamp>-summary.txt`
 - `admin-iap-readonly-check-<timestamp>.json`
 - `admin-iap-readonly-check-<timestamp>-summary.txt`
+- `docs-legacy-reference-check-<timestamp>.json`
+- `docs-legacy-reference-check-<timestamp>-summary.txt`
 
 GitHub Actions では同じ内容を `operations-readonly-check-<run_id>` artifact
 として保存します。workflow上でcheckが失敗した場合も、失敗内容を確認できる
@@ -351,8 +353,9 @@ GitHub Actions では同じ内容を `operations-readonly-check-<run_id>` artifa
 `operations-readonly-run-metadata-<timestamp>.json` には、wrapper全体の
 `durationSeconds`、`exitCode`、`operationsExitCode`、`auditExitCode`、
 `adminIapExitCode`、`failedChecks`、Admin audit review の成否、Admin IAP
-drift check の成否を記録します。pipeline上で失敗した場合は、まずこの
-metadata と summary text を見て、失敗箇所と所要時間を確認します。
+drift check の成否、docs legacy reference check の成否を記録します。
+pipeline上で失敗した場合は、まずこの metadata と summary text を見て、
+失敗箇所と所要時間を確認します。
 
 Admin IAP drift check では、`report-generator-admin` のIAP policy、
 Cloud Run invoker、`ADMIN_IAP_ALLOWED_EMAILS` が期待userと一致していることを
@@ -368,6 +371,14 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-sch
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-scheduled.ps1 `
   -SkipAdminIapReview
+```
+
+docs legacy reference check は、非推奨の環境変数・認証方式・復旧記述の
+想定外混入を確認します。一時的にこの確認だけを外す場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-scheduled.ps1 `
+  -SkipDocLegacyReview
 ```
 
 Notion へ転記する場合は summary text のみを使います。JSON artifact はローカル
@@ -399,16 +410,18 @@ Notion直接記録の前提:
 
 1. wrapper の `passed=false` または exit code 1 を確認する
 2. `operations-readonly-run-metadata-<timestamp>.json` の `durationSeconds`、
-   `operationsExitCode`、`auditExitCode`、`adminIapExitCode`、`failedChecks`
-   を確認する
+   `operationsExitCode`、`auditExitCode`、`adminIapExitCode`、
+   `docLegacyExitCode`、`failedChecks` を確認する
 3. summary text の `Failed checks` を確認する
 4. `/api-health`、Cloud Run latest ready revision、runtime ERROR log を優先確認する
 5. Admin認証失敗が増えているだけの場合は、誤key check由来かを確認する
 6. Admin IAP drift check が失敗した場合は、IAP accessor、Cloud Run invoker、
    `ADMIN_IAP_ALLOWED_EMAILS` の差分を確認し、public serviceへIAP設定が
    広がっていないことを確認する
-7. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
-8. Notion には summary、failedChecks、durationSeconds、確認者、確認日時、一次対応結果を記録する
+7. docs legacy reference check が失敗した場合は、`unexpectedMatches` のpath/lineを
+   確認し、非推奨構成に戻す実行手順なら修正する
+8. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
+9. Notion には summary、failedChecks、durationSeconds、確認者、確認日時、一次対応結果を記録する
 
 所要時間の扱い:
 

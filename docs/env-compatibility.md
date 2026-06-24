@@ -159,6 +159,15 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-secret-exposure-metad
 powershell.exe -ExecutionPolicy Bypass -File scripts\check-doc-legacy-references.ps1 -AsJson
 ```
 
+定期 read-only operational check でも同じ確認を実行し、次の artifact を
+`artifacts/operations-readonly/` へ保存します。
+
+- `docs-legacy-reference-check-<timestamp>.json`
+- `docs-legacy-reference-check-<timestamp>-summary.txt`
+
+`unexpectedMatches` が1件以上ある場合は check failed として扱い、該当path/lineを
+確認します。
+
 確認ルール:
 
 - `docs/env-compatibility.md`、`docs/security.md`、`docs/ses-cutover-checklist.md`、`docs/roadmap.md`、`README.md` は旧名や非採用方式を説明するための許容場所とする

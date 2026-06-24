@@ -102,12 +102,35 @@ foreach ($path in $Paths) {
     }
 }
 
+$unexpectedMatches = @($results | Where-Object { -not $_.allowed })
+$passed = ($unexpectedMatches.Count -eq 0)
+$summaryLines = @(
+    "ICE Report Generator docs legacy reference check",
+    "",
+    "Generated at: $((Get-Date).ToUniversalTime().ToString("o"))",
+    "Overall: $(if ($passed) { 'PASS' } else { 'FAIL' })",
+    "Total matches: $($results.Count)",
+    "Unexpected matches: $($unexpectedMatches.Count)",
+    "",
+    "Review rule: allowed files may intentionally document deprecated names. Unexpected matches must be reviewed and either removed or explicitly allowed.",
+    "Do not paste secret values, local env file contents, access key values, webhook URLs, or credential fragments into Notion, Slack, GitHub, or logs."
+)
+if ($unexpectedMatches.Count -gt 0) {
+    $summaryLines += ""
+    $summaryLines += "Unexpected match locations:"
+    foreach ($match in $unexpectedMatches) {
+        $summaryLines += "- $($match.path):$($match.line)"
+    }
+}
+
 $result = [pscustomobject]@{
     generatedAt = (Get-Date).ToUniversalTime().ToString("o")
     patterns = $patterns
     totalMatches = $results.Count
-    unexpectedMatches = @($results | Where-Object { -not $_.allowed }).Count
+    unexpectedMatches = $unexpectedMatches.Count
     matches = $results
+    passed = $passed
+    notionSummary = ($summaryLines -join [Environment]::NewLine)
     note = "Review matches for legacy env/access-key assumptions. Allowed files may intentionally document deprecated names."
 }
 
@@ -115,4 +138,8 @@ if ($AsJson) {
     $result | ConvertTo-Json -Depth 8
 } else {
     $result
+}
+
+if (-not $passed) {
+    exit 1
 }
