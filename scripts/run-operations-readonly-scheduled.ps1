@@ -1,5 +1,5 @@
 param(
-    [string]$OutDir = "artifacts\operations-readonly",
+    [string]$OutDir = "artifacts/operations-readonly",
     [switch]$CaptureScreenshots,
     [switch]$SkipAdminAuditReview,
     [switch]$SkipAdminIapReview,
@@ -213,7 +213,8 @@ $docLegacyJsonPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$tim
 $docLegacySummaryPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$timestamp-summary.txt"
 $runMetadataPath = Join-Path $resolvedOutDir "operations-readonly-run-metadata-$timestamp.json"
 
-$checkScript = Join-Path $workspace "scripts\check-operations-readonly.ps1"
+$scriptsDir = Join-Path $workspace "scripts"
+$checkScript = Join-Path $scriptsDir "check-operations-readonly.ps1"
 $args = @(
     "-ExecutionPolicy", "Bypass",
     "-File", $checkScript,
@@ -237,7 +238,7 @@ if (-not [string]::IsNullOrWhiteSpace(($jsonText | Out-String))) {
 $auditResult = $null
 $auditExitCode = $null
 if (-not $SkipAdminAuditReview) {
-    $auditScript = Join-Path $workspace "scripts\check-admin-audit-logs.ps1"
+    $auditScript = Join-Path $scriptsDir "check-admin-audit-logs.ps1"
     $auditArgs = @(
         "-ExecutionPolicy", "Bypass",
         "-File", $auditScript,
@@ -255,7 +256,7 @@ if (-not $SkipAdminAuditReview) {
 $adminIapResult = $null
 $adminIapExitCode = $null
 if (-not $SkipAdminIapReview) {
-    $adminIapScript = Join-Path $workspace "scripts\check-admin-iap-readonly.ps1"
+    $adminIapScript = Join-Path $scriptsDir "check-admin-iap-readonly.ps1"
     $adminIapArgs = @(
         "-ExecutionPolicy", "Bypass",
         "-File", $adminIapScript,
@@ -274,7 +275,7 @@ if (-not $SkipAdminIapReview) {
 $docLegacyResult = $null
 $docLegacyExitCode = $null
 if (-not $SkipDocLegacyReview) {
-    $docLegacyScript = Join-Path $workspace "scripts\check-doc-legacy-references.ps1"
+    $docLegacyScript = Join-Path $scriptsDir "check-doc-legacy-references.ps1"
     $docLegacyArgs = @(
         "-ExecutionPolicy", "Bypass",
         "-File", $docLegacyScript,

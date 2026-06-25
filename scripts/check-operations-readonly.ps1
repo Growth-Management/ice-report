@@ -196,7 +196,7 @@ if (-not [string]::IsNullOrWhiteSpace($UptimeAlertPolicy)) {
 
 $screenshotMetrics = @()
 if ($CaptureScreenshots) {
-    $captureScript = Join-Path $workspace "scripts\capture-admin-deliveries.ps1"
+    $captureScript = Join-Path (Join-Path $workspace "scripts") "capture-admin-deliveries.ps1"
     $screenshotMetrics = @(
         & $captureScript `
             -BaseUrl $base `

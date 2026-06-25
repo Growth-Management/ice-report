@@ -125,6 +125,7 @@ critical系 alert、`/api-health` 外形監視、SES bounce / complaint warning
 - read-only check 定期実行方針: 週1回、deploy後、incident後
 - Notion API への直接記録オプション
 - deploy pipeline からのread-only check自動実行
+- GitHub Actions `Operations Read-Only Check` による週次 read-only check
 - pipeline check run metadata artifact: duration、exit code、failed checks、audit review成否
 - pipeline check失敗時の確認順と所要時間見直し条件
 - Admin IAP drift check artifactを定期read-only checkに統合
@@ -166,7 +167,7 @@ Phase 7 は、主要基盤の実装後に残る継続課題を日常運用へ定
 実行順:
 
 1. Phase 7継続課題整理とroadmap反映
-2. read-only operational check定期実行設計
+2. read-only operational check定期実行設計: 実装済み
 3. Admin audit log検索view / 転記粒度整理
 4. Monitoring warning/critical通知分離・threshold見直し
 5. repo hygiene残件確認
