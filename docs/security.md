@@ -226,6 +226,17 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-secret-exposure-metad
 powershell.exe -ExecutionPolicy Bypass -File scripts\check-doc-legacy-references.ps1
 ```
 
+定期 read-only operational check でも同じ metadata 確認を実行し、次の artifact を
+`artifacts/operations-readonly/` へ保存します。
+
+- `secret-exposure-metadata-<timestamp>.json`
+- `secret-exposure-metadata-<timestamp>-summary.txt`
+
+`operations-readonly-run-metadata-<timestamp>.json` には
+`repoHygieneTrackedSensitivePathCount`、`repoHygieneHistorySensitivePathCount`、
+`repoHygieneLegacyAwsEnvRefCount`、`repoHygieneLegacyAwsSecretExistsCount`、
+`repoHygieneRewriteRequiredByCurrentMetadata` を記録します。
+
 確認対象:
 
 - `env.yaml`

@@ -23,6 +23,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$gcloudInfo = Get-Command "gcloud.cmd" -ErrorAction SilentlyContinue
+if (-not $gcloudInfo) {
+    $gcloudInfo = Get-Command "gcloud" -ErrorAction SilentlyContinue
+}
+if (-not $gcloudInfo) {
+    throw "gcloud command was not found."
+}
+$GcloudCommand = $gcloudInfo.Source
+
 function Invoke-JsonCommand {
     param([string[]]$Command)
 
@@ -83,7 +92,7 @@ function Get-CloudRunEnvMetadata {
     )
 
     $serviceJson = Invoke-JsonCommand -Command @(
-        "gcloud.cmd",
+        $GcloudCommand,
         "run",
         "services",
         "describe",
@@ -121,7 +130,7 @@ function Get-SecretVersionMetadata {
     $rows = @()
     foreach ($name in $Names) {
         $secret = Invoke-JsonCommand -Command @(
-            "gcloud.cmd",
+            $GcloudCommand,
             "secrets",
             "describe",
             $name,
@@ -141,7 +150,7 @@ function Get-SecretVersionMetadata {
         }
 
         $versions = Invoke-JsonCommand -Command @(
-            "gcloud.cmd",
+            $GcloudCommand,
             "secrets",
             "versions",
             "list",
@@ -222,6 +231,26 @@ $repoHygieneSummary = [pscustomobject]@{
     )
     note = "historySensitivePathCount only means the paths existed in git history. Decide history rewrite after confirming affected secret values were rotated, revoked, or inactive."
 }
+$passed = -not [bool]$repoHygieneSummary.rewriteRequiredByCurrentMetadata
+$summaryLines = @(
+    "ICE Report Generator repo hygiene metadata review",
+    "",
+    "Generated at: $((Get-Date).ToUniversalTime().ToString("o"))",
+    "Project: $Project",
+    "Service: $Service",
+    "Overall: $(if ($passed) { 'PASS' } else { 'FAIL' })",
+    "",
+    "Current metadata:",
+    "- tracked sensitive paths: $($repoHygieneSummary.trackedSensitivePathCount)",
+    "- sensitive paths in git history: $($repoHygieneSummary.historySensitivePathCount)",
+    "- legacy AWS env refs in Cloud Run: $($repoHygieneSummary.legacyAwsEnvRefCount)",
+    "- legacy AWS secrets still exist: $($repoHygieneSummary.legacyAwsSecretExistsCount)",
+    "- Slack webhook secret exists: $($repoHygieneSummary.slackDownloadWebhookSecretExists)",
+    "- rewrite required by current metadata: $($repoHygieneSummary.rewriteRequiredByCurrentMetadata)",
+    "",
+    "Decision rule: history entries alone do not require rewrite when affected values have been rotated, revoked, disabled, or deleted.",
+    "Transfer rule: paste counts and metadata only. Do not paste secret values, webhook URLs, access key values, local file contents, Secret Manager payloads, tokens, or credential fragments."
+)
 
 $result = [pscustomobject]@{
     generatedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -234,6 +263,8 @@ $result = [pscustomobject]@{
     secrets = $secrets
     enabledSecretVersions = $enabledSecretVersions
     repoHygieneSummary = $repoHygieneSummary
+    passed = $passed
+    notionSummary = ($summaryLines -join [Environment]::NewLine)
     note = "This report intentionally omits secret values and file contents. Git checks use path metadata only."
 }
 
@@ -241,4 +272,8 @@ if ($AsJson) {
     $result | ConvertTo-Json -Depth 12
 } else {
     $result
+}
+
+if (-not $passed) {
+    exit 1
 }

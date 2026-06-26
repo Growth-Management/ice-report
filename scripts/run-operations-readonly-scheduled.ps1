@@ -5,6 +5,7 @@ param(
     [switch]$SkipAdminIapReview,
     [switch]$SkipDocLegacyReview,
     [switch]$SkipMonitoringReview,
+    [switch]$SkipRepoHygieneReview,
     [string[]]$ExpectedIapUsers = @("sinohara@impress.co.jp"),
     [switch]$RecordToNotion,
     [string]$NotionPageId = $env:NOTION_READONLY_CHECK_PAGE_ID,
@@ -112,7 +113,9 @@ function Write-NotionReadOnlySummary {
         [string]$DocLegacyJsonPath = "",
         [string]$DocLegacySummaryPath = "",
         [string]$MonitoringJsonPath = "",
-        [string]$MonitoringSummaryPath = ""
+        [string]$MonitoringSummaryPath = "",
+        [string]$RepoHygieneJsonPath = "",
+        [string]$RepoHygieneSummaryPath = ""
     )
 
     if ([string]::IsNullOrWhiteSpace($PageId)) {
@@ -169,6 +172,12 @@ function Write-NotionReadOnlySummary {
     if (-not [string]::IsNullOrWhiteSpace($MonitoringSummaryPath)) {
         $artifactSummary += "`n- Monitoring noise summary: $MonitoringSummaryPath"
     }
+    if (-not [string]::IsNullOrWhiteSpace($RepoHygieneJsonPath)) {
+        $artifactSummary += "`n- Repo hygiene JSON: $RepoHygieneJsonPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RepoHygieneSummaryPath)) {
+        $artifactSummary += "`n- Repo hygiene summary: $RepoHygieneSummaryPath"
+    }
     $children += (New-NotionParagraph -Content $artifactSummary)
 
     $body = @{
@@ -222,6 +231,8 @@ $docLegacyJsonPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$tim
 $docLegacySummaryPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$timestamp-summary.txt"
 $monitoringJsonPath = Join-Path $resolvedOutDir "monitoring-noise-review-$timestamp.json"
 $monitoringSummaryPath = Join-Path $resolvedOutDir "monitoring-noise-review-$timestamp-summary.txt"
+$repoHygieneJsonPath = Join-Path $resolvedOutDir "secret-exposure-metadata-$timestamp.json"
+$repoHygieneSummaryPath = Join-Path $resolvedOutDir "secret-exposure-metadata-$timestamp-summary.txt"
 $runMetadataPath = Join-Path $resolvedOutDir "operations-readonly-run-metadata-$timestamp.json"
 
 $scriptsDir = Join-Path $workspace "scripts"
@@ -319,6 +330,24 @@ if (-not $SkipMonitoringReview) {
     }
 }
 
+$repoHygieneResult = $null
+$repoHygieneExitCode = $null
+if (-not $SkipRepoHygieneReview) {
+    $repoHygieneScript = Join-Path $scriptsDir "check-secret-exposure-metadata.ps1"
+    $repoHygieneArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", $repoHygieneScript,
+        "-AsJson"
+    )
+    $repoHygieneJsonText = & $PowerShellCommand @repoHygieneArgs
+    $repoHygieneExitCode = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace(($repoHygieneJsonText | Out-String))) {
+        $repoHygieneJsonText | Set-Content -Encoding UTF8 -LiteralPath $repoHygieneJsonPath
+        $repoHygieneResult = $repoHygieneJsonText | ConvertFrom-Json
+        $repoHygieneResult.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $repoHygieneSummaryPath
+    }
+}
+
 $combinedSummary = if ($result) { [string]$result.notionSummary } else { "" }
 if ($auditResult) {
     if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
@@ -343,6 +372,12 @@ if ($monitoringResult) {
         $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
     }
     $combinedSummary += [string]$monitoringResult.notionSummary
+}
+if ($repoHygieneResult) {
+    if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
+        $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
+    }
+    $combinedSummary += [string]$repoHygieneResult.notionSummary
 }
 
 $notionWrite = $null
@@ -370,7 +405,9 @@ if ($RecordToNotion) {
         -DocLegacyJsonPath $(if ($docLegacyResult) { $docLegacyJsonPath } else { "" }) `
         -DocLegacySummaryPath $(if ($docLegacyResult) { $docLegacySummaryPath } else { "" }) `
         -MonitoringJsonPath $(if ($monitoringResult) { $monitoringJsonPath } else { "" }) `
-        -MonitoringSummaryPath $(if ($monitoringResult) { $monitoringSummaryPath } else { "" })
+        -MonitoringSummaryPath $(if ($monitoringResult) { $monitoringSummaryPath } else { "" }) `
+        -RepoHygieneJsonPath $(if ($repoHygieneResult) { $repoHygieneJsonPath } else { "" }) `
+        -RepoHygieneSummaryPath $(if ($repoHygieneResult) { $repoHygieneSummaryPath } else { "" })
     $notionToken = $null
 }
 
@@ -387,6 +424,9 @@ if (($null -ne $docLegacyExitCode) -and ($docLegacyExitCode -ne 0)) {
 if (($null -ne $monitoringExitCode) -and ($monitoringExitCode -ne 0)) {
     $finalExitCode = $monitoringExitCode
 }
+if (($null -ne $repoHygieneExitCode) -and ($repoHygieneExitCode -ne 0)) {
+    $finalExitCode = $repoHygieneExitCode
+}
 
 $stopwatch.Stop()
 $runEndedAt = (Get-Date).ToUniversalTime()
@@ -399,7 +439,9 @@ $runPassed = if ($result) {
             (($null -eq $docLegacyExitCode) -or ($docLegacyExitCode -eq 0)) -and
             (($null -eq $docLegacyResult) -or [bool]$docLegacyResult.passed) -and
             (($null -eq $monitoringExitCode) -or ($monitoringExitCode -eq 0)) -and
-            (($null -eq $monitoringResult) -or [bool]$monitoringResult.querySucceeded)
+            (($null -eq $monitoringResult) -or [bool]$monitoringResult.querySucceeded) -and
+            (($null -eq $repoHygieneExitCode) -or ($repoHygieneExitCode -eq 0)) -and
+            (($null -eq $repoHygieneResult) -or [bool]$repoHygieneResult.passed)
     } else { $false }
 $failedChecks = @()
 if ($result -and ($null -ne $result.failedChecks)) {
@@ -411,6 +453,7 @@ $auditSucceeded = if ($null -eq $auditResult) { $null } else { [bool]$auditResul
 $adminIapSucceeded = if ($null -eq $adminIapResult) { $null } else { [bool]$adminIapResult.passed }
 $docLegacySucceeded = if ($null -eq $docLegacyResult) { $null } else { [bool]$docLegacyResult.passed }
 $monitoringSucceeded = if ($null -eq $monitoringResult) { $null } else { [bool]$monitoringResult.querySucceeded }
+$repoHygieneSucceeded = if ($null -eq $repoHygieneResult) { $null } else { [bool]$repoHygieneResult.passed }
 $auditFailureReason = if ($auditResult -and $auditResult.error) {
     [string]$auditResult.error
 } elseif (($null -ne $auditExitCode) -and ($auditExitCode -ne 0) -and ($null -eq $auditResult)) {
@@ -433,6 +476,11 @@ $monitoringFailureReason = if (($null -ne $monitoringExitCode) -and ($monitoring
 } else {
     $null
 }
+$repoHygieneFailureReason = if (($null -ne $repoHygieneExitCode) -and ($repoHygieneExitCode -ne 0) -and ($null -eq $repoHygieneResult)) {
+    "repo_hygiene_review_failed_without_json"
+} else {
+    $null
+}
 
 $runMetadata = [pscustomObject]@{
     generatedAt = $runEndedAt.ToString("o")
@@ -450,6 +498,8 @@ $runMetadata = [pscustomObject]@{
     docLegacySummaryPath = if ($docLegacyResult) { $docLegacySummaryPath } else { $null }
     monitoringJsonPath = if ($monitoringResult) { $monitoringJsonPath } else { $null }
     monitoringSummaryPath = if ($monitoringResult) { $monitoringSummaryPath } else { $null }
+    repoHygieneJsonPath = if ($repoHygieneResult) { $repoHygieneJsonPath } else { $null }
+    repoHygieneSummaryPath = if ($repoHygieneResult) { $repoHygieneSummaryPath } else { $null }
     runMetadataPath = $runMetadataPath
     notionRecorded = ($null -ne $notionWrite)
     notionWrite = $notionWrite
@@ -459,6 +509,7 @@ $runMetadata = [pscustomObject]@{
     adminIapExitCode = $adminIapExitCode
     docLegacyExitCode = $docLegacyExitCode
     monitoringExitCode = $monitoringExitCode
+    repoHygieneExitCode = $repoHygieneExitCode
     failedChecks = [object[]]$failedChecks
     auditQuerySucceeded = $auditSucceeded
     auditFailureReason = $auditFailureReason
@@ -473,6 +524,13 @@ $runMetadata = [pscustomObject]@{
     monitoringThresholdChangeRecommended = if ($monitoringResult) { [bool]$monitoringResult.thresholdChangeRecommended } else { $null }
     monitoringChannelSplitRecommended = if ($monitoringResult) { [bool]$monitoringResult.channelSplitRecommended } else { $null }
     monitoringFailureReason = $monitoringFailureReason
+    repoHygieneCheckPassed = $repoHygieneSucceeded
+    repoHygieneTrackedSensitivePathCount = if ($repoHygieneResult) { [int]$repoHygieneResult.repoHygieneSummary.trackedSensitivePathCount } else { $null }
+    repoHygieneHistorySensitivePathCount = if ($repoHygieneResult) { [int]$repoHygieneResult.repoHygieneSummary.historySensitivePathCount } else { $null }
+    repoHygieneLegacyAwsEnvRefCount = if ($repoHygieneResult) { [int]$repoHygieneResult.repoHygieneSummary.legacyAwsEnvRefCount } else { $null }
+    repoHygieneLegacyAwsSecretExistsCount = if ($repoHygieneResult) { [int]$repoHygieneResult.repoHygieneSummary.legacyAwsSecretExistsCount } else { $null }
+    repoHygieneRewriteRequiredByCurrentMetadata = if ($repoHygieneResult) { [bool]$repoHygieneResult.repoHygieneSummary.rewriteRequiredByCurrentMetadata } else { $null }
+    repoHygieneFailureReason = $repoHygieneFailureReason
     expectedIapUsers = [object[]]$ExpectedIapUsers
 }
 

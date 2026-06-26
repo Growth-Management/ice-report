@@ -366,6 +366,8 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-sch
 - `docs-legacy-reference-check-<timestamp>-summary.txt`
 - `monitoring-noise-review-<timestamp>.json`
 - `monitoring-noise-review-<timestamp>-summary.txt`
+- `secret-exposure-metadata-<timestamp>.json`
+- `secret-exposure-metadata-<timestamp>-summary.txt`
 
 GitHub Actions では同じ内容を `operations-readonly-check-<run_id>` artifact
 として保存します。workflow上でcheckが失敗した場合も、失敗内容を確認できる
@@ -375,7 +377,8 @@ GitHub Actions では同じ内容を `operations-readonly-check-<run_id>` artifa
 `durationSeconds`、`exitCode`、`operationsExitCode`、`auditExitCode`、
 `adminIapExitCode`、`failedChecks`、Admin audit review の成否、Admin IAP
 drift check の成否、docs legacy reference check の成否、monitoring noise
-review の成否と warning / critical signal 件数を記録します。
+review の成否と warning / critical signal 件数、repo hygiene metadata review
+の成否と現在metadata上の要対応有無を記録します。
 pipeline上で失敗した場合は、まずこの metadata と summary text を見て、
 失敗箇所と所要時間を確認します。
 
@@ -411,6 +414,15 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-sch
   -SkipMonitoringReview
 ```
 
+repo hygiene metadata review は、secret値やローカルファイル内容を読まずに、
+tracked sensitive path、Cloud Run env、Secret Manager version metadata を確認します。
+一時的にこの確認だけを外す場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-scheduled.ps1 `
+  -SkipRepoHygieneReview
+```
+
 Notion へ転記する場合は summary text のみを使います。JSON artifact はローカル
 確認用とし、API応答本文、Admin key、PIN、生メールアドレス、token を
 チケットやチャットへ貼り付けません。
@@ -441,7 +453,8 @@ Notion直接記録の前提:
 1. wrapper の `passed=false` または exit code 1 を確認する
 2. `operations-readonly-run-metadata-<timestamp>.json` の `durationSeconds`、
    `operationsExitCode`、`auditExitCode`、`adminIapExitCode`、
-   `docLegacyExitCode`、`monitoringExitCode`、`failedChecks` を確認する
+   `docLegacyExitCode`、`monitoringExitCode`、`repoHygieneExitCode`、
+   `failedChecks` を確認する
 3. summary text の `Failed checks` を確認する
 4. `/api-health`、Cloud Run latest ready revision、runtime ERROR log を優先確認する
 5. Admin認証失敗が増えているだけの場合は、誤key check由来かを確認する
@@ -453,8 +466,11 @@ Notion直接記録の前提:
 8. monitoring noise review が失敗した場合は、Cloud Logging read 権限と
    対象 filter を確認する。件数が増えているだけなら、incident化有無と
    deploy / 手動smokeとの対応を確認してから threshold 変更要否を判断する
-9. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
-10. Notion には summary、failedChecks、durationSeconds、確認者、確認日時、一次対応結果を記録する
+9. repo hygiene metadata review が失敗した場合は、
+   `repoHygieneRewriteRequiredByCurrentMetadata` と count項目を確認し、
+   現在HEADのtracking、Cloud Run env、非推奨secret残存のどれが原因かを切り分ける
+10. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
+11. Notion には summary、failedChecks、durationSeconds、確認者、確認日時、一次対応結果を記録する
 
 所要時間の扱い:
 
