@@ -4,6 +4,7 @@ param(
     [switch]$SkipAdminAuditReview,
     [switch]$SkipAdminIapReview,
     [switch]$SkipDocLegacyReview,
+    [switch]$SkipMonitoringReview,
     [string[]]$ExpectedIapUsers = @("sinohara@impress.co.jp"),
     [switch]$RecordToNotion,
     [string]$NotionPageId = $env:NOTION_READONLY_CHECK_PAGE_ID,
@@ -109,7 +110,9 @@ function Write-NotionReadOnlySummary {
         [string]$AdminIapJsonPath = "",
         [string]$AdminIapSummaryPath = "",
         [string]$DocLegacyJsonPath = "",
-        [string]$DocLegacySummaryPath = ""
+        [string]$DocLegacySummaryPath = "",
+        [string]$MonitoringJsonPath = "",
+        [string]$MonitoringSummaryPath = ""
     )
 
     if ([string]::IsNullOrWhiteSpace($PageId)) {
@@ -159,6 +162,12 @@ function Write-NotionReadOnlySummary {
     }
     if (-not [string]::IsNullOrWhiteSpace($DocLegacySummaryPath)) {
         $artifactSummary += "`n- Docs legacy summary: $DocLegacySummaryPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($MonitoringJsonPath)) {
+        $artifactSummary += "`n- Monitoring noise JSON: $MonitoringJsonPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($MonitoringSummaryPath)) {
+        $artifactSummary += "`n- Monitoring noise summary: $MonitoringSummaryPath"
     }
     $children += (New-NotionParagraph -Content $artifactSummary)
 
@@ -211,6 +220,8 @@ $adminIapJsonPath = Join-Path $resolvedOutDir "admin-iap-readonly-check-$timesta
 $adminIapSummaryPath = Join-Path $resolvedOutDir "admin-iap-readonly-check-$timestamp-summary.txt"
 $docLegacyJsonPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$timestamp.json"
 $docLegacySummaryPath = Join-Path $resolvedOutDir "docs-legacy-reference-check-$timestamp-summary.txt"
+$monitoringJsonPath = Join-Path $resolvedOutDir "monitoring-noise-review-$timestamp.json"
+$monitoringSummaryPath = Join-Path $resolvedOutDir "monitoring-noise-review-$timestamp-summary.txt"
 $runMetadataPath = Join-Path $resolvedOutDir "operations-readonly-run-metadata-$timestamp.json"
 
 $scriptsDir = Join-Path $workspace "scripts"
@@ -290,6 +301,24 @@ if (-not $SkipDocLegacyReview) {
     }
 }
 
+$monitoringResult = $null
+$monitoringExitCode = $null
+if (-not $SkipMonitoringReview) {
+    $monitoringScript = Join-Path $scriptsDir "check-monitoring-noise.ps1"
+    $monitoringArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", $monitoringScript,
+        "-AsJson"
+    )
+    $monitoringJsonText = & $PowerShellCommand @monitoringArgs
+    $monitoringExitCode = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace(($monitoringJsonText | Out-String))) {
+        $monitoringJsonText | Set-Content -Encoding UTF8 -LiteralPath $monitoringJsonPath
+        $monitoringResult = $monitoringJsonText | ConvertFrom-Json
+        $monitoringResult.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $monitoringSummaryPath
+    }
+}
+
 $combinedSummary = if ($result) { [string]$result.notionSummary } else { "" }
 if ($auditResult) {
     if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
@@ -308,6 +337,12 @@ if ($docLegacyResult) {
         $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
     }
     $combinedSummary += [string]$docLegacyResult.notionSummary
+}
+if ($monitoringResult) {
+    if (-not [string]::IsNullOrWhiteSpace($combinedSummary)) {
+        $combinedSummary += [Environment]::NewLine + [Environment]::NewLine
+    }
+    $combinedSummary += [string]$monitoringResult.notionSummary
 }
 
 $notionWrite = $null
@@ -333,7 +368,9 @@ if ($RecordToNotion) {
         -AdminIapJsonPath $(if ($adminIapResult) { $adminIapJsonPath } else { "" }) `
         -AdminIapSummaryPath $(if ($adminIapResult) { $adminIapSummaryPath } else { "" }) `
         -DocLegacyJsonPath $(if ($docLegacyResult) { $docLegacyJsonPath } else { "" }) `
-        -DocLegacySummaryPath $(if ($docLegacyResult) { $docLegacySummaryPath } else { "" })
+        -DocLegacySummaryPath $(if ($docLegacyResult) { $docLegacySummaryPath } else { "" }) `
+        -MonitoringJsonPath $(if ($monitoringResult) { $monitoringJsonPath } else { "" }) `
+        -MonitoringSummaryPath $(if ($monitoringResult) { $monitoringSummaryPath } else { "" })
     $notionToken = $null
 }
 
@@ -347,6 +384,9 @@ if (($null -ne $adminIapExitCode) -and ($adminIapExitCode -ne 0)) {
 if (($null -ne $docLegacyExitCode) -and ($docLegacyExitCode -ne 0)) {
     $finalExitCode = $docLegacyExitCode
 }
+if (($null -ne $monitoringExitCode) -and ($monitoringExitCode -ne 0)) {
+    $finalExitCode = $monitoringExitCode
+}
 
 $stopwatch.Stop()
 $runEndedAt = (Get-Date).ToUniversalTime()
@@ -357,7 +397,9 @@ $runPassed = if ($result) {
             (($null -eq $adminIapExitCode) -or ($adminIapExitCode -eq 0)) -and
             (($null -eq $adminIapResult) -or [bool]$adminIapResult.passed) -and
             (($null -eq $docLegacyExitCode) -or ($docLegacyExitCode -eq 0)) -and
-            (($null -eq $docLegacyResult) -or [bool]$docLegacyResult.passed)
+            (($null -eq $docLegacyResult) -or [bool]$docLegacyResult.passed) -and
+            (($null -eq $monitoringExitCode) -or ($monitoringExitCode -eq 0)) -and
+            (($null -eq $monitoringResult) -or [bool]$monitoringResult.querySucceeded)
     } else { $false }
 $failedChecks = @()
 if ($result -and ($null -ne $result.failedChecks)) {
@@ -368,6 +410,7 @@ if ($result -and ($null -ne $result.failedChecks)) {
 $auditSucceeded = if ($null -eq $auditResult) { $null } else { [bool]$auditResult.querySucceeded }
 $adminIapSucceeded = if ($null -eq $adminIapResult) { $null } else { [bool]$adminIapResult.passed }
 $docLegacySucceeded = if ($null -eq $docLegacyResult) { $null } else { [bool]$docLegacyResult.passed }
+$monitoringSucceeded = if ($null -eq $monitoringResult) { $null } else { [bool]$monitoringResult.querySucceeded }
 $auditFailureReason = if ($auditResult -and $auditResult.error) {
     [string]$auditResult.error
 } elseif (($null -ne $auditExitCode) -and ($auditExitCode -ne 0) -and ($null -eq $auditResult)) {
@@ -382,6 +425,11 @@ $adminIapFailureReason = if (($null -ne $adminIapExitCode) -and ($adminIapExitCo
 }
 $docLegacyFailureReason = if (($null -ne $docLegacyExitCode) -and ($docLegacyExitCode -ne 0) -and ($null -eq $docLegacyResult)) {
     "docs_legacy_review_failed_without_json"
+} else {
+    $null
+}
+$monitoringFailureReason = if (($null -ne $monitoringExitCode) -and ($monitoringExitCode -ne 0) -and ($null -eq $monitoringResult)) {
+    "monitoring_noise_review_failed_without_json"
 } else {
     $null
 }
@@ -400,6 +448,8 @@ $runMetadata = [pscustomObject]@{
     adminIapSummaryPath = if ($adminIapResult) { $adminIapSummaryPath } else { $null }
     docLegacyJsonPath = if ($docLegacyResult) { $docLegacyJsonPath } else { $null }
     docLegacySummaryPath = if ($docLegacyResult) { $docLegacySummaryPath } else { $null }
+    monitoringJsonPath = if ($monitoringResult) { $monitoringJsonPath } else { $null }
+    monitoringSummaryPath = if ($monitoringResult) { $monitoringSummaryPath } else { $null }
     runMetadataPath = $runMetadataPath
     notionRecorded = ($null -ne $notionWrite)
     notionWrite = $notionWrite
@@ -408,6 +458,7 @@ $runMetadata = [pscustomObject]@{
     auditExitCode = $auditExitCode
     adminIapExitCode = $adminIapExitCode
     docLegacyExitCode = $docLegacyExitCode
+    monitoringExitCode = $monitoringExitCode
     failedChecks = [object[]]$failedChecks
     auditQuerySucceeded = $auditSucceeded
     auditFailureReason = $auditFailureReason
@@ -416,6 +467,12 @@ $runMetadata = [pscustomObject]@{
     docLegacyCheckPassed = $docLegacySucceeded
     docLegacyUnexpectedMatches = if ($docLegacyResult) { [int]$docLegacyResult.unexpectedMatches } else { $null }
     docLegacyFailureReason = $docLegacyFailureReason
+    monitoringQuerySucceeded = $monitoringSucceeded
+    monitoringCriticalSignalsTotal = if ($monitoringResult) { [int]$monitoringResult.criticalSignalsTotal } else { $null }
+    monitoringWarningSignalsTotal = if ($monitoringResult) { [int]$monitoringResult.warningSignalsTotal } else { $null }
+    monitoringThresholdChangeRecommended = if ($monitoringResult) { [bool]$monitoringResult.thresholdChangeRecommended } else { $null }
+    monitoringChannelSplitRecommended = if ($monitoringResult) { [bool]$monitoringResult.channelSplitRecommended } else { $null }
+    monitoringFailureReason = $monitoringFailureReason
     expectedIapUsers = [object[]]$ExpectedIapUsers
 }
 
