@@ -12,16 +12,20 @@ param(
         "delivery_enable",
         "cleanup_expired_deliveries"
     ),
+    [int]$RecentFailureLimit = 10,
     [switch]$AsJson
 )
 
 $ErrorActionPreference = "Stop"
 
-$GcloudCommand = if (Get-Command gcloud.cmd -ErrorAction SilentlyContinue) {
-    "gcloud.cmd"
-} else {
-    "gcloud"
+$gcloudInfo = Get-Command "gcloud.cmd" -ErrorAction SilentlyContinue
+if (-not $gcloudInfo) {
+    $gcloudInfo = Get-Command "gcloud" -ErrorAction SilentlyContinue
 }
+if (-not $gcloudInfo) {
+    throw "gcloud command was not found."
+}
+$GcloudCommand = $gcloudInfo.Source
 
 function Join-ServiceFilter {
     param([string[]]$ServiceNames)
@@ -51,6 +55,78 @@ function Get-LogCount {
     return @($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
 }
 
+function Get-LogEntries {
+    param(
+        [string]$Filter,
+        [int]$EntryLimit
+    )
+
+    if ($EntryLimit -le 0) {
+        return @()
+    }
+
+    $json = & $GcloudCommand logging read $Filter `
+        --project=$Project `
+        --freshness=$Freshness `
+        --limit=$EntryLimit `
+        --format="json" 2>$null
+    $jsonText = $json | Out-String
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($jsonText)) {
+        return $null
+    }
+
+    return @($jsonText | ConvertFrom-Json)
+}
+
+function Convert-AuditPayloadToSafeRow {
+    param(
+        [string]$Timestamp,
+        [string]$TextPayload
+    )
+
+    $action = ""
+    $result = ""
+    $targetType = ""
+    $targetId = ""
+    $statusCode = ""
+    $reason = ""
+
+    if ($TextPayload -match 'action=([^\s]+)') { $action = $Matches[1] }
+    if ($TextPayload -match 'result=([^\s]+)') { $result = $Matches[1] }
+    if ($TextPayload -match 'target_type=([^\s]*)') { $targetType = $Matches[1] }
+    if ($TextPayload -match 'target_id=([^\s]*)') { $targetId = $Matches[1] }
+    if ($TextPayload -match 'status_code=([^\s]*)') { $statusCode = $Matches[1] }
+    if ($TextPayload -match 'reason=(.*)$') { $reason = $Matches[1].Trim() }
+
+    return [pscustomobject]@{
+        timestamp = $Timestamp
+        action = $action
+        result = $result
+        targetType = $targetType
+        targetId = $targetId
+        statusCode = $statusCode
+        reason = $reason
+    }
+}
+
+function Convert-AuthFailurePayloadToSafeRow {
+    param(
+        [string]$Timestamp,
+        [string]$TextPayload
+    )
+
+    $reason = ""
+    if ($TextPayload -match 'reason=([^\s]+)') {
+        $reason = $Matches[1]
+    }
+
+    return [pscustomobject]@{
+        timestamp = $Timestamp
+        eventType = "admin_auth_failed"
+        reason = $reason
+    }
+}
+
 $generatedAt = (Get-Date).ToUniversalTime().ToString("o")
 $serviceFilter = Join-ServiceFilter $Services
 $baseFilter = 'resource.type="cloud_run_revision" AND ' + $serviceFilter + ' AND textPayload:"ICE_REPORT_ADMIN_AUDIT"'
@@ -69,9 +145,28 @@ foreach ($action in $Actions) {
 
 $totalAuditLogs = Get-LogCount $baseFilter
 $adminAuthFailures = Get-LogCount $authFailureFilter
+$recentFailureFilter = $baseFilter + ' AND textPayload:"result" AND textPayload:"failure"'
+$recentFailureEntries = Get-LogEntries -Filter $recentFailureFilter -EntryLimit $RecentFailureLimit
+$recentAuthFailureEntries = Get-LogEntries -Filter $authFailureFilter -EntryLimit $RecentFailureLimit
+$recentAuditFailures = if ($null -eq $recentFailureEntries) {
+    $null
+} else {
+    @($recentFailureEntries | ForEach-Object {
+        Convert-AuditPayloadToSafeRow -Timestamp $_.timestamp -TextPayload $_.textPayload
+    })
+}
+$recentAuthFailures = if ($null -eq $recentAuthFailureEntries) {
+    $null
+} else {
+    @($recentAuthFailureEntries | ForEach-Object {
+        Convert-AuthFailurePayloadToSafeRow -Timestamp $_.timestamp -TextPayload $_.textPayload
+    })
+}
 $querySucceeded = (
     ($null -ne $totalAuditLogs) -and
     ($null -ne $adminAuthFailures) -and
+    ($null -ne $recentAuditFailures) -and
+    ($null -ne $recentAuthFailures) -and
     (@($rows | Where-Object {
         ($null -eq $_.total) -or ($null -eq $_.success) -or ($null -eq $_.failure)
     }).Count -eq 0)
@@ -98,6 +193,35 @@ foreach ($row in $rows) {
 
 $summaryLines += @(
     "",
+    "Recent audit failures:"
+)
+if (@($recentAuditFailures).Count -eq 0) {
+    $summaryLines += "- none"
+} else {
+    foreach ($entry in $recentAuditFailures) {
+        $summaryLines += "- $($entry.timestamp) action=$($entry.action) target=$($entry.targetType)/$($entry.targetId) status=$($entry.statusCode) reason=$($entry.reason)"
+    }
+}
+
+$summaryLines += @(
+    "",
+    "Recent admin auth failure security events:"
+)
+if (@($recentAuthFailures).Count -eq 0) {
+    $summaryLines += "- none"
+} else {
+    foreach ($entry in $recentAuthFailures) {
+        $summaryLines += "- $($entry.timestamp) reason=$($entry.reason)"
+    }
+}
+
+$summaryLines += @(
+    "",
+    "Search filters:",
+    "- all audit logs: $baseFilter",
+    "- audit failures: $recentFailureFilter",
+    "- admin auth failures: $authFailureFilter",
+    "",
     "Transfer rule: paste counts and investigation notes only. Do not paste Admin key fingerprint, credential, PIN, token, raw recipient email, message body, provider event JSON, IP address, or user agent."
 )
 
@@ -110,6 +234,14 @@ $result = [pscustomobject]@{
     totalAuditLogs = $totalAuditLogs
     adminAuthFailures = $adminAuthFailures
     actions = $rows
+    recentFailureLimit = $RecentFailureLimit
+    recentAuditFailures = $recentAuditFailures
+    recentAuthFailures = $recentAuthFailures
+    searchFilters = [pscustomobject]@{
+        allAuditLogs = $baseFilter
+        auditFailures = $recentFailureFilter
+        adminAuthFailures = $authFailureFilter
+    }
     querySucceeded = $querySucceeded
     notionSummary = ($summaryLines -join [Environment]::NewLine)
 }
