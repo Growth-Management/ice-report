@@ -109,6 +109,7 @@ critical系 alert、`/api-health` 外形監視、SES bounce / complaint warning
 - SES reputation warning一次対応runbook
 - Monitoring noise review: `scripts/check-monitoring-noise.ps1`
 - warning / critical 通知分離とthreshold変更条件の判断記録
+- Monitoring noise review を定期 read-only wrapper へ統合
 
 継続課題:
 
@@ -170,7 +171,7 @@ Phase 7 は、主要基盤の実装後に残る継続課題を日常運用へ定
 1. Phase 7継続課題整理とroadmap反映
 2. read-only operational check定期実行設計: 実装済み
 3. Admin audit log検索view / 転記粒度整理: 実装済み
-4. Monitoring warning/critical通知分離・threshold見直し
+4. Monitoring warning/critical通知分離・threshold見直し: 実装済み
 5. repo hygiene残件確認
 6. Admin専用service本番運用移行判断
 

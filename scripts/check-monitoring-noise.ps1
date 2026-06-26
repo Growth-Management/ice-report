@@ -8,11 +8,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$gcloudInfo = Get-Command "gcloud.cmd" -ErrorAction SilentlyContinue
+if (-not $gcloudInfo) {
+    $gcloudInfo = Get-Command "gcloud" -ErrorAction SilentlyContinue
+}
+if (-not $gcloudInfo) {
+    throw "gcloud command was not found."
+}
+$GcloudCommand = $gcloudInfo.Source
+
 function Get-LogCount {
     param([string]$Filter)
 
     $lines = @(
-        & gcloud.cmd logging read $Filter `
+        & $GcloudCommand logging read $Filter `
             --project=$Project `
             --freshness=$Freshness `
             --limit=$Limit `
@@ -37,19 +46,19 @@ $signals = @(
     [pscustomobject]@{
         name = "otp_delivery_failed"
         severity = "critical"
-        filter = $baseFilter + ' AND textPayload:"ICE_REPORT_SECURITY_EVENT type=otp_delivery_failed"'
+        filter = $baseFilter + ' AND textPayload:"ICE_REPORT_SECURITY_EVENT" AND textPayload:"otp_delivery_failed"'
         currentDecision = "Keep threshold at one or more events in a 5-minute window."
     },
     [pscustomobject]@{
         name = "mail_delivery_failure"
         severity = "critical"
-        filter = $baseFilter + ' AND textPayload:"ICE_REPORT_MAIL_DELIVERY_ATTEMPT" AND textPayload:"result=failure"'
+        filter = $baseFilter + ' AND textPayload:"ICE_REPORT_MAIL_DELIVERY_ATTEMPT" AND textPayload:"result" AND textPayload:"failure"'
         currentDecision = "Keep threshold at one or more events in a 5-minute window."
     },
     [pscustomobject]@{
         name = "mail_provider_auth_failed"
         severity = "critical"
-        filter = $baseFilter + ' AND (textPayload:"mail_provider_auth_failed" OR textPayload:"safe_reason=mail_provider_auth_failed")'
+        filter = $baseFilter + ' AND textPayload:"mail_provider_auth_failed"'
         currentDecision = "Keep threshold at one or more events in a 5-minute window."
     },
     [pscustomobject]@{
@@ -73,6 +82,9 @@ foreach ($signal in $signals) {
 $querySucceeded = (@($rows | Where-Object { $null -eq $_.count }).Count -eq 0)
 $criticalCount = (@($rows | Where-Object { $_.severity -eq "critical" } | Measure-Object -Property count -Sum).Sum)
 $warningCount = (@($rows | Where-Object { $_.severity -eq "warning" } | Measure-Object -Property count -Sum).Sum)
+$thresholdChangeRecommended = $false
+$channelSplitRecommended = $false
+$reviewDecision = "Keep current warning/critical split and thresholds. Escalate only after incident review shows repeated non-impacting alerts."
 
 $summaryLines = @(
     "ICE Report Generator monitoring noise review",
@@ -82,6 +94,8 @@ $summaryLines = @(
     "Service: $Service",
     "Freshness: $Freshness",
     "Overall query: $(if ($querySucceeded) { 'PASS' } else { 'FAIL' })",
+    "Threshold change recommended: $thresholdChangeRecommended",
+    "New GCP warning channel recommended: $channelSplitRecommended",
     "",
     "Counts:",
     "- critical signals total: $criticalCount",
@@ -94,6 +108,7 @@ foreach ($row in $rows) {
 
 $summaryLines += @(
     "",
+    "Current decision: $reviewDecision",
     "Decision rule: do not change alert thresholds from counts alone. Review affected users, incident notes, deploy history, and whether the signal represented real user impact."
 )
 
@@ -106,6 +121,9 @@ $result = [pscustomobject]@{
     querySucceeded = $querySucceeded
     criticalSignalsTotal = $criticalCount
     warningSignalsTotal = $warningCount
+    thresholdChangeRecommended = $thresholdChangeRecommended
+    channelSplitRecommended = $channelSplitRecommended
+    reviewDecision = $reviewDecision
     signals = $rows
     notionSummary = ($summaryLines -join [Environment]::NewLine)
 }
