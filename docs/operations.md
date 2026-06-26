@@ -624,6 +624,83 @@ overwrite ON の実行前に必ず確認する項目:
 
 実行後は、current version が増えていること、GCS URI、ファイル更新時刻、Slack通知、`ICE_REPORT_ADMIN_AUDIT action=delivery_version_add result=success` を確認します。利用者影響がある差し替えでは、必要に応じて許可済みメールアドレスで OTP からダウンロードまで確認します。
 
+### 月次 Admin UI human smoke 記録テンプレート
+
+許可userが Admin専用service + IAP で月次操作を行った場合は、操作結果を
+次の粒度で運用記録へ残します。メールアドレス実値、Admin key、PIN、token、
+signed URL の token 断片、message body は記録しません。
+
+```text
+ICE Report Generator 月次 Admin UI smoke
+
+実施日時:
+実施者:
+Admin経路: report-generator-admin + IAP / break-glass X-Admin-Key
+対象report:
+target month:
+customer / recipient group:
+delivery_id:
+
+baseline確認:
+- report baseline exists:
+- Drive folder URL recorded:
+- operational owner:
+- primary operator:
+
+delivery create:
+- 実施有無:
+- result:
+- current_version:
+- GCS URI:
+- public_download_url共有可否:
+- Slack通知確認:
+- Admin audit `delivery_create`:
+
+version add:
+- 実施有無:
+- result:
+- overwrite: yes / no
+- old version:
+- new version:
+- new GCS URI:
+- Drive backup確認:
+- Admin audit `delivery_version_add`:
+
+disable / enable:
+- 実施有無:
+- disable result:
+- enable result:
+- active final state:
+- Admin audit `delivery_disable`:
+- Admin audit `delivery_enable`:
+
+DLログ確認:
+- `/download-logs` または管理画面DLログ表示:
+- 対象deliveryのログ件数:
+- 問い合わせ / incident 対応中の有無:
+
+post-check:
+- read-only operational check 実施有無:
+- Admin audit summary確認:
+- runtime ERROR有無:
+- Notion / 運用記録URL:
+
+記録しない項目:
+- Admin key、PIN、token、signed URL token断片
+- raw recipient email
+- message body、provider event JSON
+```
+
+人間向け smoke で確認する最小セット:
+
+1. Admin UI が IAP 許可userで表示できる
+2. 対象 delivery が配布一覧で確認できる
+3. 必要な場合のみ delivery create を行い、`delivery_create` audit を確認する
+4. 必要な場合のみ version add を行い、`delivery_version_add` audit と Drive backup を確認する
+5. 停止/再有効化を行った場合は、最終状態が意図どおりであることを確認する
+6. DLログ表示で対象 delivery のログ件数を確認する
+7. 操作後に read-only operational check または Admin audit log review を確認する
+
 ### Google Drive backup 後の GCS cleanup 方針
 
 GCS object の削除は破壊的操作のため、通常の月次手順では実行しません。保持期間と承認条件は `docs/security.md` の Archive Lifecycle Management を正とします。現時点の方針は次です。
