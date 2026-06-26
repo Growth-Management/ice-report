@@ -126,6 +126,17 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-admin-audit-logs.ps1 
   Set-Content -Encoding UTF8 artifacts\admin-audit-log-review.json
 ```
 
+この script は action別件数に加えて、直近の audit failure と
+`admin_auth_failed` security event を安全な項目だけに抽出します。raw log
+payloadはNotionへ転記せず、`action`、`result`、`targetType`、`targetId`、
+`statusCode`、`reason`、件数、対象期間だけを使います。直近失敗の確認数を
+変える場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\check-admin-audit-logs.ps1 `
+  -RecentFailureLimit 20
+```
+
 定期 read-only operational check では、`scripts\run-operations-readonly-scheduled.ps1`
 がこの audit review も同時に実行し、同じ artifact folder に保存します。
 一時的に除外する場合だけ `-SkipAdminAuditReview` を指定します。
