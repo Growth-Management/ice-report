@@ -505,6 +505,47 @@ Notion直接記録の前提:
 
 GCS URI を空欄にして配布作成すると、backend が BigQuery を再実行して Excel を生成し、GCS へ保存してから delivery を作成します。既に検品済みの Excel を配布する場合は、GCS URI を明示します。
 
+### 複数レポート運用 baseline
+
+複数レポートを扱う場合は、delivery 作成前にレポート単位の baseline を確認します。
+同じ月次作業でも、保存先、許可宛先、backup 先、共有文面、保持判断は
+レポートごとに変わる前提です。
+
+レポート別に固定して記録する項目:
+
+| 項目 | 記録内容 |
+| --- | --- |
+| report name | 運用上のレポート名 |
+| customer / recipient group | 顧客名、配布先グループ、許可domain |
+| target month | `YYYY-MM` |
+| GCS prefix | 生成・保管する GCS path prefix |
+| Drive folder | レポート別の保存先 folder URL |
+| operational owner | 所管部署 |
+| primary operator | 主担当者 |
+| backup requirement | overwrite / cleanup 前の backup 必須条件 |
+| delivery policy | 有効期限、再送、停止判断 |
+| verification | 作成後に確認する Admin audit、Slack通知、DLログ |
+
+現在の baseline:
+
+| report | GCS prefix | Drive folder | owner | primary operator | note |
+| --- | --- | --- | --- | --- | --- |
+| OMFダウンロード数報告 | `gs://ice-report-files/reports/plus/<yymm>/` | `https://drive.google.com/drive/folders/126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt` | システム管理室 | 篠原邦昭 | レポートごとに保存先は変更される前提。全レポート共通の固定保存先として扱わない |
+
+新しいレポートを追加する場合は、最初の delivery 作成前に上記項目を
+Notionまたは運用記録へ登録します。Drive folder が未確定のまま overwrite、
+GCS cleanup、Firestore record削除を進めません。
+
+月次作業時の最低確認:
+
+1. 対象レポートの baseline が存在する
+2. 対象月、顧客名、許可宛先、許可domain が対象レポートの運用条件と一致する
+3. GCS prefix と出力ファイル名が対象レポートの命名規則に合っている
+4. Drive folder URL、operational owner、primary operator が記録済み
+5. delivery 作成後に `delivery_create` の Admin audit、Slack通知、配布一覧を確認する
+6. version追加または停止/再有効化を行った場合は、対象操作の Admin audit と
+   DLログ表示確認を運用記録へ残す
+
 ### 月次作成の実施
 
 管理画面では「配布作成」を使います。APIで実施する場合の最小payloadは次です。
