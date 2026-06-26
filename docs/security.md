@@ -441,3 +441,11 @@ Admin専用serviceでは、`ADMIN_IAP_AUTH_ENABLED=1` と `ADMIN_IAP_ALLOWED_EMA
 - Cloud Run `roles/run.invoker` はIAP service agentのみに限定し、管理者user/groupへ直接付与しない
 - 監査ログには生メールを保存せず、`iap_email_hash` のみ保存する
 - `ADMIN_API_KEY` はmachine/scriptとbreak-glass用として継続する
+
+2026-06-26 時点の本番運用判断:
+
+- 人間向け Admin UI は `report-generator-admin` + Cloud Run direct IAP を主経路にする
+- 初期許可userは `sinohara@impress.co.jp` のみ
+- Google Group 管理は採用せず、必要になるまでは明示user allowlistで運用する
+- public service `report-generator` にはIAPを適用せず、download、OTP、healthを維持する
+- `X-Admin-Key` はmachine/scriptとbreak-glass用に残し、通常の人間操作には使わない
