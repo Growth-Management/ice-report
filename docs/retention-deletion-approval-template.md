@@ -50,6 +50,8 @@ DB化する場合の初期プロパティ候補:
 - incident 対応、abuse 調査、顧客問い合わせ、再送依頼が継続していない
 - GCS object は Drive backup URL を確認済み
 - 対象レポートのDrive保存先配下、または個別 backup URL を確認済み
+- 対象レポートの baseline と Drive backup 記録が `docs/operations.md` の
+  「複数レポート運用 baseline」「Drive backup 記録テンプレート」に沿っている
 - Firestore record は最短保持期間を満たしている
 - 実削除は rollback できない、または復旧が限定的であることを承認者が理解している
 
@@ -78,7 +80,10 @@ Drive backup URL:
 Drive backup report folder URL / owner: https://drive.google.com/drive/folders/126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt / システム管理室
 Drive backup report folder path: 99_共有用 / OMFダウンロード数報告
 Drive backup primary operator: 篠原邦昭
+Drive backup location status: report-folder / individual-url / not-found
 Drive backup閲覧確認者:
+Drive backup確認日時:
+Drive backup例外理由:
 
 削除理由:
 影響範囲:
