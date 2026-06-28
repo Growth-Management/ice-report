@@ -1636,6 +1636,77 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\check-admin-iap-readonly.ps
   -ExpectedIapUsers sinohara@impress.co.jp,admin2@example.com
 ```
 
+実運用手順:
+
+1. 追加対象user、理由、期限、作業者、rollback対象revisionをタスクに記録する
+2. `report-generator-admin` の current good revision と IAP policy を取得する
+3. 対象userへ `roles/iap.httpsResourceAccessor` を追加する
+4. `ADMIN_IAP_ALLOWED_EMAILS` を対象user込みの完全なカンマ区切り一覧で更新する
+5. `scripts\check-admin-iap-readonly.ps1 -ExpectedIapUsers <EXPECTED_USERS>` を実行する
+6. 追加userで Admin UI 表示と必要最小限の人間操作smokeを実施する
+7. public serviceの `/api-health`、`/admin`、download、OTPに影響がないことを確認する
+8. IAP policy、Cloud Run IAM policy、allowlist、smoke結果をタスクに記録する
+
+IAP policy 追加例:
+
+```powershell
+gcloud.cmd iap web add-iam-policy-binding `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --resource-type=cloud-run `
+  --service=report-generator-admin `
+  --member=user:<ADMIN_EMAIL> `
+  --role=roles/iap.httpsResourceAccessor
+```
+
+Allowlist更新例:
+
+```powershell
+gcloud.cmd run services update report-generator-admin `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --update-env-vars=ADMIN_IAP_ALLOWED_EMAILS=<COMMA_SEPARATED_ALLOWED_USERS>
+```
+
+削除時は、IAP policy と `ADMIN_IAP_ALLOWED_EMAILS` の両方から対象userを削除します。
+片方だけを変更した状態はdriftとして扱い、次の確認で失敗させます。
+
+IAP policy 削除例:
+
+```powershell
+gcloud.cmd iap web remove-iam-policy-binding `
+  --project=ice-sh `
+  --region=asia-northeast1 `
+  --resource-type=cloud-run `
+  --service=report-generator-admin `
+  --member=user:<ADMIN_EMAIL> `
+  --role=roles/iap.httpsResourceAccessor
+```
+
+drift確認:
+
+- IAP `roles/iap.httpsResourceAccessor` のuser一覧と `ADMIN_IAP_ALLOWED_EMAILS` が一致している
+- Cloud Run `roles/run.invoker` はIAP service agentのみに維持されている
+- public service `report-generator` に `ADMIN_IAP_AUTH_ENABLED` が設定されていない
+- 期待外user、group、domain単位の付与がない
+
+記録テンプレート:
+
+```text
+対象user:
+追加/削除理由:
+作業者:
+期限:
+rollback対象revision:
+IAP policy変更:
+ADMIN_IAP_ALLOWED_EMAILS変更:
+read-only check結果:
+人間操作smoke結果:
+public service影響確認:
+drift確認:
+rollback要否:
+```
+
 Google Group 管理は、管理者数が増えてライフサイクル管理を個別userで維持できなくなった時点で別タスクとして再検討します。その場合も、group採用前に rollback 手順、break-glass user、IAP policy差分、退任時の責任分界を明記します。
 
 本番運用へ寄せる条件:
