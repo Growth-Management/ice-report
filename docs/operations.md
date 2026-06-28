@@ -373,6 +373,85 @@ GitHub Actions では同じ内容を `operations-readonly-check-<run_id>` artifa
 として保存します。workflow上でcheckが失敗した場合も、失敗内容を確認できる
 ようartifact upload stepは `always()` で実行します。
 
+#### 週次 read-only check 3回レビュー
+
+Phase 8 では、`Operations Read-Only Check` workflow の週次実行結果を3回分
+確認してから、timeout、権限、monitoring threshold の変更要否を判断します。
+単発の失敗や遅延だけでは設定変更しません。
+
+確認コマンド:
+
+```powershell
+gh run list --workflow "Operations Read-Only Check" --limit 10 `
+  --json databaseId,status,conclusion,createdAt,updatedAt,event,url
+```
+
+記録テンプレート:
+
+```text
+ICE Report Generator 週次 read-only check 3回レビュー
+
+review date:
+reviewer:
+workflow: Operations Read-Only Check
+対象期間:
+
+run 1:
+- run URL:
+- createdAt:
+- conclusion:
+- duration:
+- artifact:
+- operationsExitCode:
+- auditExitCode:
+- adminIapExitCode:
+- docLegacyExitCode:
+- monitoringExitCode:
+- repoHygieneExitCode:
+- failedChecks:
+- monitoringThresholdChangeRecommended:
+- monitoringChannelSplitRecommended:
+
+run 2:
+- run URL:
+- createdAt:
+- conclusion:
+- duration:
+- artifact:
+- failedChecks:
+
+run 3:
+- run URL:
+- createdAt:
+- conclusion:
+- duration:
+- artifact:
+- failedChecks:
+
+判断:
+- timeout変更要否:
+- GCP / GitHub Actions権限変更要否:
+- monitoring threshold変更要否:
+- warning channel新設要否:
+- Notion / roadmap更新要否:
+
+次アクション:
+```
+
+3回レビューの判断条件:
+
+- 3回すべて `conclusion=success` かつ wrapper metadata `passed=true` なら、
+  workflow timeout、権限、threshold は変更しない
+- 同じ exit code または `failedChecks` が2回以上続く場合は、失敗箇所を
+  切り分けて別PRで修正する
+- `durationSeconds` が2回以上 900秒を超える場合は、timeoutではなく
+  時間を使っているcheckを先に分離する
+- `monitoringThresholdChangeRecommended=true` または
+  `monitoringChannelSplitRecommended=true` が出た場合も、incident実績と
+  alert発火履歴を確認してから判断する
+- artifact がない run は判定不能として扱い、workflow設定またはartifact uploadを
+  先に修正する
+
 `operations-readonly-run-metadata-<timestamp>.json` には、wrapper全体の
 `durationSeconds`、`exitCode`、`operationsExitCode`、`auditExitCode`、
 `adminIapExitCode`、`failedChecks`、Admin audit review の成否、Admin IAP
