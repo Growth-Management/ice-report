@@ -66,6 +66,143 @@ function New-NotionParagraph {
     }
 }
 
+function Convert-CommandOutputToText {
+    param([object[]]$Output)
+
+    return (@($Output) | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            $_.ToString()
+        } else {
+            [string]$_
+        }
+    }) -join [Environment]::NewLine
+}
+
+function Get-CheckFailureReason {
+    param([string]$OutputText)
+
+    if ($OutputText -match "PERMISSION_DENIED") {
+        return "permission_denied"
+    }
+    if ($OutputText -match "NOT_FOUND") {
+        return "resource_not_found"
+    }
+    if ($OutputText -match "UNAUTHENTICATED") {
+        return "unauthenticated"
+    }
+    if ($OutputText -match "gcloud command failed") {
+        return "gcloud_command_failed"
+    }
+    if ([string]::IsNullOrWhiteSpace($OutputText)) {
+        return "failed_without_output"
+    }
+    return "failed_without_json"
+}
+
+function Protect-DiagnosticOutput {
+    param([string]$OutputText)
+
+    if ([string]::IsNullOrWhiteSpace($OutputText)) {
+        return ""
+    }
+
+    $redacted = $OutputText
+    $redacted = $redacted -replace "(?i)(authorization\s*[:=]\s*bearer\s+)[^\s]+", '$1[REDACTED]'
+    $redacted = $redacted -replace "(?i)(x-admin-key\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
+    $redacted = $redacted -replace "(?i)(token\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
+    $redacted = $redacted -replace "(?i)(api[_-]?key\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
+    return $redacted
+}
+
+function New-FailedSubcheckResult {
+    param(
+        [string]$CheckName,
+        [int]$ExitCode,
+        [string]$OutputText
+    )
+
+    $generatedAt = (Get-Date).ToUniversalTime().ToString("o")
+    $failureReason = Get-CheckFailureReason -OutputText $OutputText
+    $redactedOutput = Protect-DiagnosticOutput -OutputText $OutputText
+    $safeOutput = if ([string]::IsNullOrWhiteSpace($redactedOutput)) {
+        ""
+    } elseif ($redactedOutput.Length -gt 4000) {
+        $redactedOutput.Substring(0, 4000)
+    } else {
+        $redactedOutput
+    }
+    $summary = @"
+ICE Report Generator $CheckName
+
+Generated at: $generatedAt
+Overall: FAIL
+Exit code: $ExitCode
+Failure reason: $failureReason
+
+Diagnostic output:
+$safeOutput
+"@
+
+    return [pscustomobject]@{
+        generatedAt = $generatedAt
+        checkName = $CheckName
+        passed = $false
+        querySucceeded = $false
+        exitCode = $ExitCode
+        error = $failureReason
+        diagnosticOutput = $safeOutput
+        failedChecks = @("$($CheckName)_failed_without_json")
+        notionSummary = $summary
+    }
+}
+
+function Invoke-JsonSubcheck {
+    param(
+        [string]$CheckName,
+        [string[]]$Arguments,
+        [string]$JsonPath,
+        [string]$SummaryPath
+    )
+
+    $output = @(& $PowerShellCommand @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    $outputText = Convert-CommandOutputToText -Output $output
+    $result = $null
+    $failureReason = $null
+
+    if (-not [string]::IsNullOrWhiteSpace($outputText)) {
+        try {
+            $result = $outputText | ConvertFrom-Json
+            $outputText | Set-Content -Encoding UTF8 -LiteralPath $JsonPath
+            if ($result.PSObject.Properties["notionSummary"]) {
+                $result.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $SummaryPath
+            }
+        } catch {
+            $result = New-FailedSubcheckResult `
+                -CheckName $CheckName `
+                -ExitCode $exitCode `
+                -OutputText $outputText
+            $failureReason = [string]$result.error
+            $result | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 -LiteralPath $JsonPath
+            $result.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $SummaryPath
+        }
+    } else {
+        $result = New-FailedSubcheckResult `
+            -CheckName $CheckName `
+            -ExitCode $exitCode `
+            -OutputText ""
+        $failureReason = [string]$result.error
+        $result | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 -LiteralPath $JsonPath
+        $result.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $SummaryPath
+    }
+
+    return [pscustomobject]@{
+        Result = $result
+        ExitCode = $exitCode
+        FailureReason = $failureReason
+    }
+}
+
 function Get-NotionApiToken {
     param(
         [string]$TokenEnv,
@@ -248,14 +385,14 @@ if ($CaptureScreenshots) {
     $args += $resolvedOutDir
 }
 
-$jsonText = & $PowerShellCommand @args
-$exitCode = $LASTEXITCODE
-
-if (-not [string]::IsNullOrWhiteSpace(($jsonText | Out-String))) {
-    $jsonText | Set-Content -Encoding UTF8 -LiteralPath $jsonPath
-    $result = $jsonText | ConvertFrom-Json
-    $result.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $summaryPath
-}
+$operationCheck = Invoke-JsonSubcheck `
+    -CheckName "operations_readonly_check" `
+    -Arguments $args `
+    -JsonPath $jsonPath `
+    -SummaryPath $summaryPath
+$result = $operationCheck.Result
+$exitCode = $operationCheck.ExitCode
+$operationFailureReason = $operationCheck.FailureReason
 
 $auditResult = $null
 $auditExitCode = $null
@@ -285,13 +422,14 @@ if (-not $SkipAdminIapReview) {
         "-AsJson",
         "-ExpectedIapUsers"
     ) + @($ExpectedIapUsers)
-    $adminIapJsonText = & $PowerShellCommand @adminIapArgs
-    $adminIapExitCode = $LASTEXITCODE
-    if (-not [string]::IsNullOrWhiteSpace(($adminIapJsonText | Out-String))) {
-        $adminIapJsonText | Set-Content -Encoding UTF8 -LiteralPath $adminIapJsonPath
-        $adminIapResult = $adminIapJsonText | ConvertFrom-Json
-        $adminIapResult.notionSummary | Set-Content -Encoding UTF8 -LiteralPath $adminIapSummaryPath
-    }
+    $adminIapCheck = Invoke-JsonSubcheck `
+        -CheckName "admin_iap_readonly_check" `
+        -Arguments $adminIapArgs `
+        -JsonPath $adminIapJsonPath `
+        -SummaryPath $adminIapSummaryPath
+    $adminIapResult = $adminIapCheck.Result
+    $adminIapExitCode = $adminIapCheck.ExitCode
+    $adminIapFailureReason = $adminIapCheck.FailureReason
 }
 
 $docLegacyResult = $null
@@ -461,7 +599,9 @@ $auditFailureReason = if ($auditResult -and $auditResult.error) {
 } else {
     $null
 }
-$adminIapFailureReason = if (($null -ne $adminIapExitCode) -and ($adminIapExitCode -ne 0) -and ($null -eq $adminIapResult)) {
+$adminIapFailureReason = if ($adminIapResult -and $adminIapResult.error) {
+    [string]$adminIapResult.error
+} elseif (($null -ne $adminIapExitCode) -and ($adminIapExitCode -ne 0) -and ($null -eq $adminIapResult)) {
     "admin_iap_review_failed_without_json"
 } else {
     $null
@@ -505,6 +645,7 @@ $runMetadata = [pscustomObject]@{
     notionWrite = $notionWrite
     exitCode = $finalExitCode
     operationsExitCode = $exitCode
+    operationsFailureReason = $operationFailureReason
     auditExitCode = $auditExitCode
     adminIapExitCode = $adminIapExitCode
     docLegacyExitCode = $docLegacyExitCode
