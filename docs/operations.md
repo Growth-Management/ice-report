@@ -732,6 +732,37 @@ Notion直接記録の前提:
   - この run を「3回成功レビュー」の 2/3 として数える
   - `notionWrite=null` のため、今回も Notion へは手動で補完記録する
 
+2026-06-30 6回目手動 run 記録:
+
+- workflow run: `28409091044`
+- event: `workflow_dispatch`
+- conclusion: `success`
+- duration: 約1分51秒
+- artifact: `operations-readonly-check-28409091044`
+- 成功した確認:
+  - read-only operational check
+  - Admin IAP drift check
+  - Admin audit review
+  - docs legacy reference check
+  - monitoring noise review
+  - repo hygiene metadata review
+- metadata:
+  - `operationsExitCode=0`
+  - `adminIapExitCode=0`
+  - `docLegacyExitCode=0`
+  - `monitoringExitCode=0`
+  - `repoHygieneExitCode=0`
+  - `failedChecks` なし
+- Admin IAP drift:
+  - 未ログイン `/admin` は IAP 生成の `302` で Google login へ遷移
+  - public `/api-health` は `200`
+  - public `/admin` は `200`
+  - Admin runtime ERROR は `0`
+- 判断:
+  - この run を「3回成功レビュー」の 3/3 として数える
+  - 3回成功レビューの結果、workflow timeout / 権限 / monitoring threshold の追加変更は不要
+  - `notionWrite=null` のため、今回も Notion へは手動で補完記録する
+
 所要時間の扱い:
 
 - 単発の遅延だけではthresholdやworkflowを変更しない
