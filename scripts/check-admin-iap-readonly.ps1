@@ -77,9 +77,11 @@ function Get-EnvValue {
 }
 
 function Resolve-CurlCommand {
-    $curlInfo = Get-Command "curl.exe" -CommandType Application -ErrorAction SilentlyContinue
+    $curlInfo = Get-Command "curl.exe" -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
     if (-not $curlInfo) {
-        $curlInfo = Get-Command "curl" -CommandType Application -ErrorAction SilentlyContinue
+        $curlInfo = Get-Command "curl" -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
     }
     if (-not $curlInfo) {
         throw "curl command was not found."

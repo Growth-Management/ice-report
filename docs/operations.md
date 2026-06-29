@@ -652,6 +652,26 @@ Notion直接記録の前提:
   - script を `curl.exe` / `curl` 両対応に修正して再実行する
   - この失敗runは「3回成功レビュー」には数えない
 
+2026-06-29 3回目手動 run 記録:
+
+- workflow run: `28352173345`
+- event: `workflow_dispatch`
+- conclusion: `failure`
+- artifact: `operations-readonly-check-28352173345`
+- 成功した確認:
+  - read-only operational check
+  - Admin audit review
+  - docs legacy reference check
+  - monitoring noise review
+  - repo hygiene metadata review
+- 失敗した確認:
+  - Admin IAP drift check
+- 原因:
+  - Ubuntu runner 上で `Get-Command curl` が複数候補を返し、実行パスが結合された
+- 判断:
+  - `curl.exe` / `curl` 解決時に最初の application だけを使う
+  - この失敗runは「3回成功レビュー」には数えない
+
 所要時間の扱い:
 
 - 単発の遅延だけではthresholdやworkflowを変更しない
