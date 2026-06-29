@@ -672,6 +672,36 @@ Notion直接記録の前提:
   - `curl.exe` / `curl` 解決時に最初の application だけを使う
   - この失敗runは「3回成功レビュー」には数えない
 
+2026-06-29 4回目手動 run 記録:
+
+- workflow run: `28352409745`
+- event: `workflow_dispatch`
+- conclusion: `success`
+- duration: 約1分33秒
+- artifact: `operations-readonly-check-28352409745`
+- 成功した確認:
+  - read-only operational check
+  - Admin IAP drift check
+  - Admin audit review
+  - docs legacy reference check
+  - monitoring noise review
+  - repo hygiene metadata review
+- metadata:
+  - `operationsExitCode=0`
+  - `adminIapExitCode=0`
+  - `docLegacyExitCode=0`
+  - `monitoringExitCode=0`
+  - `repoHygieneExitCode=0`
+  - `failedChecks` なし
+- Admin IAP drift:
+  - 未ログイン `/admin` は IAP 生成の `302` で Google login へ遷移
+  - public `/api-health` は `200`
+  - public `/admin` は `200`
+  - Admin runtime ERROR は `0`
+- 判断:
+  - GitHub Actions 実行主体の read 権限と Linux runner 互換性は解消済み
+  - この run を「3回成功レビュー」の 1/3 として数える
+
 所要時間の扱い:
 
 - 単発の遅延だけではthresholdやworkflowを変更しない
