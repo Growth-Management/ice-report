@@ -551,6 +551,30 @@ Notion直接記録の前提:
 10. 利用者影響がある場合は本 playbook の一次対応または rollback 手順へ進む
 11. Notion には summary、failedChecks、durationSeconds、確認者、確認日時、一次対応結果を記録する
 
+2026-06-29 初回手動 run 記録:
+
+- workflow run: `28340664457`
+- event: `workflow_dispatch`
+- conclusion: `failure`
+- duration: 約1分40秒
+- artifact: `operations-readonly-check-28340664457`
+- 成功した確認:
+  - Admin audit review
+  - docs legacy reference check
+  - monitoring noise review
+  - repo hygiene metadata review
+- 失敗した確認:
+  - read-only operational check
+  - Admin IAP drift check
+- 原因:
+  - GitHub Actions 実行主体に `monitoring.uptimeCheckConfigs.get` が不足
+  - GitHub Actions 実行主体に `iap.web.getIamPolicy` が不足
+- 判断:
+  - timeout変更は不要
+  - monitoring threshold変更は不要
+  - GitHub Actions 実行主体のread権限追加後に再実行する
+  - この失敗runは「3回成功レビュー」には数えず、権限不足切り分け実績として扱う
+
 所要時間の扱い:
 
 - 単発の遅延だけではthresholdやworkflowを変更しない
@@ -568,6 +592,18 @@ Notion直接記録の前提:
 - Admin audit log review のため Cloud Logging read 権限がある
 - GitHub Actionsで実行する場合は、deploy用workload identityのservice accountに
   上記read権限と `report-generator-admin-api-key` のSecret Manager read権限がある
+- `Operations Read-Only Check` の GitHub Actions 実行主体には、少なくとも次の
+  確認が通る権限が必要です
+  - Cloud Run service describe と IAM policy read
+  - Cloud Logging read
+  - Secret Manager latest version access for `report-generator-admin-api-key`
+  - Cloud Monitoring uptime check / alert policy read
+  - IAP web IAM policy read for `report-generator-admin`
+- Cloud Monitoring は `roles/monitoring.viewer` で
+  `monitoring.uptimeCheckConfigs.get` と `monitoring.alertPolicies.get` を満たします
+- IAP policy read は `iap.web.getIamPolicy` が必要です。
+  `roles/iap.admin` はこの権限を含みますが setIamPolicy も含むため、定期read-only
+  実行主体には `iap.web.getIamPolicy` のみを含む custom role を優先検討します
 - 実行環境に保存される artifact はローカル運用記録として扱い、git commitしない
 
 ## 月次運用
