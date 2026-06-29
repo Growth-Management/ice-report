@@ -458,6 +458,9 @@ run 3:
 Admin audit review の成否、Admin IAP drift check の成否、docs legacy reference
 check の成否、monitoring noise review の成否と warning / critical signal 件数、
 repo hygiene metadata review の成否と現在metadata上の要対応有無を記録します。
+Notion直接記録を使う場合は、`notionRunKey`、`notionPreviewPath`、
+`notionSafetyViolations`、`notionRecorded`、`notionRecordError`、
+`notionWrite.skipped` も確認します。
 pipeline上で失敗した場合は、まずこの metadata と summary text を見て、
 失敗箇所と所要時間を確認します。
 
@@ -520,6 +523,30 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-sch
   -RecordToNotion
 ```
 
+Notionへ書き込まずに送信予定内容だけを確認する場合:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-scheduled.ps1 `
+  -PreviewNotion
+```
+
+この場合、`notion-readonly-record-preview-<timestamp>.txt` を
+`artifacts/operations-readonly/` に保存し、Notion API token は要求しません。
+
+重複記録を避ける場合は、実行単位で安定した run key を指定します。
+GitHub Actions では `GITHUB_RUN_ID` を既定値として使います。ローカル実行では
+`local-<timestamp>` を使います。
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\run-operations-readonly-scheduled.ps1 `
+  -RecordToNotion `
+  -NotionRunKey github-run-<RUN_ID>
+```
+
+同じ run key が追記先ページに既に存在する場合、既定では重複appendせず
+`notionWrite.skipped=true` として metadata に記録します。明示的に重複を許す場合だけ
+`-AllowDuplicateNotionRecord` を指定します。
+
 または、実行環境だけに `NOTION_API_TOKEN` を設定して実行します。token値は
 ローカルファイル、artifact、Notion本文、ログ、チャットへ残しません。
 
@@ -531,6 +558,10 @@ Notion直接記録の前提:
 - Notion API token は `NOTION_API_TOKEN` または Secret Manager secret から読む
 - Notion API version は wrapper 既定の `2026-03-11` を使う
 - 追記する内容は `notionSummary` とローカルartifact pathだけに限定する
+- Notionへ送る直前にメールアドレス、Slack webhook URL、AWS credential-like形式、
+  bearer token、`X-Admin-Key`、signed URL 形式をredactし、残存していれば書き込みを止める
+- Notion書き込みに失敗しても read-only check 本体の成否とは分離し、
+  `notionRecordError` にredact済み理由を残す
 
 失敗時対応:
 

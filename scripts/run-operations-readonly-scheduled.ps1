@@ -8,6 +8,9 @@ param(
     [switch]$SkipRepoHygieneReview,
     [string[]]$ExpectedIapUsers = @("sinohara@impress.co.jp"),
     [switch]$RecordToNotion,
+    [switch]$PreviewNotion,
+    [string]$NotionRunKey = $env:GITHUB_RUN_ID,
+    [switch]$AllowDuplicateNotionRecord,
     [string]$NotionPageId = $env:NOTION_READONLY_CHECK_PAGE_ID,
     [string]$NotionTokenEnv = "NOTION_API_TOKEN",
     [string]$NotionTokenSecret = $env:NOTION_API_TOKEN_SECRET_NAME,
@@ -107,11 +110,50 @@ function Protect-DiagnosticOutput {
     }
 
     $redacted = $OutputText
-    $redacted = $redacted -replace "(?i)(authorization\s*[:=]\s*bearer\s+)[^\s]+", '$1[REDACTED]'
-    $redacted = $redacted -replace "(?i)(x-admin-key\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
+    $redacted = $redacted -replace "(?i)authorization\s*[:=]\s*bearer\s+[^\s]+", 'Authorization: [REDACTED]'
+    $redacted = $redacted -replace "(?i)x-admin-key\s*[:=]\s*[^\s]+", 'X-Admin-Key redacted'
     $redacted = $redacted -replace "(?i)(token\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
     $redacted = $redacted -replace "(?i)(api[_-]?key\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
     return $redacted
+}
+
+function Protect-NotionRecordText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return ""
+    }
+
+    $redacted = Protect-DiagnosticOutput -OutputText $Text
+    $redacted = $redacted -replace "https://hooks\.slack\.com/[^\s`"')<>]+", "[REDACTED_SLACK_WEBHOOK_URL]"
+    $redacted = $redacted -replace "(?i)\b(AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED_AWS_ACCESS_KEY]"
+    $redacted = $redacted -replace "(?i)(secret[_-]?access[_-]?key\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
+    $redacted = $redacted -replace "(?i)(pin\s*[:=]\s*)[0-9]{4,8}", '$1[REDACTED]'
+    $redacted = $redacted -replace "(?i)(admin[_ -]?key(?: fingerprint)?\s*[:=]\s*)[^\s]+", '$1[REDACTED]'
+    $redacted = $redacted -replace "(?i)(signed[_ -]?url\s*[:=]\s*)https?://[^\s]+", '$1[REDACTED_SIGNED_URL]'
+    $redacted = $redacted -replace "\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[REDACTED_EMAIL]"
+    return $redacted
+}
+
+function Test-NotionRecordSafety {
+    param([string]$Text)
+
+    $patterns = [ordered]@{
+        slack_webhook_url = "https://hooks\.slack\.com/"
+        aws_access_key = "(?i)\b(AKIA|ASIA)[A-Z0-9]{16}\b"
+        bearer_token = "(?i)authorization\s*[:=]\s*bearer\s+[^\s]+"
+        admin_key_value = "(?i)x-admin-key\s*[:=]\s*[^\s]+"
+        raw_email = "\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"
+        signed_url = "(?i)signed[_ -]?url\s*[:=]\s*https?://[^\s]+"
+    }
+
+    $violations = @()
+    foreach ($entry in $patterns.GetEnumerator()) {
+        if ($Text -match $entry.Value) {
+            $violations += $entry.Key
+        }
+    }
+    return $violations
 }
 
 function New-FailedSubcheckResult {
@@ -123,7 +165,7 @@ function New-FailedSubcheckResult {
 
     $generatedAt = (Get-Date).ToUniversalTime().ToString("o")
     $failureReason = Get-CheckFailureReason -OutputText $OutputText
-    $redactedOutput = Protect-DiagnosticOutput -OutputText $OutputText
+    $redactedOutput = Protect-NotionRecordText -Text $OutputText
     $safeOutput = if ([string]::IsNullOrWhiteSpace($redactedOutput)) {
         ""
     } elseif ($redactedOutput.Length -gt 4000) {
@@ -233,11 +275,48 @@ function Get-NotionApiToken {
     throw "Notion token is required. Set NOTION_API_TOKEN or pass -NotionTokenSecret."
 }
 
+function Test-NotionRunKeyExists {
+    param(
+        [string]$PageId,
+        [string]$Token,
+        [string]$Version,
+        [string]$RunKey
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RunKey)) {
+        return $false
+    }
+
+    $headers = @{
+        Authorization = "Bearer $Token"
+        "Notion-Version" = $Version
+    }
+    $cursor = ""
+    do {
+        $uri = "https://api.notion.com/v1/blocks/$PageId/children?page_size=100"
+        if (-not [string]::IsNullOrWhiteSpace($cursor)) {
+            $uri += "&start_cursor=$cursor"
+        }
+        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+        foreach ($block in @($response.results)) {
+            $json = $block | ConvertTo-Json -Depth 20
+            if ($json.Contains($RunKey)) {
+                return $true
+            }
+        }
+        $cursor = $response.next_cursor
+    } while ($response.has_more -and -not [string]::IsNullOrWhiteSpace($cursor))
+
+    return $false
+}
+
 function Write-NotionReadOnlySummary {
     param(
         [string]$PageId,
         [string]$Token,
         [string]$Version,
+        [string]$RunKey,
+        [switch]$AllowDuplicate,
         $CheckResult,
         [string]$SummaryText,
         [string]$JsonPath,
@@ -257,6 +336,19 @@ function Write-NotionReadOnlySummary {
 
     if ([string]::IsNullOrWhiteSpace($PageId)) {
         throw "Notion page id is required. Set NOTION_READONLY_CHECK_PAGE_ID or pass -NotionPageId."
+    }
+    if (-not $AllowDuplicate -and -not [string]::IsNullOrWhiteSpace($RunKey)) {
+        if (Test-NotionRunKeyExists -PageId $PageId -Token $Token -Version $Version -RunKey $RunKey) {
+            return [pscustomobject]@{
+                pageId = $PageId
+                notionVersion = $Version
+                runKey = $RunKey
+                skipped = $true
+                skipReason = "duplicate_run_key"
+                appendedBlockCount = 0
+                hasMore = $false
+            }
+        }
     }
 
     $title = "Read-only operational check: "
@@ -279,6 +371,10 @@ function Write-NotionReadOnlySummary {
 
     foreach ($chunk in (Split-TextChunk -Text $SummaryText)) {
         $children += (New-NotionParagraph -Content $chunk)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($RunKey)) {
+        $children += (New-NotionParagraph -Content "Run key: $RunKey")
     }
 
     $artifactSummary = "Local artifacts:`n- JSON: $JsonPath`n- Summary: $SummaryPath"
@@ -339,6 +435,9 @@ function Write-NotionReadOnlySummary {
     return [pscustomobject]@{
         pageId = $PageId
         notionVersion = $Version
+        runKey = $RunKey
+        skipped = $false
+        skipReason = $null
         appendedBlockCount = @($response.results).Count
         hasMore = $response.has_more
     }
@@ -371,6 +470,14 @@ $monitoringSummaryPath = Join-Path $resolvedOutDir "monitoring-noise-review-$tim
 $repoHygieneJsonPath = Join-Path $resolvedOutDir "secret-exposure-metadata-$timestamp.json"
 $repoHygieneSummaryPath = Join-Path $resolvedOutDir "secret-exposure-metadata-$timestamp-summary.txt"
 $runMetadataPath = Join-Path $resolvedOutDir "operations-readonly-run-metadata-$timestamp.json"
+$notionPreviewPath = Join-Path $resolvedOutDir "notion-readonly-record-preview-$timestamp.txt"
+if ([string]::IsNullOrWhiteSpace($NotionRunKey)) {
+    $NotionRunKey = if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_RUN_ID)) {
+        "github-run-$($env:GITHUB_RUN_ID)"
+    } else {
+        "local-$timestamp"
+    }
+}
 
 $scriptsDir = Join-Path $workspace "scripts"
 $checkScript = Join-Path $scriptsDir "check-operations-readonly.ps1"
@@ -518,35 +625,60 @@ if ($repoHygieneResult) {
     $combinedSummary += [string]$repoHygieneResult.notionSummary
 }
 
+$notionSummaryForWrite = Protect-NotionRecordText -Text $combinedSummary
+$notionSafetyViolations = @(Test-NotionRecordSafety -Text $notionSummaryForWrite)
+$notionPreview = @"
+Notion read-only check record preview
+
+Run key: $NotionRunKey
+Generated at: $((Get-Date).ToUniversalTime().ToString("o"))
+Would record: $($RecordToNotion -and -not $PreviewNotion)
+Safety violations: $(if ($notionSafetyViolations.Count -eq 0) { "none" } else { $notionSafetyViolations -join ", " })
+
+$notionSummaryForWrite
+"@
+$notionPreview | Set-Content -Encoding UTF8 -LiteralPath $notionPreviewPath
+
 $notionWrite = $null
-if ($RecordToNotion) {
+$notionRecordError = $null
+if (($RecordToNotion -or $PreviewNotion) -and ($notionSafetyViolations.Count -gt 0)) {
+    throw "Notion record preview contains forbidden values: $($notionSafetyViolations -join ', ')"
+}
+if ($RecordToNotion -and -not $PreviewNotion) {
     if (-not $result) {
         throw "Read-only check result is missing; cannot record to Notion."
     }
-    $notionToken = Get-NotionApiToken `
-        -TokenEnv $NotionTokenEnv `
-        -TokenSecret $NotionTokenSecret `
-        -TokenSecretProject $NotionTokenSecretProject
-    $notionWrite = Write-NotionReadOnlySummary `
-        -PageId $NotionPageId `
-        -Token $notionToken `
-        -Version $NotionVersion `
-        -CheckResult $result `
-        -SummaryText $combinedSummary `
-        -JsonPath $jsonPath `
-        -SummaryPath $summaryPath `
-        -RunMetadataPath $runMetadataPath `
-        -AuditJsonPath $(if ($auditResult) { $auditJsonPath } else { "" }) `
-        -AuditSummaryPath $(if ($auditResult) { $auditSummaryPath } else { "" }) `
-        -AdminIapJsonPath $(if ($adminIapResult) { $adminIapJsonPath } else { "" }) `
-        -AdminIapSummaryPath $(if ($adminIapResult) { $adminIapSummaryPath } else { "" }) `
-        -DocLegacyJsonPath $(if ($docLegacyResult) { $docLegacyJsonPath } else { "" }) `
-        -DocLegacySummaryPath $(if ($docLegacyResult) { $docLegacySummaryPath } else { "" }) `
-        -MonitoringJsonPath $(if ($monitoringResult) { $monitoringJsonPath } else { "" }) `
-        -MonitoringSummaryPath $(if ($monitoringResult) { $monitoringSummaryPath } else { "" }) `
-        -RepoHygieneJsonPath $(if ($repoHygieneResult) { $repoHygieneJsonPath } else { "" }) `
-        -RepoHygieneSummaryPath $(if ($repoHygieneResult) { $repoHygieneSummaryPath } else { "" })
-    $notionToken = $null
+    try {
+        $notionToken = Get-NotionApiToken `
+            -TokenEnv $NotionTokenEnv `
+            -TokenSecret $NotionTokenSecret `
+            -TokenSecretProject $NotionTokenSecretProject
+        $notionWrite = Write-NotionReadOnlySummary `
+            -PageId $NotionPageId `
+            -Token $notionToken `
+            -Version $NotionVersion `
+            -RunKey $NotionRunKey `
+            -AllowDuplicate:$AllowDuplicateNotionRecord `
+            -CheckResult $result `
+            -SummaryText $notionSummaryForWrite `
+            -JsonPath $jsonPath `
+            -SummaryPath $summaryPath `
+            -RunMetadataPath $runMetadataPath `
+            -AuditJsonPath $(if ($auditResult) { $auditJsonPath } else { "" }) `
+            -AuditSummaryPath $(if ($auditResult) { $auditSummaryPath } else { "" }) `
+            -AdminIapJsonPath $(if ($adminIapResult) { $adminIapJsonPath } else { "" }) `
+            -AdminIapSummaryPath $(if ($adminIapResult) { $adminIapSummaryPath } else { "" }) `
+            -DocLegacyJsonPath $(if ($docLegacyResult) { $docLegacyJsonPath } else { "" }) `
+            -DocLegacySummaryPath $(if ($docLegacyResult) { $docLegacySummaryPath } else { "" }) `
+            -MonitoringJsonPath $(if ($monitoringResult) { $monitoringJsonPath } else { "" }) `
+            -MonitoringSummaryPath $(if ($monitoringResult) { $monitoringSummaryPath } else { "" }) `
+            -RepoHygieneJsonPath $(if ($repoHygieneResult) { $repoHygieneJsonPath } else { "" }) `
+            -RepoHygieneSummaryPath $(if ($repoHygieneResult) { $repoHygieneSummaryPath } else { "" })
+    } catch {
+        $notionRecordError = Protect-NotionRecordText -Text $_.Exception.Message
+    } finally {
+        $notionToken = $null
+    }
 }
 
 $finalExitCode = $exitCode
@@ -643,6 +775,11 @@ $runMetadata = [pscustomObject]@{
     runMetadataPath = $runMetadataPath
     notionRecorded = ($null -ne $notionWrite)
     notionWrite = $notionWrite
+    notionRecordError = $notionRecordError
+    notionPreviewPath = $notionPreviewPath
+    notionRunKey = $NotionRunKey
+    notionPreviewOnly = [bool]$PreviewNotion
+    notionSafetyViolations = [object[]]$notionSafetyViolations
     exitCode = $finalExitCode
     operationsExitCode = $exitCode
     operationsFailureReason = $operationFailureReason
