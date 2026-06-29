@@ -76,10 +76,22 @@ function Get-EnvValue {
     return [string]$match[0].value
 }
 
+function Resolve-CurlCommand {
+    $curlInfo = Get-Command "curl.exe" -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $curlInfo) {
+        $curlInfo = Get-Command "curl" -CommandType Application -ErrorAction SilentlyContinue
+    }
+    if (-not $curlInfo) {
+        throw "curl command was not found."
+    }
+    return $curlInfo.Source
+}
+
 function Invoke-HttpNoRedirect {
     param([string]$Uri)
 
-    $lines = @(& curl.exe -sS -I --max-redirs 0 $Uri 2>&1)
+    $curlCommand = Resolve-CurlCommand
+    $lines = @(& $curlCommand -sS -I --max-redirs 0 $Uri 2>&1)
     if ($LASTEXITCODE -ne 0) {
         return [pscustomobject]@{
             statusCode = $null

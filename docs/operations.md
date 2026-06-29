@@ -611,6 +611,47 @@ Notion直接記録の前提:
   - GitHub Actions 実行主体のread権限追加後に再実行する
   - この失敗runは「3回成功レビュー」には数えず、権限不足切り分け実績として扱う
 
+2026-06-29 read-only 権限追加:
+
+- GitHub Actions 実行主体: `ice-deployer@ice-sh.iam.gserviceaccount.com`
+- 追加済み role:
+  - `roles/monitoring.viewer`
+  - `projects/ice-sh/roles/iceReportIapPolicyViewer`
+- custom role `iceReportIapPolicyViewer` は IAP IAM policy の read-only 確認だけに使う
+- 含める permission:
+  - `iap.web.getIamPolicy`
+  - `iap.webTypes.getIamPolicy`
+  - `iap.webServices.getIamPolicy`
+  - `iap.webServiceVersions.getIamPolicy`
+  - `iap.tunnel.getIamPolicy`
+  - `iap.tunnelZones.getIamPolicy`
+  - `iap.tunnelInstances.getIamPolicy`
+  - `iap.tunnelLocations.getIamPolicy`
+  - `iap.tunnelDestGroups.getIamPolicy`
+- 含めない permission:
+  - `*.setIamPolicy`
+
+2026-06-29 2回目手動 run 記録:
+
+- workflow run: `28351790564`
+- event: `workflow_dispatch`
+- conclusion: `failure`
+- artifact: `operations-readonly-check-28351790564`
+- 成功した確認:
+  - read-only operational check
+  - Admin audit review
+  - docs legacy reference check
+  - monitoring noise review
+  - repo hygiene metadata review
+- 失敗した確認:
+  - Admin IAP drift check
+- 原因:
+  - Ubuntu runner 上で `scripts/check-admin-iap-readonly.ps1` が Windows 固定の `curl.exe` を呼んでいた
+- 判断:
+  - IAM 追加は期待通り有効
+  - script を `curl.exe` / `curl` 両対応に修正して再実行する
+  - この失敗runは「3回成功レビュー」には数えない
+
 所要時間の扱い:
 
 - 単発の遅延だけではthresholdやworkflowを変更しない
@@ -637,9 +678,9 @@ Notion直接記録の前提:
   - IAP web IAM policy read for `report-generator-admin`
 - Cloud Monitoring は `roles/monitoring.viewer` で
   `monitoring.uptimeCheckConfigs.get` と `monitoring.alertPolicies.get` を満たします
-- IAP policy read は `iap.web.getIamPolicy` が必要です。
-  `roles/iap.admin` はこの権限を含みますが setIamPolicy も含むため、定期read-only
-  実行主体には `iap.web.getIamPolicy` のみを含む custom role を優先検討します
+- IAP policy read は `projects/ice-sh/roles/iceReportIapPolicyViewer` を使います。
+  この custom role は `getIamPolicy` 系 permission のみに限定し、`setIamPolicy`
+  は含めません
 - 実行環境に保存される artifact はローカル運用記録として扱い、git commitしない
 
 ## 月次運用
