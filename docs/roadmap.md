@@ -127,6 +127,7 @@ critical系 alert、`/api-health` 外形監視、SES bounce / complaint warning
 - `scripts/run-operations-readonly-scheduled.ps1`
 - read-only check 定期実行方針: 週1回、deploy後、incident後
 - Notion API への直接記録オプション
+- Notion直接記録の preview、run key重複防止、送信前redaction、禁止項目テスト
 - deploy pipeline からのread-only check自動実行
 - GitHub Actions `Operations Read-Only Check` による週次 read-only check
 - pipeline check run metadata artifact: duration、exit code、failed checks、audit review成否
