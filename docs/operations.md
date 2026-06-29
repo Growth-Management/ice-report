@@ -453,13 +453,18 @@ run 3:
   先に修正する
 
 `operations-readonly-run-metadata-<timestamp>.json` には、wrapper全体の
-`durationSeconds`、`exitCode`、`operationsExitCode`、`auditExitCode`、
-`adminIapExitCode`、`failedChecks`、Admin audit review の成否、Admin IAP
-drift check の成否、docs legacy reference check の成否、monitoring noise
-review の成否と warning / critical signal 件数、repo hygiene metadata review
-の成否と現在metadata上の要対応有無を記録します。
+`durationSeconds`、`exitCode`、`operationsExitCode`、`operationsFailureReason`、
+`auditExitCode`、`adminIapExitCode`、`adminIapFailureReason`、`failedChecks`、
+Admin audit review の成否、Admin IAP drift check の成否、docs legacy reference
+check の成否、monitoring noise review の成否と warning / critical signal 件数、
+repo hygiene metadata review の成否と現在metadata上の要対応有無を記録します。
 pipeline上で失敗した場合は、まずこの metadata と summary text を見て、
 失敗箇所と所要時間を確認します。
+
+read-only operational check または Admin IAP drift check が権限不足などで
+JSONを出せずに終了した場合も、wrapper は失敗用 JSON と summary text を
+artifactへ保存します。`permission_denied`、`resource_not_found`、
+`unauthenticated` などの failure reason を metadata と summary で確認します。
 
 Admin IAP drift check では、`report-generator-admin` のIAP policy、
 Cloud Run invoker、`ADMIN_IAP_ALLOWED_EMAILS` が期待userと一致していることを
