@@ -702,6 +702,36 @@ Notion直接記録の前提:
   - GitHub Actions 実行主体の read 権限と Linux runner 互換性は解消済み
   - この run を「3回成功レビュー」の 1/3 として数える
 
+2026-06-30 5回目手動 run 記録:
+
+- workflow run: `28408454687`
+- event: `workflow_dispatch`
+- conclusion: `success`
+- duration: 約1分59秒
+- artifact: `operations-readonly-check-28408454687`
+- 成功した確認:
+  - read-only operational check
+  - Admin IAP drift check
+  - Admin audit review
+  - docs legacy reference check
+  - monitoring noise review
+  - repo hygiene metadata review
+- metadata:
+  - `operationsExitCode=0`
+  - `adminIapExitCode=0`
+  - `docLegacyExitCode=0`
+  - `monitoringExitCode=0`
+  - `repoHygieneExitCode=0`
+  - `failedChecks` なし
+- Admin IAP drift:
+  - 未ログイン `/admin` は IAP 生成の `302` で Google login へ遷移
+  - public `/api-health` は `200`
+  - public `/admin` は `200`
+  - Admin runtime ERROR は `0`
+- 判断:
+  - この run を「3回成功レビュー」の 2/3 として数える
+  - `notionWrite=null` のため、今回も Notion へは手動で補完記録する
+
 所要時間の扱い:
 
 - 単発の遅延だけではthresholdやworkflowを変更しない
