@@ -18,6 +18,7 @@ from distribution import (
     create_delivery_record,
     find_delivery_by_token,
     get_current_version,
+    get_report_definition,
     list_delivery_records,
     list_download_log_records,
     list_report_definitions,
@@ -880,6 +881,7 @@ let createDeliveryInProgress = false;
 const versionInProgress = {};
 const ADMIN_KEY_STORAGE = "ice_admin_api_key";
 let reportDefinitionItems = [];
+const reportDefinitionDetails = {};
 let deliveryItems = [];
 let logItems = [];
 
@@ -1137,6 +1139,26 @@ async function loadReportDefinitions() {
   }
 }
 
+async function loadReportDefinitionDetail(reportId) {
+  const safeId = String(reportId || "");
+  const outputId = "definitionVersions_" + safeId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const el = document.getElementById(outputId);
+
+  if (el) {
+    el.innerHTML = "<p class='muted'>loading versions...</p>";
+  }
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(safeId));
+    reportDefinitionDetails[safeId] = data.item || data.result || data;
+    renderDefinitionsFromState();
+  } catch (e) {
+    if (el) {
+      el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+    }
+  }
+}
+
 function renderDefinitionsFromState() {
   const q = (document.getElementById("definitionSearch").value || "").toLowerCase().trim();
   const status = document.getElementById("definitionStatusFilter").value;
@@ -1153,6 +1175,39 @@ function renderDefinitionsFromState() {
 
   renderReportDefinitions(filtered);
   updateSummary();
+}
+
+function renderDefinitionVersions(item) {
+  const reportId = String(item.report_id || "");
+  const detail = reportDefinitionDetails[reportId];
+  const outputId = "definitionVersions_" + reportId.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  if (!detail) {
+    return "<div class='row-actions' style='margin-top:10px;'>" +
+      "<button class='small secondary' onclick=\"loadReportDefinitionDetail('" + attr(reportId) + "')\">versionを表示</button>" +
+      "</div><div id='" + attr(outputId) + "'></div>";
+  }
+
+  const versions = detail.versions || [];
+  if (!versions.length) {
+    return "<div class='muted' id='" + attr(outputId) + "'>versionなし</div>";
+  }
+
+  const versionRows = versions.map(v => {
+    const statusClass = v.current ? "status-active" : "status-warning";
+    return "<div class='version-panel' style='margin-top:8px;'>" +
+      "<div><strong>v" + esc(v.version || "-") + "</strong> <span class='status-pill " + statusClass + "'>" + esc(v.current ? "current" : (v.status || "draft")) + "</span></div>" +
+      "<div class='muted'>" + esc(formatDateTime(v.updated_at || v.created_at || "")) + "</div>" +
+      "<div>" + esc(v.note || "") + "</div>" +
+      "<div class='muted'>" +
+        (v.template_name ? "template: " + esc(v.template_name) + "<br>" : "") +
+        (v.query_config_id ? "query: " + esc(v.query_config_id) + "<br>" : "") +
+        (v.mapping_version_id ? "mapping: " + esc(v.mapping_version_id) : "") +
+      "</div>" +
+    "</div>";
+  }).join("");
+
+  return "<div id='" + attr(outputId) + "'>" + versionRows + "</div>";
 }
 
 function renderReportDefinitions(items) {
@@ -1176,11 +1231,12 @@ function renderReportDefinitions(items) {
       item.primary_operator ? "operator: " + esc(item.primary_operator) : ""
     ].filter(Boolean).join("<br>");
 
+    const reportId = item.report_id || "";
     return "<tr>" +
-      "<td class='definition-id-cell'><code>" + esc(item.report_id || "") + "</code></td>" +
+      "<td class='definition-id-cell'><code>" + esc(reportId) + "</code></td>" +
       "<td class='definition-name-cell'><strong>" + esc(item.name || "") + "</strong><br><span class='muted'>" + esc(item.customer_name || "") + "</span></td>" +
       "<td><span class='status-pill " + statusClass + "'>" + esc(statusText) + "</span></td>" +
-      "<td>v" + esc(item.current_version || "-") + "<br><span class='muted'>" + esc(item.version_count || 0) + " versions</span></td>" +
+      "<td>v" + esc(item.current_version || "-") + "<br><span class='muted'>" + esc(item.version_count || 0) + " versions</span>" + renderDefinitionVersions(item) + "</td>" +
       "<td class='definition-storage-cell'>" + (storageLines || "<span class='muted'>-</span>") + "</td>" +
       "<td>" + (ownerLines || "<span class='muted'>-</span>") + "</td>" +
       "<td>" + esc(formatDateTime(item.updated_at || item.created_at || "")) + "</td>" +
@@ -1742,6 +1798,23 @@ def report_definitions():
     result = list_report_definitions(limit=limit)
 
     return jsonify({"items": result})
+
+
+@app.get("/report-definitions/<report_id>")
+def report_definition_detail(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    try:
+        result = get_report_definition(report_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+    return jsonify({
+        "item": result,
+        "result": result,
+    })
 
 
 @app.post("/deliveries/<delivery_id>/versions")

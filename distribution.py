@@ -283,9 +283,30 @@ def _public_delivery(
     return item
 
 
+def _public_report_definition_version(
+    version: dict[str, Any],
+    *,
+    current_version: int | None = None,
+) -> dict[str, Any]:
+    version_number = version.get("version")
+    return {
+        "version": version_number,
+        "current": version_number is not None and version_number == current_version,
+        "status": version.get("status") or "draft",
+        "note": version.get("note") or version.get("change_summary") or "",
+        "template_name": version.get("template_name") or version.get("template_file_name") or "",
+        "query_config_id": version.get("query_config_id") or "",
+        "mapping_version_id": version.get("mapping_version_id") or "",
+        "created_at": _format_dt(version.get("created_at")),
+        "updated_at": _format_dt(version.get("updated_at")),
+    }
+
+
 def _public_report_definition(
     report_id: str,
     definition: dict[str, Any],
+    *,
+    include_versions: bool = False,
 ) -> dict[str, Any]:
     versions = definition.get("versions") or []
     current_version = definition.get("current_version")
@@ -297,7 +318,7 @@ def _public_report_definition(
     gcs = definition.get("gcs") or {}
     schedule = definition.get("schedule") or {}
 
-    return {
+    item = {
         "report_id": report_id,
         "name": (
             definition.get("name")
@@ -325,6 +346,16 @@ def _public_report_definition(
         "archived_at": _format_dt(definition.get("archived_at")),
     }
 
+    if include_versions:
+        public_versions = [
+            _public_report_definition_version(version, current_version=current_version)
+            for version in versions
+        ]
+        public_versions.sort(key=lambda item: item.get("version") or 0, reverse=True)
+        item["versions"] = public_versions
+
+    return item
+
 
 def list_report_definitions(*, limit: int = 100) -> list[dict[str, Any]]:
     db = get_firestore_client()
@@ -337,6 +368,20 @@ def list_report_definitions(*, limit: int = 100) -> list[dict[str, Any]]:
 
     items.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
     return items
+
+
+def get_report_definition(report_id: str) -> dict[str, Any]:
+    db = get_firestore_client()
+    snap = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id).get()
+
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    return _public_report_definition(
+        snap.id,
+        snap.to_dict() or {},
+        include_versions=True,
+    )
 
 
 def list_delivery_records(
