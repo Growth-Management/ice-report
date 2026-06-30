@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,16 @@ FIRESTORE_COLLECTION_DOWNLOAD_LOGS = os.environ.get("DOWNLOAD_LOGS_COLLECTION", 
 FIRESTORE_COLLECTION_REPORT_DEFINITIONS = os.environ.get(
     "REPORT_DEFINITIONS_COLLECTION",
     "report_definitions",
+)
+REPORT_DEFINITION_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}$")
+REPORT_DEFINITION_EDITABLE_FIELDS = (
+    "name",
+    "owner",
+    "primary_operator",
+    "customer_name",
+    "default_report_month",
+    "gcs_prefix",
+    "drive_folder_name",
 )
 
 SLACK_WEBHOOK_SECRET = os.environ.get(
@@ -372,10 +383,105 @@ def list_report_definitions(*, limit: int = 100) -> list[dict[str, Any]]:
 
 def _validate_report_id(report_id: str) -> str:
     clean_id = (report_id or "").strip()
-    if not clean_id or "/" in clean_id or (clean_id.startswith("__") and clean_id.endswith("__")):
+    if (
+        not clean_id
+        or "/" in clean_id
+        or (clean_id.startswith("__") and clean_id.endswith("__"))
+        or not REPORT_DEFINITION_ID_PATTERN.match(clean_id)
+    ):
         raise ValueError("report_id not found")
 
     return clean_id
+
+
+def _report_definition_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: str(payload.get(key) or "").strip()
+        for key in REPORT_DEFINITION_EDITABLE_FIELDS
+    }
+
+
+def create_report_definition(payload: dict[str, Any]) -> dict[str, Any]:
+    report_id = _validate_report_id(payload.get("report_id") or "")
+    item = _report_definition_payload(payload)
+
+    if not item["name"]:
+        raise ValueError("name is required")
+
+    now = utcnow()
+    doc = {
+        **item,
+        "status": "active",
+        "archived": False,
+        "current_version": 1,
+        "versions": [
+            {
+                "version": 1,
+                "status": "draft",
+                "note": str(payload.get("version_note") or "initial definition").strip(),
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if snap.exists:
+        raise ValueError("report_id already exists")
+
+    ref.set(doc)
+    return _public_report_definition(report_id, doc, include_versions=True)
+
+
+def update_report_definition(report_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+    item = _report_definition_payload(payload)
+
+    if not item["name"]:
+        raise ValueError("name is required")
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    update_doc = {
+        **item,
+        "updated_at": utcnow(),
+    }
+    ref.update(update_doc)
+
+    current = snap.to_dict() or {}
+    current.update(update_doc)
+    return _public_report_definition(report_id, current, include_versions=True)
+
+
+def archive_report_definition(report_id: str) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    now = utcnow()
+    update_doc = {
+        "status": "archived",
+        "archived": True,
+        "archived_at": now,
+        "updated_at": now,
+    }
+    ref.update(update_doc)
+
+    current = snap.to_dict() or {}
+    current.update(update_doc)
+    return _public_report_definition(report_id, current, include_versions=True)
 
 
 def get_report_definition(report_id: str) -> dict[str, Any]:

@@ -15,7 +15,9 @@ from google.cloud import firestore, storage
 from create_report import DEFAULT_TEMPLATE, generate_report
 from distribution import (
     add_delivery_version,
+    archive_report_definition,
     create_delivery_record,
+    create_report_definition,
     find_delivery_by_token,
     get_current_version,
     get_report_definition,
@@ -24,6 +26,7 @@ from distribution import (
     list_report_definitions,
     log_download,
     make_signed_download_url,
+    update_report_definition,
     render_download_form,
     set_delivery_active,
     validate_delivery_access,
@@ -800,6 +803,30 @@ def render_admin_ui() -> str:
 
   <div class="card">
     <h2>レポート定義</h2>
+    <div class="inline-fields">
+      <div class="field"><label>report_id</label><input id="definitionId" placeholder="例: plus-monthly-downloads"></div>
+      <div class="field"><label>name</label><input id="definitionName" placeholder="レポート名"></div>
+    </div>
+    <div class="inline-fields">
+      <div class="field"><label>owner</label><input id="definitionOwner" placeholder="システム管理室"></div>
+      <div class="field"><label>primary operator</label><input id="definitionOperator" placeholder="篠原邦昭"></div>
+    </div>
+    <div class="inline-fields">
+      <div class="field"><label>customer</label><input id="definitionCustomer" placeholder="顧客 / recipient group"></div>
+      <div class="field"><label>default month</label><input id="definitionDefaultMonth" placeholder="YYYY-MM"></div>
+    </div>
+    <div class="inline-fields">
+      <div class="field"><label>GCS prefix</label><input id="definitionGcsPrefix" placeholder="reports/plus/"></div>
+      <div class="field"><label>Drive folder name</label><input id="definitionDriveFolder" placeholder="OMFダウンロード数報告"></div>
+    </div>
+    <div class="field"><label>initial version note</label><input id="definitionVersionNote" placeholder="initial definition"></div>
+    <div class="toolbar">
+      <button id="definitionCreateButton" onclick="createReportDefinition()">定義を追加</button>
+      <button class="secondary" id="definitionUpdateButton" onclick="updateReportDefinition()">定義を更新</button>
+      <button class="danger" id="definitionArchiveButton" onclick="archiveReportDefinition()">archive</button>
+      <button class="secondary" onclick="clearDefinitionForm()">入力クリア</button>
+    </div>
+    <pre id="definitionResult">待機中</pre>
     <div class="toolbar">
       <input id="definitionSearch" placeholder="report_id / name / owner / GCS prefixで検索" oninput="renderDefinitionsFromState()" style="min-width:260px;flex:1;">
       <select id="definitionStatusFilter" onchange="renderDefinitionsFromState()" style="width:150px;">
@@ -878,6 +905,7 @@ def render_admin_ui() -> str:
 const baseUrl = window.location.origin;
 const DEFAULT_ALLOWED_DOMAINS = ["shueisha.co.jp", "sur.co.jp", "hitotsubashi.co.jp", "impress.co.jp"];
 let createDeliveryInProgress = false;
+let reportDefinitionInProgress = false;
 const versionInProgress = {};
 const ADMIN_KEY_STORAGE = "ice_admin_api_key";
 let reportDefinitionItems = [];
@@ -1107,6 +1135,152 @@ function useGcsUri(inputId, gcsUri) {
   }
 }
 
+function definitionPayload() {
+  return {
+    report_id: document.getElementById("definitionId").value,
+    name: document.getElementById("definitionName").value,
+    owner: document.getElementById("definitionOwner").value,
+    primary_operator: document.getElementById("definitionOperator").value,
+    customer_name: document.getElementById("definitionCustomer").value,
+    default_report_month: document.getElementById("definitionDefaultMonth").value,
+    gcs_prefix: document.getElementById("definitionGcsPrefix").value,
+    drive_folder_name: document.getElementById("definitionDriveFolder").value,
+    version_note: document.getElementById("definitionVersionNote").value
+  };
+}
+
+function setDefinitionButtons(disabled) {
+  ["definitionCreateButton", "definitionUpdateButton", "definitionArchiveButton"].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) {
+      button.disabled = disabled;
+    }
+  });
+}
+
+function clearDefinitionForm() {
+  [
+    "definitionId",
+    "definitionName",
+    "definitionOwner",
+    "definitionOperator",
+    "definitionCustomer",
+    "definitionDefaultMonth",
+    "definitionGcsPrefix",
+    "definitionDriveFolder",
+    "definitionVersionNote"
+  ].forEach(id => {
+    const input = document.getElementById(id);
+    if (input) {
+      input.value = "";
+    }
+  });
+  document.getElementById("definitionResult").textContent = "待機中";
+}
+
+function fillDefinitionForm(reportId) {
+  const item = reportDefinitionItems.find(v => v.report_id === reportId) || reportDefinitionDetails[reportId];
+  if (!item) {
+    return;
+  }
+
+  document.getElementById("definitionId").value = item.report_id || "";
+  document.getElementById("definitionName").value = item.name || "";
+  document.getElementById("definitionOwner").value = item.owner || "";
+  document.getElementById("definitionOperator").value = item.primary_operator || "";
+  document.getElementById("definitionCustomer").value = item.customer_name || "";
+  document.getElementById("definitionDefaultMonth").value = item.default_report_month || "";
+  document.getElementById("definitionGcsPrefix").value = item.gcs_prefix || "";
+  document.getElementById("definitionDriveFolder").value = item.drive_folder_name || "";
+  document.getElementById("definitionVersionNote").value = "";
+  document.getElementById("definitionResult").textContent = "編集中: " + (item.report_id || "");
+}
+
+async function createReportDefinition() {
+  if (reportDefinitionInProgress) {
+    return;
+  }
+
+  reportDefinitionInProgress = true;
+  setDefinitionButtons(true);
+  const resultEl = document.getElementById("definitionResult");
+  resultEl.textContent = "定義を追加中...";
+
+  try {
+    const data = await api("/report-definitions", {
+      method: "POST",
+      body: JSON.stringify(definitionPayload())
+    });
+    resultEl.textContent = "定義を追加しました\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    showToast("定義を追加しました");
+    await loadReportDefinitions();
+  } catch (e) {
+    resultEl.textContent = "定義追加に失敗しました\n" + e.message;
+  } finally {
+    reportDefinitionInProgress = false;
+    setDefinitionButtons(false);
+  }
+}
+
+async function updateReportDefinition() {
+  if (reportDefinitionInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  reportDefinitionInProgress = true;
+  setDefinitionButtons(true);
+  const resultEl = document.getElementById("definitionResult");
+  resultEl.textContent = "定義を更新中...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId), {
+      method: "PATCH",
+      body: JSON.stringify(definitionPayload())
+    });
+    resultEl.textContent = "定義を更新しました\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    showToast("定義を更新しました");
+    delete reportDefinitionDetails[reportId];
+    await loadReportDefinitions();
+  } catch (e) {
+    resultEl.textContent = "定義更新に失敗しました\n" + e.message;
+  } finally {
+    reportDefinitionInProgress = false;
+    setDefinitionButtons(false);
+  }
+}
+
+async function archiveReportDefinition() {
+  if (reportDefinitionInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  if (!reportId || !confirm("archiveします: " + reportId)) {
+    return;
+  }
+
+  reportDefinitionInProgress = true;
+  setDefinitionButtons(true);
+  const resultEl = document.getElementById("definitionResult");
+  resultEl.textContent = "archive中...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/archive", {
+      method: "POST"
+    });
+    resultEl.textContent = "archiveしました\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    showToast("archiveしました");
+    delete reportDefinitionDetails[reportId];
+    await loadReportDefinitions();
+  } catch (e) {
+    resultEl.textContent = "archiveに失敗しました\n" + e.message;
+  } finally {
+    reportDefinitionInProgress = false;
+    setDefinitionButtons(false);
+  }
+}
+
 function definitionStatus(item) {
   return item.status || "unknown";
 }
@@ -1239,7 +1413,7 @@ function renderReportDefinitions(items) {
       "<td>v" + esc(item.current_version || "-") + "<br><span class='muted'>" + esc(item.version_count || 0) + " versions</span>" + renderDefinitionVersions(item) + "</td>" +
       "<td class='definition-storage-cell'>" + (storageLines || "<span class='muted'>-</span>") + "</td>" +
       "<td>" + (ownerLines || "<span class='muted'>-</span>") + "</td>" +
-      "<td>" + esc(formatDateTime(item.updated_at || item.created_at || "")) + "</td>" +
+      "<td>" + esc(formatDateTime(item.updated_at || item.created_at || "")) + "<div class='row-actions' style='margin-top:8px;'><button class='small secondary' onclick=\"fillDefinitionForm('" + attr(reportId) + "')\">編集</button></div></td>" +
     "</tr>";
   }).join("");
 
@@ -1800,6 +1974,35 @@ def report_definitions():
     return jsonify({"items": result})
 
 
+def _log_report_definition_action(action: str, result: str, report_id: str, status_code: int) -> None:
+    logging.warning(
+        "ICE_REPORT_REPORT_DEFINITION_ACTION action=%s result=%s report_id=%s status_code=%s",
+        action,
+        result,
+        report_id,
+        status_code,
+    )
+
+
+@app.post("/report-definitions")
+def create_report_definition_route():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    report_id = str(payload.get("report_id") or "")
+
+    try:
+        result = create_report_definition(payload)
+    except ValueError as exc:
+        _log_report_definition_action("report_definition_create", "failure", "", 400)
+        return jsonify({"error": str(exc)}), 400
+
+    _log_report_definition_action("report_definition_create", "success", result.get("report_id", ""), 201)
+    return jsonify({"item": result, "result": result}), 201
+
+
 @app.get("/report-definitions/<report_id>")
 def report_definition_detail(report_id: str):
     ok, error_response = _check_admin()
@@ -1815,6 +2018,41 @@ def report_definition_detail(report_id: str):
         "item": result,
         "result": result,
     })
+
+
+@app.patch("/report-definitions/<report_id>")
+def update_report_definition_route(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+
+    try:
+        result = update_report_definition(report_id, payload)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 400
+        _log_report_definition_action("report_definition_update", "failure", "", status_code)
+        return jsonify({"error": str(exc)}), status_code
+
+    _log_report_definition_action("report_definition_update", "success", report_id, 200)
+    return jsonify({"item": result, "result": result})
+
+
+@app.post("/report-definitions/<report_id>/archive")
+def archive_report_definition_route(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    try:
+        result = archive_report_definition(report_id)
+    except ValueError as exc:
+        _log_report_definition_action("report_definition_archive", "failure", "", 404)
+        return jsonify({"error": str(exc)}), 404
+
+    _log_report_definition_action("report_definition_archive", "success", report_id, 200)
+    return jsonify({"item": result, "result": result})
 
 
 @app.post("/deliveries/<delivery_id>/versions")
