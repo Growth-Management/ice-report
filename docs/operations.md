@@ -1004,6 +1004,40 @@ post-check:
 6. DLログ表示で対象 delivery のログ件数を確認する
 7. 操作後に read-only operational check または Admin audit log review を確認する
 
+### Phase 9 Admin UI expansion smoke
+
+Phase 9 の管理画面拡張は、表示、read-only、versioning、preview/dry-run、
+publish、rollback、automation の順で段階的に進めます。初回実装では
+利用者向けOTP画面の選択中レポート表示と、Admin UI の report definitions
+read-only一覧だけを対象にします。
+
+初回実装のdeploy要否:
+
+- `app.py` / `distribution.py` の変更を含むため Cloud Run deploy が必要
+- 人間向け確認は `report-generator-admin` + IAP を主経路にする
+- public service 全体へ IAP は適用しない
+- `X-Admin-Key` は script/API/break-glass 用に継続する
+
+smoke:
+
+1. `report-generator-admin` に IAP 許可userでログインできる
+2. Admin UI のレポート定義一覧が表示される
+3. レポート定義一覧に SQL、template mapping、allowed email、token、Signed URL が表示されない
+4. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
+5. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
+6. PIN発行、PIN検証、download redirect の既存フローが変わっていない
+
+rollback:
+
+- 表示のみの問題であれば直前 Cloud Run revision へ戻す
+- Firestore schema変更、SQL変更、template publish、schedule変更は初回実装では行わない
+- PR単位で戻す場合は該当PRをrevertする
+
+記録しない項目:
+
+- secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL
+- SQL本文、template mapping詳細、message body、provider event JSON
+
 ### Google Drive backup 後の GCS cleanup 方針
 
 GCS object の削除は破壊的操作のため、通常の月次手順では実行しません。保持期間と承認条件は `docs/security.md` の Archive Lifecycle Management を正とします。現時点の方針は次です。
