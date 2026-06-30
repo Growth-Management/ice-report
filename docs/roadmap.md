@@ -258,6 +258,47 @@ Phase 8 で急がないもの:
 - GCS / Firestore の実削除自動化
 - 履歴rewrite
 
+## Phase 9 Admin UI expansion / report definitions
+
+Phase 9 は、複数レポート運用を前提に Admin UI を段階拡張するフェーズです。
+人間向け Admin UI は `report-generator-admin` + Cloud Run direct IAP を主経路にし、
+public service 全体へ IAP は適用しません。script/API/break-glass 用の
+`X-Admin-Key` は継続します。
+
+実装順:
+
+1. 管理画面拡張ロードマップと安全ルール: 実装済み
+2. 利用者UIで選択中レポートを明確に表示: 実装済み
+3. Admin read-only のレポート定義一覧: 実装済み
+4. Firestore report definitions と version 管理
+5. レポート定義の追加・編集・archive
+6. Excelテンプレート upload / preview / publish / rollback
+7. query config と template mapping の dry-run / preview / publish
+8. schedule 設定と ON/OFF
+9. Google Drive / GCS 保存先 allowlist 管理
+
+安全ルール:
+
+- 最初から SQL編集、template publish、schedule自動化、Drive任意保存先変更へ進まない
+- 表示、read-only、versioning、preview/dry-run、publish、rollback、automation の順で進める
+- Admin UI は Admin専用service `report-generator-admin` + IAP を主経路とし、public service全体へIAPを適用しない
+- 管理者は Google Group ではなく、当面は明示user allowlistで管理する
+- 利用者ログイン制限を追加する場合は、OTP/PINフロー内で `impress.co.jp` ドメイン判定を行う
+- secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL は新規表示・記録に含めない
+
+今回実装した範囲:
+
+- 利用者向けOTP画面に、選択中レポートの顧客、対象月、current version、file、期限、状態を表示
+- Admin UI に Firestore `report_definitions` の read-only 一覧を追加
+- `/report-definitions` は管理認証必須の read-only API とし、SQL、mapping、メールallowlist、token、Signed URL は返さない
+- レポート定義の作成、編集、archive、publish、schedule自動化、保存先変更は未実装
+
+Cloud Run / smoke / rollback:
+
+- `app.py` と `distribution.py` を変更するため、反映には `report-generator-admin` と必要に応じて `report-generator` のdeployが必要
+- smoke は Admin IAP ログイン後にレポート定義一覧が表示されること、既存配布一覧・DLログが表示されること、利用者OTP画面に選択中レポートが表示されることを確認する
+- rollback は直前 Cloud Run revision へ戻すか、このPRをrevertする
+
 ## 判断済み事項
 
 - 本番メール送信は SES + Web Identity を正とする

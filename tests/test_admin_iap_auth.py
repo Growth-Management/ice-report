@@ -91,6 +91,7 @@ def _install_import_stubs():
         "get_current_version",
         "list_delivery_records",
         "list_download_log_records",
+        "list_report_definitions",
         "log_download",
         "make_signed_download_url",
         "render_download_form",

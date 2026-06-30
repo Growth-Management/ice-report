@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from html import escape
 from pathlib import Path
 
 from flask import Flask, jsonify, make_response, redirect, request
@@ -19,6 +20,7 @@ from distribution import (
     get_current_version,
     list_delivery_records,
     list_download_log_records,
+    list_report_definitions,
     log_download,
     make_signed_download_url,
     render_download_form,
@@ -548,6 +550,23 @@ def render_admin_ui() -> str:
       width: 160px;
     }
 
+    .definition-table {
+      min-width: 980px;
+      table-layout: fixed;
+    }
+
+    .definition-id-cell {
+      width: 150px;
+    }
+
+    .definition-name-cell {
+      width: 190px;
+    }
+
+    .definition-storage-cell {
+      width: 260px;
+    }
+
     .delivery-uri-toggle {
       margin-top: 6px;
       font-size: 12px;
@@ -681,7 +700,7 @@ def render_admin_ui() -> str:
     <div class="summary-card"><div class="label">配布総数</div><div class="value" id="summaryTotal">-</div></div>
     <div class="summary-card"><div class="label">active</div><div class="value" id="summaryActive">-</div></div>
     <div class="summary-card"><div class="label">disabled</div><div class="value" id="summaryDisabled">-</div></div>
-    <div class="summary-card"><div class="label">表示ログ</div><div class="value" id="summaryLogs">-</div></div>
+    <div class="summary-card"><div class="label">定義 / 表示ログ</div><div class="value" id="summaryDefinitionsLogs">- / -</div></div>
   </div>
 
 
@@ -778,6 +797,20 @@ def render_admin_ui() -> str:
     </div>
   </details>
 
+  <div class="card">
+    <h2>レポート定義</h2>
+    <div class="toolbar">
+      <input id="definitionSearch" placeholder="report_id / name / owner / GCS prefixで検索" oninput="renderDefinitionsFromState()" style="min-width:260px;flex:1;">
+      <select id="definitionStatusFilter" onchange="renderDefinitionsFromState()" style="width:150px;">
+        <option value="all">all</option>
+        <option value="active">active</option>
+        <option value="archived">archived</option>
+      </select>
+      <button class="secondary" onclick="loadReportDefinitions()">定義一覧を更新</button>
+    </div>
+    <div id="reportDefinitions" class="notice">loading...</div>
+  </div>
+
 
   <div class="grid">
     <section>
@@ -846,6 +879,7 @@ const DEFAULT_ALLOWED_DOMAINS = ["shueisha.co.jp", "sur.co.jp", "hitotsubashi.co
 let createDeliveryInProgress = false;
 const versionInProgress = {};
 const ADMIN_KEY_STORAGE = "ice_admin_api_key";
+let reportDefinitionItems = [];
 let deliveryItems = [];
 let logItems = [];
 
@@ -1071,6 +1105,95 @@ function useGcsUri(inputId, gcsUri) {
   }
 }
 
+function definitionStatus(item) {
+  return item.status || "unknown";
+}
+
+function definitionSearchText(item) {
+  return [
+    item.report_id,
+    item.name,
+    item.status,
+    item.owner,
+    item.primary_operator,
+    item.customer_name,
+    item.default_report_month,
+    item.gcs_prefix,
+    item.drive_folder_name,
+    item.current_version
+  ].join(" ").toLowerCase();
+}
+
+async function loadReportDefinitions() {
+  const el = document.getElementById("reportDefinitions");
+  el.innerHTML = "<p class='muted'>loading report definitions...</p>";
+
+  try {
+    const data = await api("/report-definitions?limit=100");
+    reportDefinitionItems = data.items || [];
+    renderDefinitionsFromState();
+  } catch (e) {
+    el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+  }
+}
+
+function renderDefinitionsFromState() {
+  const q = (document.getElementById("definitionSearch").value || "").toLowerCase().trim();
+  const status = document.getElementById("definitionStatusFilter").value;
+
+  const filtered = reportDefinitionItems.filter(item => {
+    if (status !== "all" && definitionStatus(item) !== status) {
+      return false;
+    }
+    if (q && !definitionSearchText(item).includes(q)) {
+      return false;
+    }
+    return true;
+  });
+
+  renderReportDefinitions(filtered);
+  updateSummary();
+}
+
+function renderReportDefinitions(items) {
+  const el = document.getElementById("reportDefinitions");
+
+  if (!items.length) {
+    el.innerHTML = "<p class='muted'>該当なし</p>";
+    return;
+  }
+
+  const rows = items.map(item => {
+    const isArchived = definitionStatus(item) === "archived";
+    const statusClass = isArchived ? "status-disabled" : "status-active";
+    const statusText = definitionStatus(item);
+    const storageLines = [
+      item.gcs_prefix ? "GCS: " + esc(item.gcs_prefix) : "",
+      item.drive_folder_name ? "Drive: " + esc(item.drive_folder_name) : ""
+    ].filter(Boolean).join("<br>");
+    const ownerLines = [
+      item.owner ? esc(item.owner) : "",
+      item.primary_operator ? "operator: " + esc(item.primary_operator) : ""
+    ].filter(Boolean).join("<br>");
+
+    return "<tr>" +
+      "<td class='definition-id-cell'><code>" + esc(item.report_id || "") + "</code></td>" +
+      "<td class='definition-name-cell'><strong>" + esc(item.name || "") + "</strong><br><span class='muted'>" + esc(item.customer_name || "") + "</span></td>" +
+      "<td><span class='status-pill " + statusClass + "'>" + esc(statusText) + "</span></td>" +
+      "<td>v" + esc(item.current_version || "-") + "<br><span class='muted'>" + esc(item.version_count || 0) + " versions</span></td>" +
+      "<td class='definition-storage-cell'>" + (storageLines || "<span class='muted'>-</span>") + "</td>" +
+      "<td>" + (ownerLines || "<span class='muted'>-</span>") + "</td>" +
+      "<td>" + esc(formatDateTime(item.updated_at || item.created_at || "")) + "</td>" +
+    "</tr>";
+  }).join("");
+
+  el.innerHTML =
+    "<p class='muted'>loaded definitions: " + items.length + "件</p>" +
+    "<div class='table-wrap'><table class='definition-table'>" +
+    "<thead><tr><th>report_id</th><th>name</th><th>status</th><th>current</th><th>保存先</th><th>担当</th><th>更新日時</th></tr></thead>" +
+    "<tbody>" + rows + "</tbody></table></div>";
+}
+
 function deliveryStatus(item) {
   if (item.active === true) return "active";
   if (item.active === false) return "disabled";
@@ -1260,11 +1383,12 @@ function updateSummary() {
   const active = deliveryItems.filter(item => item.active === true).length;
   const disabled = deliveryItems.filter(item => item.active === false).length;
   const shownLogs = logItems.length;
+  const definitions = reportDefinitionItems.length;
 
   document.getElementById("summaryTotal").textContent = String(total);
   document.getElementById("summaryActive").textContent = String(active);
   document.getElementById("summaryDisabled").textContent = String(disabled);
-  document.getElementById("summaryLogs").textContent = String(shownLogs);
+  document.getElementById("summaryDefinitionsLogs").textContent = String(definitions) + " / " + String(shownLogs);
 }
 
 async function loadLogs(deliveryId = "") {
@@ -1333,11 +1457,13 @@ function renderLogs(items, deliveryId = "") {
 }
 
 async function loadAll() {
+  await loadReportDefinitions();
   await loadDeliveries();
   await loadLogs();
   await loadGcsFiles();
 }
 
+loadReportDefinitions();
 loadDeliveries();
 loadLogs();
 
@@ -1602,6 +1728,18 @@ def list_deliveries():
         active=active,
         limit=limit,
     )
+
+    return jsonify({"items": result})
+
+
+@app.get("/report-definitions")
+def report_definitions():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    limit = int(request.args.get("limit", "100"))
+    result = list_report_definitions(limit=limit)
 
     return jsonify({"items": result})
 
@@ -2020,41 +2158,88 @@ def _bool_env(name: str, default_value: bool = False) -> bool:
     return value.lower() in ("1", "true", "yes", "y", "on")
 
 
+def _format_page_datetime(value) -> str:
+    if not value:
+        return ""
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return str(value)
+
+
+def _render_selected_report_summary(delivery: dict | None) -> str:
+    if not delivery:
+        return ""
+
+    current_version = delivery.get("current_version")
+    current = {}
+    for version in delivery.get("versions") or []:
+        if version.get("version") == current_version:
+            current = version
+            break
+
+    active_text = "active" if delivery.get("active") else "disabled"
+    rows = [
+        ("顧客", delivery.get("customer_name") or "-"),
+        ("対象月", delivery.get("report_month") or "-"),
+        ("current", f"v{current_version}" if current_version else "-"),
+        ("file", current.get("file_name") or "-"),
+        ("期限", _format_page_datetime(delivery.get("expires_at")) or "-"),
+        ("状態", active_text),
+    ]
+
+    row_html = "".join(
+        f"<dt>{escape(label)}</dt><dd>{escape(str(value))}</dd>"
+        for label, value in rows
+    )
+
+    return f"""
+    <section class="report-summary" aria-label="選択中レポート">
+      <h2>選択中レポート</h2>
+      <dl>{row_html}</dl>
+    </section>
+"""
+
+
 def _render_otp_page(
     token: str,
     *,
+    delivery: dict | None = None,
     email: str = "",
     step: str = "email",
     message: str = "",
     error: str = "",
 ) -> str:
-    email_value = (email or "").replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+    token_value = escape(token or "", quote=True)
+    email_value = escape(email or "", quote=True)
     message_html = (
-        f"<div class='message'>{message}</div>"
+        f"<div class='message'>{escape(message)}</div>"
         if message else ""
     )
     error_html = (
-        f"<div class='error'>{error}</div>"
+        f"<div class='error'>{escape(error)}</div>"
         if error else ""
     )
+    report_summary_html = _render_selected_report_summary(delivery)
 
     if step == "pin":
         form_html = f"""
-<form method="post" action="/d/{token}/verify-pin">
+<form method="post" action="/d/{token_value}/verify-pin">
   <label>メールアドレス</label>
   <input type="email" name="email" value="{email_value}" required readonly>
   <label>PIN</label>
   <input type="text" name="pin" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" placeholder="6桁のPIN" required>
   <button type="submit">PINを確認してダウンロードへ進む</button>
 </form>
-<form method="post" action="/d/{token}/request-pin" class="secondary-form">
+<form method="post" action="/d/{token_value}/request-pin" class="secondary-form">
   <input type="hidden" name="email" value="{email_value}">
   <button type="submit" class="secondary">PINを再発行</button>
 </form>
 """
     else:
         form_html = f"""
-<form method="post" action="/d/{token}/request-pin">
+<form method="post" action="/d/{token_value}/request-pin">
   <label>メールアドレス</label>
   <input type="email" name="email" value="{email_value}" placeholder="you@example.com" required>
   <button type="submit">PINを送信</button>
@@ -2208,12 +2393,43 @@ def _render_otp_page(
       color: var(--muted);
       font-size: 12px;
     }}
+
+    .report-summary {{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      margin: 18px 0;
+      background: color-mix(in srgb, var(--panel) 88%, var(--primary) 12%);
+    }}
+
+    .report-summary h2 {{
+      margin: 0 0 10px;
+      font-size: 15px;
+    }}
+
+    .report-summary dl {{
+      display: grid;
+      grid-template-columns: 96px 1fr;
+      gap: 6px 10px;
+      margin: 0;
+      font-size: 13px;
+    }}
+
+    .report-summary dt {{
+      color: var(--muted);
+    }}
+
+    .report-summary dd {{
+      margin: 0;
+      overflow-wrap: anywhere;
+    }}
   </style>
 </head>
 <body>
   <main class="card">
     <h1>ICEレポート ダウンロード</h1>
     <p>許可されたメールアドレス宛に発行されたPINで認証します。</p>
+    {report_summary_html}
     {message_html}
     {error_html}
     {form_html}
@@ -2677,7 +2893,7 @@ def download_form(token: str):
             error="配布URLが見つかりません。",
         ), 404
 
-    return _render_otp_page(token)
+    return _render_otp_page(token, delivery=delivery)
 
 
 @app.post("/d/<token>/request-pin")
@@ -2714,6 +2930,7 @@ def request_download_pin(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             error=message,
         ), 403
 
@@ -2730,6 +2947,7 @@ def request_download_pin(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             error=resend_message,
         ), 429
 
@@ -2746,6 +2964,7 @@ def request_download_pin(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             error=rate_message,
         ), 429
 
@@ -2771,6 +2990,7 @@ def request_download_pin(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             error="PIN送信に失敗しました。少し待ってから再試行してください。",
         ), 503
 
@@ -2789,6 +3009,7 @@ def request_download_pin(token: str):
     return _render_otp_page(
         token,
         email=email,
+        delivery=delivery,
         step="pin",
         message="PINを送信しました。メールをご確認のうえ認証を続けてください。",
     )
@@ -2832,6 +3053,7 @@ def verify_download_pin(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             step="pin",
             error=message,
         ), 403
@@ -2850,6 +3072,7 @@ def verify_download_pin(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             step="pin",
             error=challenge_error or "PINが無効です。",
         ), 403
@@ -2889,6 +3112,7 @@ def verify_download_pin(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             step="pin",
             error=error_message,
         ), 403
@@ -2961,6 +3185,7 @@ def download_file(token: str):
         return _render_otp_page(
             token,
             email=email,
+            delivery=delivery,
             error=message,
         ), 403
 

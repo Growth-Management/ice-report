@@ -15,6 +15,10 @@ from google.cloud import firestore, secretmanager, storage
 
 FIRESTORE_COLLECTION_DELIVERIES = os.environ.get("DELIVERIES_COLLECTION", "deliveries")
 FIRESTORE_COLLECTION_DOWNLOAD_LOGS = os.environ.get("DOWNLOAD_LOGS_COLLECTION", "download_logs")
+FIRESTORE_COLLECTION_REPORT_DEFINITIONS = os.environ.get(
+    "REPORT_DEFINITIONS_COLLECTION",
+    "report_definitions",
+)
 
 SLACK_WEBHOOK_SECRET = os.environ.get(
     "SLACK_WEBHOOK_SECRET_NAME",
@@ -277,6 +281,62 @@ def _public_delivery(
         item["versions"] = versions
 
     return item
+
+
+def _public_report_definition(
+    report_id: str,
+    definition: dict[str, Any],
+) -> dict[str, Any]:
+    versions = definition.get("versions") or []
+    current_version = definition.get("current_version")
+    if current_version is None and versions:
+        current_version = max((v.get("version", 0) for v in versions), default=None)
+
+    storage = definition.get("storage") or {}
+    drive = definition.get("drive") or {}
+    gcs = definition.get("gcs") or {}
+    schedule = definition.get("schedule") or {}
+
+    return {
+        "report_id": report_id,
+        "name": (
+            definition.get("name")
+            or definition.get("report_name")
+            or definition.get("display_name")
+            or report_id
+        ),
+        "status": definition.get("status") or ("archived" if definition.get("archived") else "active"),
+        "current_version": current_version,
+        "version_count": len(versions),
+        "owner": definition.get("owner") or definition.get("operational_owner") or "",
+        "primary_operator": definition.get("primary_operator") or "",
+        "customer_name": definition.get("customer_name") or "",
+        "default_report_month": definition.get("default_report_month") or "",
+        "gcs_prefix": definition.get("gcs_prefix") or gcs.get("prefix") or storage.get("gcs_prefix") or "",
+        "drive_folder_name": (
+            definition.get("drive_folder_name")
+            or drive.get("folder_name")
+            or storage.get("drive_folder_name")
+            or ""
+        ),
+        "schedule_enabled": bool(schedule.get("enabled", definition.get("schedule_enabled", False))),
+        "created_at": _format_dt(definition.get("created_at")),
+        "updated_at": _format_dt(definition.get("updated_at")),
+        "archived_at": _format_dt(definition.get("archived_at")),
+    }
+
+
+def list_report_definitions(*, limit: int = 100) -> list[dict[str, Any]]:
+    db = get_firestore_client()
+    query = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).limit(limit)
+
+    items = [
+        _public_report_definition(doc.id, doc.to_dict() or {})
+        for doc in query.stream()
+    ]
+
+    items.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+    return items
 
 
 def list_delivery_records(
