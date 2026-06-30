@@ -61,6 +61,7 @@ def _install_app_import_stubs():
         "create_delivery_record",
         "find_delivery_by_token",
         "get_current_version",
+        "get_report_definition",
         "list_delivery_records",
         "list_download_log_records",
         "list_report_definitions",
@@ -121,6 +122,51 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
             "signed_url",
         }
         self.assertTrue(forbidden.isdisjoint(item))
+
+    def test_public_report_definition_versions_are_whitelisted(self):
+        distribution = _load_distribution_module()
+
+        item = distribution._public_report_definition(
+            "monthly-downloads",
+            {
+                "current_version": 2,
+                "versions": [
+                    {
+                        "version": 1,
+                        "status": "published",
+                        "note": "initial",
+                        "query_sql": "select raw_email from table",
+                        "template_mapping": {"A1": "email"},
+                        "signed_url": "https://example.test/signed",
+                        "created_by": "user@example.com",
+                    },
+                    {
+                        "version": 2,
+                        "status": "published",
+                        "change_summary": "current version",
+                        "template_file_name": "template.xlsx",
+                        "query_config_id": "plus-monthly-v2",
+                        "mapping_version_id": "mapping-v2",
+                    },
+                ],
+            },
+            include_versions=True,
+        )
+
+        versions = item["versions"]
+        self.assertEqual([version["version"] for version in versions], [2, 1])
+        self.assertTrue(versions[0]["current"])
+        self.assertEqual(versions[0]["template_name"], "template.xlsx")
+        self.assertEqual(versions[0]["query_config_id"], "plus-monthly-v2")
+
+        forbidden = {
+            "query_sql",
+            "template_mapping",
+            "signed_url",
+            "created_by",
+        }
+        for version in versions:
+            self.assertTrue(forbidden.isdisjoint(version))
 
 
 class SelectedReportSummaryTest(unittest.TestCase):

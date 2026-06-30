@@ -1023,9 +1023,10 @@ smoke:
 1. `report-generator-admin` に IAP 許可userでログインできる
 2. Admin UI のレポート定義一覧が表示される
 3. レポート定義一覧に SQL、template mapping、allowed email、token、Signed URL が表示されない
-4. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
-5. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
-6. PIN発行、PIN検証、download redirect の既存フローが変わっていない
+4. 定義がある場合は version履歴を展開し、SQL本文、template mapping、作成者メール、Signed URL が表示されない
+5. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
+6. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
+7. PIN発行、PIN検証、download redirect の既存フローが変わっていない
 
 rollback:
 
