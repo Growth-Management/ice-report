@@ -168,6 +168,12 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         for version in versions:
             self.assertTrue(forbidden.isdisjoint(version))
 
+    def test_report_definition_reserved_id_is_rejected_before_firestore(self):
+        distribution = _load_distribution_module()
+
+        with self.assertRaisesRegex(ValueError, "report_id not found"):
+            distribution._validate_report_id("__reserved__")
+
 
 class SelectedReportSummaryTest(unittest.TestCase):
     def test_selected_report_summary_escapes_values_and_omits_token(self):

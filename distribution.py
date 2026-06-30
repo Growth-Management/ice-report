@@ -370,7 +370,16 @@ def list_report_definitions(*, limit: int = 100) -> list[dict[str, Any]]:
     return items
 
 
+def _validate_report_id(report_id: str) -> str:
+    clean_id = (report_id or "").strip()
+    if not clean_id or "/" in clean_id or (clean_id.startswith("__") and clean_id.endswith("__")):
+        raise ValueError("report_id not found")
+
+    return clean_id
+
+
 def get_report_definition(report_id: str) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
     db = get_firestore_client()
     snap = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id).get()
 
