@@ -1035,6 +1035,14 @@ smoke:
 13. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
 14. PIN発行、PIN検証、download redirect の既存フローが変わっていない
 
+published template runtime switch smoke, after implementation:
+
+15. Confirm `/generate` without `report_id` still uses the existing `TEMPLATE_PATH` or bundled template fallback.
+16. Confirm `/generate` with a test `report_id` uses the current published template version and writes the generated workbook to the expected output prefix.
+17. Confirm `/deliveries` with `report_id` and no `gcs_uri` generates a workbook and creates a delivery that points to that workbook.
+18. Confirm a `report_id` whose current version has no `template_gcs_uri` fails closed before BigQuery execution and before delivery creation.
+19. Confirm API responses, Cloud Logging, and Firestore audit do not include `template_gcs_uri`, Signed URL, Excel cell values, SQL text, template mapping details, raw email, token fragments, IP, user agent, or Admin key fingerprint.
+
 rollback:
 
 - 表示のみの問題であれば直前 Cloud Run revision へ戻す
