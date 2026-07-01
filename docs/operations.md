@@ -1028,19 +1028,22 @@ smoke:
 6. 追加・編集・archive の操作ログに secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL が含まれていない
 7. Excelテンプレート `.xlsx` のpreviewを実行し、保存やpublishなしでシート名、行数、列数、テーブル数、サイズ、sha256だけが返ることを確認する
 8. template preview の操作ログに secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL、セル値が含まれていない
-9. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
-10. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
-11. PIN発行、PIN検証、download redirect の既存フローが変わっていない
+9. Excelテンプレート `.xlsx` のpublishをテスト用定義で実行し、管理用GCS prefixへの保存、version追加、current_version更新を確認する
+10. template rollbackをテスト用定義で実行し、既存versionへcurrent_versionだけが戻ることを確認する
+11. template publish / rollback の操作ログに secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL、セル値、GCS URI が含まれていない
+12. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
+13. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
+14. PIN発行、PIN検証、download redirect の既存フローが変わっていない
 
 rollback:
 
 - 表示のみの問題であれば直前 Cloud Run revision へ戻す
-- SQL変更、template publish、template rollback、schedule変更、Drive/GCS保存先変更はこの段階では行わない
+- SQL変更、template mapping変更、生成処理へのtemplate適用、schedule変更、Drive/GCS保存先変更はこの段階では行わない
 - PR単位で戻す場合は該当PRをrevertする
 
 記録しない項目:
 
-- secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL
+- secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL、template GCS URI
 - SQL本文、template mapping詳細、Excelセル値、message body、provider event JSON
 
 ### Google Drive backup 後の GCS cleanup 方針
