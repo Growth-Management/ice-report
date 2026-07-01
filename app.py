@@ -27,6 +27,8 @@ from distribution import (
     list_report_definitions,
     log_download,
     make_signed_download_url,
+    publish_report_definition_template,
+    rollback_report_definition_template,
     update_report_definition,
     render_download_form,
     set_delivery_active,
@@ -831,8 +833,14 @@ def render_admin_ui() -> str:
     </div>
     <pre id="definitionResult">待機中</pre>
     <div class="field"><label>Excel template preview (.xlsx)</label><input id="templatePreviewFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
+    <div class="inline-fields">
+      <div class="field"><label>template version note</label><input id="templateVersionNote" placeholder="template update note"></div>
+      <div class="field"><label>rollback version</label><input id="templateRollbackVersion" placeholder="version number"></div>
+    </div>
     <div class="toolbar">
       <button class="secondary" id="templatePreviewButton" onclick="previewReportTemplate()">template preview</button>
+      <button class="secondary" id="templatePublishButton" onclick="publishReportTemplate()">template publish</button>
+      <button class="secondary" id="templateRollbackButton" onclick="rollbackReportTemplate()">template rollback</button>
     </div>
     <pre id="templatePreviewResult">not loaded</pre>
     <div class="toolbar">
@@ -1159,7 +1167,14 @@ function definitionPayload() {
 }
 
 function setDefinitionButtons(disabled) {
-  ["definitionCreateButton", "definitionUpdateButton", "definitionArchiveButton"].forEach(id => {
+  [
+    "definitionCreateButton",
+    "definitionUpdateButton",
+    "definitionArchiveButton",
+    "templatePreviewButton",
+    "templatePublishButton",
+    "templateRollbackButton"
+  ].forEach(id => {
     const button = document.getElementById(id);
     if (button) {
       button.disabled = disabled;
@@ -1177,7 +1192,9 @@ function clearDefinitionForm() {
     "definitionDefaultMonth",
     "definitionGcsPrefix",
     "definitionDriveFolder",
-    "definitionVersionNote"
+    "definitionVersionNote",
+    "templateVersionNote",
+    "templateRollbackVersion"
   ].forEach(id => {
     const input = document.getElementById(id);
     if (input) {
@@ -1324,6 +1341,95 @@ async function previewReportTemplate() {
     showToast("template preview completed");
   } catch (e) {
     resultEl.textContent = "template preview failed\n" + e.message;
+  } finally {
+    templatePreviewInProgress = false;
+    button.disabled = false;
+  }
+}
+
+async function publishReportTemplate() {
+  if (templatePreviewInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  const fileInput = document.getElementById("templatePreviewFile");
+  const resultEl = document.getElementById("templatePreviewResult");
+  const button = document.getElementById("templatePublishButton");
+
+  if (!reportId) {
+    resultEl.textContent = "report_id is required";
+    return;
+  }
+  if (!fileInput.files || !fileInput.files.length) {
+    resultEl.textContent = "template .xlsx file is required";
+    return;
+  }
+  if (!confirm("publish template for " + reportId + "?")) {
+    return;
+  }
+
+  const form = new FormData();
+  form.append("template_file", fileInput.files[0]);
+  form.append("note", document.getElementById("templateVersionNote").value || "");
+  templatePreviewInProgress = true;
+  button.disabled = true;
+  resultEl.textContent = "publishing template...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/template-publish", {
+      method: "POST",
+      body: form
+    });
+    resultEl.textContent = "template published\n" + JSON.stringify(data.template || data.result || data, null, 2);
+    showToast("template published");
+    delete reportDefinitionDetails[reportId];
+    await loadReportDefinitions();
+  } catch (e) {
+    resultEl.textContent = "template publish failed\n" + e.message;
+  } finally {
+    templatePreviewInProgress = false;
+    button.disabled = false;
+  }
+}
+
+async function rollbackReportTemplate() {
+  if (templatePreviewInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  const version = document.getElementById("templateRollbackVersion").value;
+  const resultEl = document.getElementById("templatePreviewResult");
+  const button = document.getElementById("templateRollbackButton");
+
+  if (!reportId) {
+    resultEl.textContent = "report_id is required";
+    return;
+  }
+  if (!version) {
+    resultEl.textContent = "rollback version is required";
+    return;
+  }
+  if (!confirm("rollback template current_version to v" + version + " for " + reportId + "?")) {
+    return;
+  }
+
+  templatePreviewInProgress = true;
+  button.disabled = true;
+  resultEl.textContent = "rolling back template...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/template-rollback", {
+      method: "POST",
+      body: JSON.stringify({version: Number(version)})
+    });
+    resultEl.textContent = "template rolled back\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    showToast("template rolled back");
+    delete reportDefinitionDetails[reportId];
+    await loadReportDefinitions();
+  } catch (e) {
+    resultEl.textContent = "template rollback failed\n" + e.message;
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -2149,6 +2255,71 @@ def preview_report_definition_template(report_id: str):
     preview["report_id"] = report_id
     _log_report_definition_action("template_preview", "success", report_id, 200)
     return jsonify({"preview": preview, "result": preview})
+
+
+@app.post("/report-definitions/<report_id>/template-publish")
+def publish_report_definition_template_route(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    bucket_name = os.environ.get("TEMPLATE_BUCKET_NAME") or os.environ.get("BUCKET_NAME")
+    object_prefix = os.environ.get("TEMPLATE_OBJECT_PREFIX", "report-templates")
+    if not bucket_name:
+        _log_report_definition_action("template_publish", "failure", "", 400)
+        return jsonify({"error": "TEMPLATE_BUCKET_NAME or BUCKET_NAME is required"}), 400
+
+    upload = request.files.get("template_file")
+    if upload is None:
+        _log_report_definition_action("template_publish", "failure", "", 400)
+        return jsonify({"error": "template_file is required"}), 400
+
+    data = upload.read(TEMPLATE_PREVIEW_MAX_BYTES + 1)
+
+    try:
+        preview = _preview_xlsx_template_bytes(data, upload.filename or "")
+        result = publish_report_definition_template(
+            report_id,
+            template_bytes=data,
+            preview=preview,
+            bucket_name=bucket_name,
+            object_prefix=object_prefix,
+            note=request.form.get("note") or "",
+        )
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 413 if "too large" in str(exc) else 400
+        _log_report_definition_action("template_publish", "failure", "", status_code)
+        return jsonify({"error": str(exc)}), status_code
+    except Exception:
+        logging.error("ICE_REPORT_TEMPLATE_PUBLISH_FAILED")
+        _log_report_definition_action("template_publish", "failure", "", 500)
+        return jsonify({"error": "template publish failed"}), 500
+
+    _log_report_definition_action("template_publish", "success", report_id, 201)
+    return jsonify({**result, "result": result.get("template")}), 201
+
+
+@app.post("/report-definitions/<report_id>/template-rollback")
+def rollback_report_definition_template_route(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        version = int(payload.get("version") or 0)
+        result = rollback_report_definition_template(report_id, version)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 400
+        _log_report_definition_action("template_rollback", "failure", "", status_code)
+        return jsonify({"error": str(exc)}), status_code
+    except Exception:
+        logging.error("ICE_REPORT_TEMPLATE_ROLLBACK_FAILED")
+        _log_report_definition_action("template_rollback", "failure", "", 500)
+        return jsonify({"error": "template rollback failed"}), 500
+
+    _log_report_definition_action("template_rollback", "success", report_id, 200)
+    return jsonify({"item": result, "result": result})
 
 
 @app.patch("/report-definitions/<report_id>")

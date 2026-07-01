@@ -30,6 +30,7 @@ REPORT_DEFINITION_EDITABLE_FIELDS = (
     "gcs_prefix",
     "drive_folder_name",
 )
+TEMPLATE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 SLACK_WEBHOOK_SECRET = os.environ.get(
     "SLACK_WEBHOOK_SECRET_NAME",
@@ -480,6 +481,145 @@ def archive_report_definition(report_id: str) -> dict[str, Any]:
     ref.update(update_doc)
 
     current = snap.to_dict() or {}
+    current.update(update_doc)
+    return _public_report_definition(report_id, current, include_versions=True)
+
+
+def _safe_template_file_name(filename: str) -> str:
+    safe_name = (filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not safe_name.lower().endswith(".xlsx"):
+        raise ValueError("template file must end with .xlsx")
+    return safe_name
+
+
+def _template_object_name(prefix: str, report_id: str, version: int, filename: str) -> str:
+    clean_prefix = (prefix or "report-templates").strip().strip("/")
+    if not clean_prefix:
+        clean_prefix = "report-templates"
+    return f"{clean_prefix}/{report_id}/v{version}/{_safe_template_file_name(filename)}"
+
+
+def _build_template_version_doc(
+    *,
+    version: int,
+    preview: dict[str, Any],
+    gcs_uri: str,
+    note: str,
+    now: datetime,
+) -> dict[str, Any]:
+    return {
+        "version": version,
+        "status": "published",
+        "note": (note or "template published").strip(),
+        "template_name": _safe_template_file_name(str(preview.get("file_name") or "")),
+        "template_gcs_uri": gcs_uri,
+        "template_size_bytes": int(preview.get("size_bytes") or 0),
+        "template_sha256": str(preview.get("sha256") or ""),
+        "template_sheet_count": int(preview.get("sheet_count") or 0),
+        "template_sheets": list(preview.get("sheets") or []),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _public_template_version_result(report_id: str, version_doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "report_id": report_id,
+        "version": version_doc.get("version"),
+        "status": version_doc.get("status") or "",
+        "template_name": version_doc.get("template_name") or "",
+        "template_size_bytes": version_doc.get("template_size_bytes") or 0,
+        "template_sha256": version_doc.get("template_sha256") or "",
+        "template_sheet_count": version_doc.get("template_sheet_count") or 0,
+        "created_at": _format_dt(version_doc.get("created_at")),
+        "updated_at": _format_dt(version_doc.get("updated_at")),
+    }
+
+
+def publish_report_definition_template(
+    report_id: str,
+    *,
+    template_bytes: bytes,
+    preview: dict[str, Any],
+    bucket_name: str,
+    object_prefix: str = "report-templates",
+    note: str = "",
+) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+    if not bucket_name:
+        raise ValueError("template bucket is required")
+    if not template_bytes:
+        raise ValueError("template file is empty")
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    current = snap.to_dict() or {}
+    if current.get("archived") or current.get("status") == "archived":
+        raise ValueError("report definition is archived")
+
+    versions = list(current.get("versions") or [])
+    next_version = max([int(v.get("version") or 0) for v in versions] or [0]) + 1
+    file_name = _safe_template_file_name(str(preview.get("file_name") or ""))
+    object_name = _template_object_name(object_prefix, report_id, next_version, file_name)
+    gcs_uri = f"gs://{bucket_name}/{object_name}"
+    now = utcnow()
+    version_doc = _build_template_version_doc(
+        version=next_version,
+        preview=preview,
+        gcs_uri=gcs_uri,
+        note=note,
+        now=now,
+    )
+
+    bucket = get_storage_client().bucket(bucket_name)
+    blob = bucket.blob(object_name)
+    blob.upload_from_string(template_bytes, content_type=TEMPLATE_CONTENT_TYPE)
+
+    versions.append(version_doc)
+    update_doc = {
+        "versions": versions,
+        "current_version": next_version,
+        "updated_at": now,
+    }
+    ref.update(update_doc)
+
+    current.update(update_doc)
+    return {
+        "item": _public_report_definition(report_id, current, include_versions=True),
+        "template": _public_template_version_result(report_id, version_doc),
+    }
+
+
+def rollback_report_definition_template(report_id: str, version: int) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+    if int(version or 0) <= 0:
+        raise ValueError("version is required")
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    current = snap.to_dict() or {}
+    if current.get("archived") or current.get("status") == "archived":
+        raise ValueError("report definition is archived")
+
+    target_version = int(version)
+    versions = list(current.get("versions") or [])
+    if not any(int(item.get("version") or 0) == target_version for item in versions):
+        raise ValueError("version not found")
+
+    update_doc = {
+        "current_version": target_version,
+        "updated_at": utcnow(),
+    }
+    ref.update(update_doc)
+
     current.update(update_doc)
     return _public_report_definition(report_id, current, include_versions=True)
 

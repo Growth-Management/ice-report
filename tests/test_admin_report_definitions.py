@@ -70,7 +70,9 @@ def _install_app_import_stubs():
         "list_report_definitions",
         "log_download",
         "make_signed_download_url",
+        "publish_report_definition_template",
         "render_download_form",
+        "rollback_report_definition_template",
         "set_delivery_active",
         "update_report_definition",
         "validate_delivery_access",
@@ -149,6 +151,9 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
                         "status": "published",
                         "change_summary": "current version",
                         "template_file_name": "template.xlsx",
+                        "template_gcs_uri": "gs://bucket/report-templates/monthly/v2/template.xlsx",
+                        "template_sha256": "a" * 64,
+                        "template_sheets": [{"name": "Sheet1", "max_row": 10}],
                         "query_config_id": "plus-monthly-v2",
                         "mapping_version_id": "mapping-v2",
                     },
@@ -168,6 +173,9 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
             "template_mapping",
             "signed_url",
             "created_by",
+            "template_gcs_uri",
+            "template_sha256",
+            "template_sheets",
         }
         for version in versions:
             self.assertTrue(forbidden.isdisjoint(version))
@@ -209,6 +217,40 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
             distribution._validate_report_id("plus-monthly_downloads.v1"),
             "plus-monthly_downloads.v1",
         )
+
+    def test_template_object_name_uses_controlled_prefix(self):
+        distribution = _load_distribution_module()
+
+        self.assertEqual(
+            distribution._template_object_name("/report-templates/", "plus", 3, r"C:\fake\template.xlsx"),
+            "report-templates/plus/v3/template.xlsx",
+        )
+
+    def test_public_template_version_result_excludes_storage_and_sheet_details(self):
+        distribution = _load_distribution_module()
+        now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+        version = distribution._build_template_version_doc(
+            version=4,
+            preview={
+                "file_name": "template.xlsx",
+                "size_bytes": 123,
+                "sha256": "b" * 64,
+                "sheet_count": 2,
+                "sheets": [{"name": "Sheet1", "max_row": 99}],
+            },
+            gcs_uri="gs://bucket/report-templates/plus/v4/template.xlsx",
+            note="publish",
+            now=now,
+        )
+        result = distribution._public_template_version_result("plus", version)
+
+        self.assertEqual(result["version"], 4)
+        self.assertEqual(result["template_name"], "template.xlsx")
+        self.assertEqual(result["template_size_bytes"], 123)
+        self.assertEqual(result["template_sha256"], "b" * 64)
+        self.assertNotIn("template_gcs_uri", result)
+        self.assertNotIn("template_sheets", result)
 
 
 class SelectedReportSummaryTest(unittest.TestCase):
