@@ -1035,7 +1035,7 @@ smoke:
 13. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
 14. PIN発行、PIN検証、download redirect の既存フローが変わっていない
 
-published template runtime switch smoke, after implementation:
+published template runtime switch smoke:
 
 15. Confirm `/generate` without `report_id` still uses the existing `TEMPLATE_PATH` or bundled template fallback.
 16. Confirm `/generate` with a test `report_id` uses the current published template version and writes the generated workbook to the expected output prefix.

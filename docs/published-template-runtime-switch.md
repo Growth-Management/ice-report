@@ -6,6 +6,8 @@ This document defines the first safe step for applying published Excel templates
 
 Use the current published template from Firestore `report_definitions` when an admin explicitly generates a report for a `report_id`.
 
+Implementation status: report_id-gated runtime switch is implemented for `POST /generate` and `POST /deliveries` generation. Existing generation without `report_id` remains the fallback path.
+
 The switch must keep existing report generation working:
 
 - No `report_id`: continue using `TEMPLATE_PATH` or bundled `templates/template.xlsx`.
@@ -118,14 +120,14 @@ No Firestore schema migration is required.
 
 ## Implementation Shape
 
-Prefer small helpers in `distribution.py`:
+Implemented helpers in `distribution.py`:
 
 - `get_report_definition_runtime_template(report_id)`: returns internal current version metadata, including `template_gcs_uri`.
 - `download_report_definition_template(report_id, destination_dir)`: downloads the current template to a local temp path and returns safe public metadata plus the local path.
 
 Keep `_public_report_definition` unchanged so read-only Admin APIs continue excluding storage internals.
 
-Prefer a small app-level wrapper:
+Implemented app-level wrapper:
 
 - Resolve the template path before calling `generate_report`.
 - Include safe metadata in audit detail.

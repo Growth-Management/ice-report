@@ -1,8 +1,10 @@
 import importlib
 import sys
+import tempfile
 import types
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def _install_google_stubs():
@@ -62,6 +64,7 @@ def _install_app_import_stubs():
         "archive_report_definition",
         "create_delivery_record",
         "create_report_definition",
+        "download_report_definition_template",
         "find_delivery_by_token",
         "get_current_version",
         "get_report_definition",
@@ -336,6 +339,133 @@ class TemplatePreviewTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "too large"):
             app_module._preview_xlsx_template_bytes(b"12345", "template.xlsx", max_bytes=4)
+
+
+class RuntimeTemplateResolutionTest(unittest.TestCase):
+    def _install_firestore_doc(self, distribution, doc_data):
+        class _Snapshot:
+            exists = True
+
+            def to_dict(self):
+                return dict(doc_data)
+
+        class _Document:
+            def get(self):
+                return _Snapshot()
+
+        class _Collection:
+            def document(self, report_id):
+                self.report_id = report_id
+                return _Document()
+
+        class _Client:
+            def collection(self, name):
+                self.collection_name = name
+                return _Collection()
+
+        distribution.get_firestore_client = lambda: _Client()
+
+    def test_runtime_template_resolution_uses_current_version_internally(self):
+        distribution = _load_distribution_module()
+        self._install_firestore_doc(
+            distribution,
+            {
+                "status": "active",
+                "current_version": 2,
+                "versions": [
+                    {"version": 1, "template_name": "old.xlsx"},
+                    {
+                        "version": 2,
+                        "template_name": "template.xlsx",
+                        "template_gcs_uri": "gs://template-bucket/report-templates/plus/v2/template.xlsx",
+                        "template_sha256": "c" * 64,
+                        "template_size_bytes": 456,
+                    },
+                ],
+            },
+        )
+
+        result = distribution.get_report_definition_runtime_template("plus")
+
+        self.assertEqual(result["report_id"], "plus")
+        self.assertEqual(result["version"], 2)
+        self.assertEqual(result["bucket"], "template-bucket")
+        self.assertEqual(result["object_name"], "report-templates/plus/v2/template.xlsx")
+        self.assertEqual(result["template_gcs_uri"], "gs://template-bucket/report-templates/plus/v2/template.xlsx")
+
+        public = distribution._public_runtime_template_result(result)
+        self.assertEqual(public["report_definition_version"], 2)
+        self.assertEqual(public["template_name"], "template.xlsx")
+        self.assertEqual(public["template_sha256"], "c" * 64)
+        self.assertNotIn("template_gcs_uri", public)
+        self.assertNotIn("bucket", public)
+        self.assertNotIn("object_name", public)
+
+    def test_runtime_template_resolution_requires_published_template(self):
+        distribution = _load_distribution_module()
+        self._install_firestore_doc(
+            distribution,
+            {
+                "status": "active",
+                "current_version": 1,
+                "versions": [{"version": 1, "status": "draft"}],
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "published template is required"):
+            distribution.get_report_definition_runtime_template("plus")
+
+    def test_download_runtime_template_returns_local_path_and_safe_metadata(self):
+        distribution = _load_distribution_module()
+        self._install_firestore_doc(
+            distribution,
+            {
+                "status": "active",
+                "current_version": 3,
+                "versions": [
+                    {
+                        "version": 3,
+                        "template_name": "template.xlsx",
+                        "template_gcs_uri": "gs://template-bucket/report-templates/plus/v3/template.xlsx",
+                        "template_sha256": "d" * 64,
+                    }
+                ],
+            },
+        )
+
+        class _Blob:
+            def __init__(self, object_name):
+                self.object_name = object_name
+
+            def download_to_filename(self, filename):
+                Path(filename).write_bytes(b"template")
+
+        class _Bucket:
+            def __init__(self, bucket_name):
+                self.bucket_name = bucket_name
+
+            def blob(self, object_name):
+                self.object_name = object_name
+                return _Blob(object_name)
+
+        class _StorageClient:
+            def bucket(self, bucket_name):
+                self.bucket_name = bucket_name
+                return _Bucket(bucket_name)
+
+        distribution.get_storage_client = lambda: _StorageClient()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = distribution.download_report_definition_template(
+                "plus",
+                destination_dir=temp_dir,
+            )
+
+            self.assertTrue(Path(result["local_path"]).exists())
+            self.assertEqual(Path(result["local_path"]).read_bytes(), b"template")
+            self.assertEqual(result["template"]["report_id"], "plus")
+            self.assertEqual(result["template"]["report_definition_version"], 3)
+            self.assertNotIn("template_gcs_uri", result["template"])
 
 
 if __name__ == "__main__":
