@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from io import BytesIO
 import logging
 import os
 import secrets
@@ -35,6 +36,8 @@ from mail_provider import MailDeliveryError
 from mail_runtime import send_otp_pin_email
 
 app = Flask(__name__)
+
+TEMPLATE_PREVIEW_MAX_BYTES = int(os.environ.get("TEMPLATE_PREVIEW_MAX_BYTES", str(8 * 1024 * 1024)))
 
 
 def _bigquery_project_id() -> str:
@@ -827,6 +830,11 @@ def render_admin_ui() -> str:
       <button class="secondary" onclick="clearDefinitionForm()">入力クリア</button>
     </div>
     <pre id="definitionResult">待機中</pre>
+    <div class="field"><label>Excel template preview (.xlsx)</label><input id="templatePreviewFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
+    <div class="toolbar">
+      <button class="secondary" id="templatePreviewButton" onclick="previewReportTemplate()">template preview</button>
+    </div>
+    <pre id="templatePreviewResult">not loaded</pre>
     <div class="toolbar">
       <input id="definitionSearch" placeholder="report_id / name / owner / GCS prefixで検索" oninput="renderDefinitionsFromState()" style="min-width:260px;flex:1;">
       <select id="definitionStatusFilter" onchange="renderDefinitionsFromState()" style="width:150px;">
@@ -906,6 +914,7 @@ const baseUrl = window.location.origin;
 const DEFAULT_ALLOWED_DOMAINS = ["shueisha.co.jp", "sur.co.jp", "hitotsubashi.co.jp", "impress.co.jp"];
 let createDeliveryInProgress = false;
 let reportDefinitionInProgress = false;
+let templatePreviewInProgress = false;
 const versionInProgress = {};
 const ADMIN_KEY_STORAGE = "ice_admin_api_key";
 let reportDefinitionItems = [];
@@ -942,7 +951,7 @@ async function api(path, options = {}) {
   if (adminKey) {
     headers["X-Admin-Key"] = adminKey;
   }
-  if (options.body && !headers["Content-Type"]) {
+  if (options.body && !(options.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
 
@@ -1278,6 +1287,46 @@ async function archiveReportDefinition() {
   } finally {
     reportDefinitionInProgress = false;
     setDefinitionButtons(false);
+  }
+}
+
+async function previewReportTemplate() {
+  if (templatePreviewInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  const fileInput = document.getElementById("templatePreviewFile");
+  const resultEl = document.getElementById("templatePreviewResult");
+  const button = document.getElementById("templatePreviewButton");
+
+  if (!reportId) {
+    resultEl.textContent = "report_id is required";
+    return;
+  }
+  if (!fileInput.files || !fileInput.files.length) {
+    resultEl.textContent = "template .xlsx file is required";
+    return;
+  }
+
+  const form = new FormData();
+  form.append("template_file", fileInput.files[0]);
+  templatePreviewInProgress = true;
+  button.disabled = true;
+  resultEl.textContent = "previewing template...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/template-preview", {
+      method: "POST",
+      body: form
+    });
+    resultEl.textContent = JSON.stringify(data.preview || data, null, 2);
+    showToast("template preview completed");
+  } catch (e) {
+    resultEl.textContent = "template preview failed\n" + e.message;
+  } finally {
+    templatePreviewInProgress = false;
+    button.disabled = false;
   }
 }
 
@@ -1984,6 +2033,57 @@ def _log_report_definition_action(action: str, result: str, report_id: str, stat
     )
 
 
+def _safe_uploaded_filename(filename: str) -> str:
+    return (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _preview_xlsx_template_bytes(
+    data: bytes,
+    filename: str,
+    *,
+    max_bytes: int = TEMPLATE_PREVIEW_MAX_BYTES,
+) -> dict:
+    safe_filename = _safe_uploaded_filename(filename)
+
+    if not safe_filename.lower().endswith(".xlsx"):
+        raise ValueError("template file must end with .xlsx")
+    if not data:
+        raise ValueError("template file is empty")
+    if len(data) > max_bytes:
+        raise ValueError("template file is too large")
+
+    try:
+        from openpyxl import load_workbook as openpyxl_load_workbook
+
+        workbook = openpyxl_load_workbook(BytesIO(data), read_only=False, data_only=False)
+    except Exception as exc:
+        raise ValueError("invalid xlsx template") from exc
+
+    try:
+        sheets = []
+        for worksheet in workbook.worksheets:
+            tables = getattr(worksheet, "tables", {}) or {}
+            sheets.append(
+                {
+                    "name": worksheet.title,
+                    "max_row": worksheet.max_row,
+                    "max_column": worksheet.max_column,
+                    "table_count": len(tables),
+                    "state": worksheet.sheet_state,
+                }
+            )
+
+        return {
+            "file_name": safe_filename,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "sheet_count": len(sheets),
+            "sheets": sheets,
+        }
+    finally:
+        workbook.close()
+
+
 @app.post("/report-definitions")
 def create_report_definition_route():
     ok, error_response = _check_admin()
@@ -2018,6 +2118,37 @@ def report_definition_detail(report_id: str):
         "item": result,
         "result": result,
     })
+
+
+@app.post("/report-definitions/<report_id>/template-preview")
+def preview_report_definition_template(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    try:
+        get_report_definition(report_id)
+    except ValueError as exc:
+        _log_report_definition_action("template_preview", "failure", "", 404)
+        return jsonify({"error": str(exc)}), 404
+
+    upload = request.files.get("template_file")
+    if upload is None:
+        _log_report_definition_action("template_preview", "failure", "", 400)
+        return jsonify({"error": "template_file is required"}), 400
+
+    data = upload.read(TEMPLATE_PREVIEW_MAX_BYTES + 1)
+
+    try:
+        preview = _preview_xlsx_template_bytes(data, upload.filename or "")
+    except ValueError as exc:
+        status_code = 413 if "too large" in str(exc) else 400
+        _log_report_definition_action("template_preview", "failure", "", status_code)
+        return jsonify({"error": str(exc)}), status_code
+
+    preview["report_id"] = report_id
+    _log_report_definition_action("template_preview", "success", report_id, 200)
+    return jsonify({"preview": preview, "result": preview})
 
 
 @app.patch("/report-definitions/<report_id>")

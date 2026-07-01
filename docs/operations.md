@@ -1026,20 +1026,22 @@ smoke:
 4. 定義がある場合は version履歴を展開し、SQL本文、template mapping、作成者メール、Signed URL が表示されない
 5. レポート定義の追加、編集、archive をテスト用定義で確認する。確認後は archive 状態にして残す
 6. 追加・編集・archive の操作ログに secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL が含まれていない
-7. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
-8. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
-9. PIN発行、PIN検証、download redirect の既存フローが変わっていない
+7. Excelテンプレート `.xlsx` のpreviewを実行し、保存やpublishなしでシート名、行数、列数、テーブル数、サイズ、sha256だけが返ることを確認する
+8. template preview の操作ログに secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL、セル値が含まれていない
+9. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
+10. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
+11. PIN発行、PIN検証、download redirect の既存フローが変わっていない
 
 rollback:
 
 - 表示のみの問題であれば直前 Cloud Run revision へ戻す
-- SQL変更、template publish、schedule変更、Drive/GCS保存先変更はこの段階では行わない
+- SQL変更、template publish、template rollback、schedule変更、Drive/GCS保存先変更はこの段階では行わない
 - PR単位で戻す場合は該当PRをrevertする
 
 記録しない項目:
 
 - secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL
-- SQL本文、template mapping詳細、message body、provider event JSON
+- SQL本文、template mapping詳細、Excelセル値、message body、provider event JSON
 
 ### Google Drive backup 後の GCS cleanup 方針
 

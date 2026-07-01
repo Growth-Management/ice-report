@@ -239,5 +239,62 @@ class SelectedReportSummaryTest(unittest.TestCase):
         self.assertNotIn("https://example.test", html)
 
 
+class TemplatePreviewTest(unittest.TestCase):
+    def _install_openpyxl_stub(self) -> None:
+        class _Worksheet:
+            title = "Preview"
+            max_row = 2
+            max_column = 2
+            tables = {"Table1": object()}
+            sheet_state = "visible"
+
+        class _Workbook:
+            worksheets = [_Worksheet()]
+
+            def close(self):
+                return None
+
+        openpyxl_stub = types.ModuleType("openpyxl")
+        openpyxl_stub.load_workbook = lambda *args, **kwargs: _Workbook()
+        sys.modules["openpyxl"] = openpyxl_stub
+
+    def _workbook_bytes(self) -> bytes:
+        return b"fake-xlsx-content-without-cell-values"
+
+    def test_template_preview_returns_structure_without_cell_values(self):
+        _install_app_import_stubs()
+        self._install_openpyxl_stub()
+        import app as app_module
+
+        preview = app_module._preview_xlsx_template_bytes(
+            self._workbook_bytes(),
+            r"C:\fake\template.xlsx",
+        )
+
+        self.assertEqual(preview["file_name"], "template.xlsx")
+        self.assertEqual(preview["sheet_count"], 1)
+        self.assertEqual(preview["sheets"][0]["name"], "Preview")
+        self.assertEqual(preview["sheets"][0]["max_row"], 2)
+        self.assertEqual(preview["sheets"][0]["max_column"], 2)
+        self.assertEqual(preview["sheets"][0]["table_count"], 1)
+        self.assertIn("sha256", preview)
+        self.assertNotIn("raw-email@example.com", str(preview))
+        self.assertNotIn("secret-value", str(preview))
+
+    def test_template_preview_rejects_non_xlsx_file_name(self):
+        _install_app_import_stubs()
+        import app as app_module
+
+        with self.assertRaisesRegex(ValueError, "must end with .xlsx"):
+            app_module._preview_xlsx_template_bytes(self._workbook_bytes(), "template.xls")
+
+    def test_template_preview_rejects_too_large_file(self):
+        _install_app_import_stubs()
+        import app as app_module
+
+        with self.assertRaisesRegex(ValueError, "too large"):
+            app_module._preview_xlsx_template_bytes(b"12345", "template.xlsx", max_bytes=4)
+
+
 if __name__ == "__main__":
     unittest.main()
