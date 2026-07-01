@@ -20,11 +20,29 @@ DEFAULT_TEMPLATE = BASE_DIR / "templates" / "template.xlsx"
 DEFAULT_OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/tmp/report_output"))
 PAID_SQL_PATH = BASE_DIR / "sql" / "paid.sql"
 FREE_SQL_PATH = BASE_DIR / "sql" / "free.sql"
+DEFAULT_QUERY_CONFIG_ID = "plus-monthly-default-v1"
+DEFAULT_MAPPING_VERSION_ID = "plus-monthly-table-mapping-v1"
 
 PAID_SOURCE_SHEET = "見込み_yymm_PLUS"
 FREE_SOURCE_SHEET = "無料_yymm_PLUS"
 
 PAID_TOTAL_COLS = range(5, 11)
+DEFAULT_QUERY_SPECS = (
+    {
+        "query_id": "paid_downloads",
+        "sql_path": PAID_SQL_PATH,
+        "mapping_source": "paid_table",
+        "expected_columns": 10,
+        "has_total_row": True,
+    },
+    {
+        "query_id": "free_downloads",
+        "sql_path": FREE_SQL_PATH,
+        "mapping_source": "free_table",
+        "expected_columns": 6,
+        "has_total_row": False,
+    },
+)
 
 
 def resolve_bigquery_project_id() -> str:
@@ -74,6 +92,46 @@ def run_query(client: bigquery.Client, sql_path: Path, dry_run: bool = False) ->
         client.query(sql, job_config=job_config)
         return pd.DataFrame()
     return client.query(sql).to_dataframe()
+
+
+def preview_default_query_mapping(project_id: str) -> dict:
+    client = bigquery.Client(project=project_id)
+    query_results = []
+    mapping_sources = []
+
+    for spec in DEFAULT_QUERY_SPECS:
+        sql = read_sql(spec["sql_path"])
+        job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+        job = client.query(sql, job_config=job_config)
+        query_results.append(
+            {
+                "query_id": spec["query_id"],
+                "sql_file": spec["sql_path"].name,
+                "dry_run": True,
+                "valid": True,
+                "total_bytes_processed": int(getattr(job, "total_bytes_processed", 0) or 0),
+            }
+        )
+        mapping_sources.append(
+            {
+                "mapping_source": spec["mapping_source"],
+                "query_id": spec["query_id"],
+                "expected_columns": spec["expected_columns"],
+                "has_total_row": spec["has_total_row"],
+            }
+        )
+
+    return {
+        "query_config_id": DEFAULT_QUERY_CONFIG_ID,
+        "mapping_version_id": DEFAULT_MAPPING_VERSION_ID,
+        "query_count": len(query_results),
+        "mapping_source_count": len(mapping_sources),
+        "queries": query_results,
+        "mapping_preview": {
+            "mapping_version_id": DEFAULT_MAPPING_VERSION_ID,
+            "sources": mapping_sources,
+        },
+    }
 
 
 def get_single_table(ws: Worksheet):

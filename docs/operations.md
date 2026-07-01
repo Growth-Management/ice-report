@@ -1042,6 +1042,9 @@ published template runtime switch smoke:
 17. Confirm `/deliveries` with `report_id` and no `gcs_uri` generates a workbook and creates a delivery that points to that workbook.
 18. Confirm a `report_id` whose current version has no `template_gcs_uri` fails closed before BigQuery execution and before delivery creation.
 19. Confirm API responses, Cloud Logging, and Firestore audit do not include `template_gcs_uri`, Signed URL, Excel cell values, SQL text, template mapping details, raw email, token fragments, IP, user agent, or Admin key fingerprint.
+20. Run query / mapping dry-run preview for a test report definition and confirm BigQuery dry-run succeeds for the default query config.
+21. Confirm query / mapping preview response includes only safe metadata such as query IDs, SQL file names, bytes processed, mapping source IDs, expected column counts, and total-row flags.
+22. Confirm query / mapping preview response and logs do not include SQL text, template mapping cell details, Excel cell values, raw email, token fragments, Signed URL, IP, user agent, or Admin key fingerprint.
 
 rollback:
 

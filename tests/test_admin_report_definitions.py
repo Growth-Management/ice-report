@@ -16,6 +16,7 @@ def _install_google_stubs():
 
     google_auth_stub.default = lambda: (types.SimpleNamespace(refresh=lambda request: None, token="token"), None)
     google_auth_transport_requests_stub.Request = object
+    google_cloud_stub.bigquery = types.SimpleNamespace(Client=object, QueryJobConfig=object)
     google_cloud_stub.firestore = types.SimpleNamespace(Client=object, Query=types.SimpleNamespace(DESCENDING="DESC"))
     google_cloud_stub.secretmanager = types.SimpleNamespace()
     google_cloud_stub.storage = types.SimpleNamespace(Client=object)
@@ -34,6 +35,39 @@ def _load_distribution_module():
     _install_google_stubs()
     sys.modules.pop("distribution", None)
     return importlib.import_module("distribution")
+
+
+def _load_create_report_module():
+    _install_google_stubs()
+    pandas_stub = types.ModuleType("pandas")
+    pandas_stub.DataFrame = lambda *args, **kwargs: []
+    pandas_stub.NA = object()
+    pandas_stub.isna = lambda value: False
+    pandas_stub.notna = lambda value: True
+    pandas_stub.api = types.SimpleNamespace(
+        types=types.SimpleNamespace(
+            is_datetime64_any_dtype=lambda value: False,
+        )
+    )
+    sys.modules["pandas"] = pandas_stub
+
+    openpyxl_stub = types.ModuleType("openpyxl")
+    openpyxl_stub.load_workbook = lambda *args, **kwargs: None
+    worksheet_package_stub = types.ModuleType("openpyxl.worksheet")
+    worksheet_stub = types.ModuleType("openpyxl.worksheet.worksheet")
+    worksheet_stub.Worksheet = object
+    utils_stub = types.ModuleType("openpyxl.utils")
+    utils_stub.get_column_letter = lambda col: str(col)
+    cell_stub = types.ModuleType("openpyxl.utils.cell")
+    cell_stub.range_boundaries = lambda ref: (1, 1, 1, 1)
+    sys.modules["openpyxl"] = openpyxl_stub
+    sys.modules["openpyxl.worksheet"] = worksheet_package_stub
+    sys.modules["openpyxl.worksheet.worksheet"] = worksheet_stub
+    sys.modules["openpyxl.utils"] = utils_stub
+    sys.modules["openpyxl.utils.cell"] = cell_stub
+
+    sys.modules.pop("create_report", None)
+    return importlib.import_module("create_report")
 
 
 def _install_app_import_stubs():
@@ -56,6 +90,7 @@ def _install_app_import_stubs():
     create_report_stub = types.ModuleType("create_report")
     create_report_stub.DEFAULT_TEMPLATE = "template.xlsx"
     create_report_stub.generate_report = lambda *args, **kwargs: {}
+    create_report_stub.preview_default_query_mapping = lambda *args, **kwargs: {}
     sys.modules.setdefault("create_report", create_report_stub)
 
     distribution_stub = sys.modules.get("distribution") or types.ModuleType("distribution")
@@ -339,6 +374,48 @@ class TemplatePreviewTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "too large"):
             app_module._preview_xlsx_template_bytes(b"12345", "template.xlsx", max_bytes=4)
+
+
+class QueryMappingPreviewTest(unittest.TestCase):
+    def test_default_query_mapping_preview_excludes_sql_text(self):
+        create_report = _load_create_report_module()
+        queries = []
+
+        class _QueryJobConfig:
+            def __init__(self, dry_run=False, use_query_cache=True):
+                self.dry_run = dry_run
+                self.use_query_cache = use_query_cache
+
+        class _Job:
+            total_bytes_processed = 12345
+
+        class _Client:
+            def __init__(self, project):
+                self.project = project
+
+            def query(self, sql, job_config=None):
+                queries.append({"sql": sql, "job_config": job_config})
+                return _Job()
+
+        create_report.bigquery = types.SimpleNamespace(
+            Client=_Client,
+            QueryJobConfig=_QueryJobConfig,
+        )
+
+        result = create_report.preview_default_query_mapping("ice-sh")
+
+        self.assertEqual(result["query_config_id"], "plus-monthly-default-v1")
+        self.assertEqual(result["mapping_version_id"], "plus-monthly-table-mapping-v1")
+        self.assertEqual(result["query_count"], 2)
+        self.assertEqual(result["mapping_source_count"], 2)
+        self.assertEqual([item["sql_file"] for item in result["queries"]], ["paid.sql", "free.sql"])
+        self.assertIn("mapping_preview", result)
+        self.assertTrue(all(call["job_config"].dry_run for call in queries))
+        self.assertNotIn("SELECT", str(result).upper())
+        self.assertNotIn("FROM", str(result).upper())
+        self.assertNotIn("template_gcs_uri", str(result))
+        self.assertNotIn("template_mapping", str(result))
+        self.assertNotIn("raw_email", str(result))
 
 
 class RuntimeTemplateResolutionTest(unittest.TestCase):
