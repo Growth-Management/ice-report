@@ -92,6 +92,7 @@ def _install_import_stubs():
         "archive_report_definition",
         "create_delivery_record",
         "create_report_definition",
+        "download_report_definition_template",
         "find_delivery_by_token",
         "get_current_version",
         "get_report_definition",

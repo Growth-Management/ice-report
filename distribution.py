@@ -6,6 +6,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import google.auth
@@ -533,6 +534,84 @@ def _public_template_version_result(report_id: str, version_doc: dict[str, Any])
         "template_sheet_count": version_doc.get("template_sheet_count") or 0,
         "created_at": _format_dt(version_doc.get("created_at")),
         "updated_at": _format_dt(version_doc.get("updated_at")),
+    }
+
+
+def _find_report_definition_current_version(definition: dict[str, Any]) -> dict[str, Any]:
+    current_version = definition.get("current_version")
+    if current_version is None:
+        raise ValueError("current_version is required")
+
+    for version in definition.get("versions") or []:
+        if int(version.get("version") or 0) == int(current_version):
+            return dict(version)
+
+    raise ValueError("current_version not found")
+
+
+def get_report_definition_runtime_template(report_id: str) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+    db = get_firestore_client()
+    snap = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id).get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    definition = snap.to_dict() or {}
+    if definition.get("archived") or definition.get("status") == "archived":
+        raise ValueError("report definition is archived")
+
+    version = _find_report_definition_current_version(definition)
+    template_gcs_uri = str(version.get("template_gcs_uri") or "").strip()
+    if not template_gcs_uri:
+        raise ValueError("published template is required")
+
+    bucket, object_name = parse_gcs_uri(template_gcs_uri)
+    template_name = _safe_template_file_name(
+        str(version.get("template_name") or version.get("template_file_name") or object_name)
+    )
+
+    return {
+        "report_id": report_id,
+        "version": int(version.get("version") or 0),
+        "template_name": template_name,
+        "template_sha256": str(version.get("template_sha256") or ""),
+        "template_size_bytes": int(version.get("template_size_bytes") or 0),
+        "bucket": bucket,
+        "object_name": object_name,
+        "template_gcs_uri": template_gcs_uri,
+    }
+
+
+def _public_runtime_template_result(template: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "report_id": template.get("report_id") or "",
+        "report_definition_version": template.get("version"),
+        "template_name": template.get("template_name") or "",
+        "template_sha256": template.get("template_sha256") or "",
+        "template_size_bytes": template.get("template_size_bytes") or 0,
+    }
+
+
+def download_report_definition_template(
+    report_id: str,
+    *,
+    destination_dir: str | os.PathLike[str],
+) -> dict[str, Any]:
+    template = get_report_definition_runtime_template(report_id)
+    destination_root = Path(destination_dir)
+    destination_root.mkdir(parents=True, exist_ok=True)
+
+    filename = _safe_template_file_name(str(template.get("template_name") or "template.xlsx"))
+    local_name = f"{template['report_id']}-v{template['version']}-{secrets.token_hex(8)}-{filename}"
+    local_path = destination_root / local_name
+
+    bucket = get_storage_client().bucket(template["bucket"])
+    blob = bucket.blob(template["object_name"])
+    blob.download_to_filename(str(local_path))
+
+    return {
+        "local_path": str(local_path),
+        "template": _public_runtime_template_result(template),
     }
 
 

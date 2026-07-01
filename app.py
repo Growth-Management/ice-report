@@ -19,6 +19,7 @@ from distribution import (
     archive_report_definition,
     create_delivery_record,
     create_report_definition,
+    download_report_definition_template,
     find_delivery_by_token,
     get_current_version,
     get_report_definition,
@@ -40,6 +41,15 @@ from mail_runtime import send_otp_pin_email
 app = Flask(__name__)
 
 TEMPLATE_PREVIEW_MAX_BYTES = int(os.environ.get("TEMPLATE_PREVIEW_MAX_BYTES", str(8 * 1024 * 1024)))
+RUNTIME_TEMPLATE_DIR = os.environ.get("RUNTIME_TEMPLATE_DIR", "/tmp/ice-report-templates")
+
+
+class RuntimeTemplateError(Exception):
+    def __init__(self, message: str, status_code: int, reason: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.reason = reason
 
 
 def _bigquery_project_id() -> str:
@@ -49,6 +59,59 @@ def _bigquery_project_id() -> str:
         or os.environ.get("GOOGLE_CLOUD_PROJECT")
         or ""
     )
+
+
+def _default_template_path() -> Path:
+    return Path(os.environ.get("TEMPLATE_PATH", str(DEFAULT_TEMPLATE)))
+
+
+def _resolve_generation_template(payload: dict) -> dict:
+    report_id = str(payload.get("report_id") or "").strip()
+    if not report_id:
+        return {
+            "template_path": _default_template_path(),
+            "runtime_template": None,
+            "local_path": None,
+        }
+
+    try:
+        resolved = download_report_definition_template(
+            report_id,
+            destination_dir=RUNTIME_TEMPLATE_DIR,
+        )
+    except ValueError as exc:
+        reason = str(exc) or "template_resolve_failed"
+        logging.warning(
+            "ICE_REPORT_TEMPLATE_RESOLVE_FAILED report_id=%s reason=%s",
+            report_id,
+            reason,
+        )
+        raise RuntimeTemplateError(reason, 400, reason) from exc
+    except Exception as exc:
+        logging.error(
+            "ICE_REPORT_TEMPLATE_DOWNLOAD_FAILED report_id=%s",
+            report_id,
+        )
+        raise RuntimeTemplateError(
+            "published template could not be loaded",
+            500,
+            "template_download_failed",
+        ) from exc
+
+    return {
+        "template_path": Path(resolved["local_path"]),
+        "runtime_template": resolved.get("template"),
+        "local_path": resolved.get("local_path"),
+    }
+
+
+def _cleanup_runtime_template(local_path: str | None) -> None:
+    if not local_path:
+        return
+    try:
+        Path(local_path).unlink(missing_ok=True)
+    except Exception:
+        logging.warning("ICE_REPORT_TEMPLATE_CLEANUP_FAILED")
 
 
 def _env_flag(name: str) -> bool:
@@ -1066,6 +1129,7 @@ async function createDelivery() {
     report_month: document.getElementById("createMonth").value,
     gcs_uri: document.getElementById("createGcs").value,
     output_filename: document.getElementById("createOutputFilename").value,
+    report_id: document.getElementById("definitionId").value,
     allowed_emails: splitList(document.getElementById("createEmails").value),
     allowed_domains: inputDomains.length ? inputDomains : DEFAULT_ALLOWED_DOMAINS
   };
@@ -1931,15 +1995,35 @@ def generate():
         return jsonify({"error": "BUCKET_NAME is required"}), 400
 
     today = datetime.strptime(today_text, "%Y-%m-%d").date() if today_text else None
+    template_context = None
 
-    result = generate_report(
-        project_id=project_id,
-        bucket_name=bucket_name,
-        object_prefix=object_prefix,
-        template_path=Path(os.environ.get("TEMPLATE_PATH", str(DEFAULT_TEMPLATE))),
-        today=today,
-        output_filename=output_filename,
-    )
+    try:
+        template_context = _resolve_generation_template(payload)
+    except RuntimeTemplateError as exc:
+        _log_admin_audit_event(
+            action="generate_report",
+            result="failure",
+            target_type="report",
+            status_code=exc.status_code,
+            reason=exc.reason,
+            detail={"report_id": str(payload.get("report_id") or "").strip()},
+        )
+        return jsonify({"error": exc.message}), exc.status_code
+
+    try:
+        result = generate_report(
+            project_id=project_id,
+            bucket_name=bucket_name,
+            object_prefix=object_prefix,
+            template_path=template_context["template_path"],
+            today=today,
+            output_filename=output_filename,
+        )
+    finally:
+        _cleanup_runtime_template(template_context.get("local_path") if template_context else None)
+
+    if template_context and template_context.get("runtime_template"):
+        result["report_definition_template"] = template_context["runtime_template"]
 
     _log_admin_audit_event(
         action="generate_report",
@@ -1952,6 +2036,9 @@ def generate():
             "output_filename": output_filename,
             "gcs_uri": result.get("gcs_uri"),
             "item_count": len(result.get("items", [])) if isinstance(result.get("items"), list) else None,
+            "report_definition_template": (
+                template_context.get("runtime_template") if template_context else None
+            ),
         },
     )
 
@@ -1970,6 +2057,7 @@ def create_delivery():
     report_month = payload.get("report_month")
     gcs_uri = payload.get("gcs_uri")
     output_filename = payload.get("output_filename") or payload.get("file_name")
+    template_context = None
 
     if not customer_name:
         _log_admin_audit_event(
@@ -2021,15 +2109,37 @@ def create_delivery():
             return jsonify({"error": "BUCKET_NAME is required"}), 400
 
         today = datetime.strptime(today_text, "%Y-%m-%d").date() if today_text else None
+        try:
+            template_context = _resolve_generation_template(payload)
+        except RuntimeTemplateError as exc:
+            _log_admin_audit_event(
+                action="delivery_create",
+                result="failure",
+                target_type="delivery",
+                status_code=exc.status_code,
+                reason=exc.reason,
+                detail={
+                    "customer_name": customer_name,
+                    "report_month": report_month,
+                    "report_id": str(payload.get("report_id") or "").strip(),
+                },
+            )
+            return jsonify({"error": exc.message}), exc.status_code
 
-        generated = generate_report(
-            project_id=project_id,
-            bucket_name=bucket_name,
-            object_prefix=object_prefix,
-            template_path=Path(os.environ.get("TEMPLATE_PATH", str(DEFAULT_TEMPLATE))),
-            today=today,
-            output_filename=output_filename,
-        )
+        try:
+            generated = generate_report(
+                project_id=project_id,
+                bucket_name=bucket_name,
+                object_prefix=object_prefix,
+                template_path=template_context["template_path"],
+                today=today,
+                output_filename=output_filename,
+            )
+        finally:
+            _cleanup_runtime_template(template_context.get("local_path") if template_context else None)
+
+        if template_context and template_context.get("runtime_template"):
+            generated["report_definition_template"] = template_context["runtime_template"]
 
         gcs_uri = generated.get("gcs_uri")
 
@@ -2080,17 +2190,24 @@ def create_delivery():
             ),
             "allowed_domain_count": len(payload.get("allowed_domains") or []),
             "allowed_email_count": len(payload.get("allowed_emails") or []),
+            "report_definition_template": (
+                template_context.get("runtime_template") if template_context else None
+            ),
         },
     )
 
-    return jsonify({
+    response_payload = {
         "items": [result],
         "result": result,
         "download_url": result.get("download_url"),
         "public_download_url": result.get("public_download_url"),
         "token": result.get("token"),
         "delivery_id": result.get("delivery_id"),
-    }), 201
+    }
+    if template_context and template_context.get("runtime_template"):
+        response_payload["report_definition_template"] = template_context["runtime_template"]
+
+    return jsonify(response_payload), 201
 
 
 @app.get("/deliveries")
