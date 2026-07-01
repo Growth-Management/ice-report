@@ -1024,14 +1024,16 @@ smoke:
 2. Admin UI のレポート定義一覧が表示される
 3. レポート定義一覧に SQL、template mapping、allowed email、token、Signed URL が表示されない
 4. 定義がある場合は version履歴を展開し、SQL本文、template mapping、作成者メール、Signed URL が表示されない
-5. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
-6. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
-7. PIN発行、PIN検証、download redirect の既存フローが変わっていない
+5. レポート定義の追加、編集、archive をテスト用定義で確認する。確認後は archive 状態にして残す
+6. 追加・編集・archive の操作ログに secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL が含まれていない
+7. 既存の配布一覧、最新GCSファイル一覧、DLログが従来どおり表示される
+8. 有効な配布URLでOTP画面を開き、選択中レポートの顧客、対象月、current version、file、期限、状態が表示される
+9. PIN発行、PIN検証、download redirect の既存フローが変わっていない
 
 rollback:
 
 - 表示のみの問題であれば直前 Cloud Run revision へ戻す
-- Firestore schema変更、SQL変更、template publish、schedule変更は初回実装では行わない
+- SQL変更、template publish、schedule変更、Drive/GCS保存先変更はこの段階では行わない
 - PR単位で戻す場合は該当PRをrevertする
 
 記録しない項目:

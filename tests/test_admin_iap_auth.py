@@ -42,6 +42,9 @@ class _FlaskStub:
     def post(self, *args, **kwargs):
         return self._decorator
 
+    def patch(self, *args, **kwargs):
+        return self._decorator
+
     def test_request_context(self, path, headers=None, method="GET"):
         return _RequestContextStub(path, headers=headers, method=method)
 
@@ -86,7 +89,9 @@ def _install_import_stubs():
     distribution_stub = types.ModuleType("distribution")
     for name in (
         "add_delivery_version",
+        "archive_report_definition",
         "create_delivery_record",
+        "create_report_definition",
         "find_delivery_by_token",
         "get_current_version",
         "get_report_definition",
@@ -97,6 +102,7 @@ def _install_import_stubs():
         "make_signed_download_url",
         "render_download_form",
         "set_delivery_active",
+        "update_report_definition",
         "validate_delivery_access",
     ):
         setattr(distribution_stub, name, lambda *args, **kwargs: None)

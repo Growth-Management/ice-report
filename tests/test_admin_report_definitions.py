@@ -41,6 +41,7 @@ def _install_app_import_stubs():
             get=lambda *args, **kwargs: (lambda func: func),
             post=lambda *args, **kwargs: (lambda func: func),
             route=lambda *args, **kwargs: (lambda func: func),
+            patch=lambda *args, **kwargs: (lambda func: func),
         )
         flask_stub.jsonify = lambda value=None, **kwargs: value if value is not None else kwargs
         flask_stub.make_response = lambda value=None, *args, **kwargs: value
@@ -58,7 +59,9 @@ def _install_app_import_stubs():
     distribution_stub = sys.modules.get("distribution") or types.ModuleType("distribution")
     for name in (
         "add_delivery_version",
+        "archive_report_definition",
         "create_delivery_record",
+        "create_report_definition",
         "find_delivery_by_token",
         "get_current_version",
         "get_report_definition",
@@ -69,6 +72,7 @@ def _install_app_import_stubs():
         "make_signed_download_url",
         "render_download_form",
         "set_delivery_active",
+        "update_report_definition",
         "validate_delivery_access",
     ):
         if not hasattr(distribution_stub, name):
@@ -173,6 +177,38 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "report_id not found"):
             distribution._validate_report_id("__reserved__")
+
+    def test_report_definition_payload_is_limited_to_editable_metadata(self):
+        distribution = _load_distribution_module()
+
+        payload = distribution._report_definition_payload(
+            {
+                "name": " 月次DL ",
+                "owner": "システム管理室",
+                "primary_operator": "篠原邦昭",
+                "customer_name": "一ツ橋企画",
+                "default_report_month": "2026-06",
+                "gcs_prefix": "reports/plus/",
+                "drive_folder_name": "OMF",
+                "query_sql": "select raw_email from table",
+                "template_mapping": {"A1": "raw_email"},
+                "allowed_emails": ["user@example.com"],
+            }
+        )
+
+        self.assertEqual(payload["name"], "月次DL")
+        self.assertEqual(set(payload), set(distribution.REPORT_DEFINITION_EDITABLE_FIELDS))
+        self.assertNotIn("query_sql", payload)
+        self.assertNotIn("template_mapping", payload)
+        self.assertNotIn("allowed_emails", payload)
+
+    def test_report_definition_id_pattern_accepts_slug(self):
+        distribution = _load_distribution_module()
+
+        self.assertEqual(
+            distribution._validate_report_id("plus-monthly_downloads.v1"),
+            "plus-monthly_downloads.v1",
+        )
 
 
 class SelectedReportSummaryTest(unittest.TestCase):
