@@ -13,7 +13,7 @@ from pathlib import Path
 from flask import Flask, jsonify, make_response, redirect, request
 from google.cloud import firestore, storage
 
-from create_report import DEFAULT_TEMPLATE, generate_report
+from create_report import DEFAULT_TEMPLATE, generate_report, preview_default_query_mapping
 from distribution import (
     add_delivery_version,
     archive_report_definition,
@@ -907,6 +907,10 @@ def render_admin_ui() -> str:
     </div>
     <pre id="templatePreviewResult">not loaded</pre>
     <div class="toolbar">
+      <button class="secondary" id="queryMappingPreviewButton" onclick="previewQueryMapping()">query / mapping dry-run</button>
+    </div>
+    <pre id="queryMappingPreviewResult">not loaded</pre>
+    <div class="toolbar">
       <input id="definitionSearch" placeholder="report_id / name / owner / GCS prefixで検索" oninput="renderDefinitionsFromState()" style="min-width:260px;flex:1;">
       <select id="definitionStatusFilter" onchange="renderDefinitionsFromState()" style="width:150px;">
         <option value="all">all</option>
@@ -1237,7 +1241,8 @@ function setDefinitionButtons(disabled) {
     "definitionArchiveButton",
     "templatePreviewButton",
     "templatePublishButton",
-    "templateRollbackButton"
+    "templateRollbackButton",
+    "queryMappingPreviewButton"
   ].forEach(id => {
     const button = document.getElementById(id);
     if (button) {
@@ -1494,6 +1499,39 @@ async function rollbackReportTemplate() {
     await loadReportDefinitions();
   } catch (e) {
     resultEl.textContent = "template rollback failed\n" + e.message;
+  } finally {
+    templatePreviewInProgress = false;
+    button.disabled = false;
+  }
+}
+
+async function previewQueryMapping() {
+  if (templatePreviewInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  const resultEl = document.getElementById("queryMappingPreviewResult");
+  const button = document.getElementById("queryMappingPreviewButton");
+
+  if (!reportId) {
+    resultEl.textContent = "report_id is required";
+    return;
+  }
+
+  templatePreviewInProgress = true;
+  button.disabled = true;
+  resultEl.textContent = "running query dry-run...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/query-mapping-preview", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    resultEl.textContent = JSON.stringify(data.preview || data.result || data, null, 2);
+    showToast("query / mapping preview completed");
+  } catch (e) {
+    resultEl.textContent = "query / mapping preview failed\n" + e.message;
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -2341,6 +2379,36 @@ def report_definition_detail(report_id: str):
         "item": result,
         "result": result,
     })
+
+
+@app.post("/report-definitions/<report_id>/query-mapping-preview")
+def preview_report_definition_query_mapping(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    if not project_id:
+        _log_report_definition_action("query_mapping_preview", "failure", "", 400)
+        return jsonify({"error": "BIGQUERY_PROJECT_ID or PROJECT_ID is required"}), 400
+
+    try:
+        get_report_definition(report_id)
+    except ValueError as exc:
+        _log_report_definition_action("query_mapping_preview", "failure", "", 404)
+        return jsonify({"error": str(exc)}), 404
+
+    try:
+        preview = preview_default_query_mapping(project_id)
+    except Exception:
+        logging.error("ICE_REPORT_QUERY_MAPPING_PREVIEW_FAILED report_id=%s", report_id)
+        _log_report_definition_action("query_mapping_preview", "failure", "", 500)
+        return jsonify({"error": "query mapping preview failed"}), 500
+
+    preview["report_id"] = report_id
+    _log_report_definition_action("query_mapping_preview", "success", report_id, 200)
+    return jsonify({"preview": preview, "result": preview})
 
 
 @app.post("/report-definitions/<report_id>/template-preview")

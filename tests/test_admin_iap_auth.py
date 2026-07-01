@@ -84,6 +84,7 @@ def _install_import_stubs():
     create_report_stub = types.ModuleType("create_report")
     create_report_stub.DEFAULT_TEMPLATE = "template.xlsx"
     create_report_stub.generate_report = lambda *args, **kwargs: {}
+    create_report_stub.preview_default_query_mapping = lambda *args, **kwargs: {}
     sys.modules.setdefault("create_report", create_report_stub)
 
     distribution_stub = types.ModuleType("distribution")
