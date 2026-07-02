@@ -312,6 +312,15 @@ Query config / template mapping dry-run preview foundation:
 - Preview responses include query IDs, SQL file names, dry-run status, bytes processed, mapping source IDs, expected column counts, and total-row flags.
 - Preview responses and logs must not include SQL text, template mapping cell details, Excel cell values, raw email, token fragments, Signed URL, IP, user agent, or Admin key fingerprint.
 
+Query config / template mapping publish foundation:
+
+- Admin API/UI can publish the approved default query config ID and template mapping version ID as report definition version metadata.
+- Publish appends a new report definition version and updates `current_version`.
+- When the previous current version has published template metadata, the new version carries forward the internal template reference so runtime generation keeps using the published template.
+- This step does not edit SQL, edit mapping cells, upload templates, create schedule jobs, or change Drive/GCS destinations.
+- Publish responses and logs must not include SQL text, template mapping cell details, Excel cell values, template GCS URI, raw email, token fragments, Signed URL, IP, user agent, or Admin key fingerprint.
+- Rollback remains a version-level `current_version` rollback to a known previous version.
+
 Schedule ON/OFF foundation:
 
 - Admin API/UI can save monthly schedule metadata per report definition.

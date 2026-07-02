@@ -41,6 +41,8 @@ DEFAULT_REPORT_ALLOWED_DRIVE_FOLDERS = (
     "OMFダウンロード数報告",
     "126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt",
 )
+DEFAULT_REPORT_ALLOWED_QUERY_CONFIG_IDS = ("plus-monthly-default-v1",)
+DEFAULT_REPORT_ALLOWED_MAPPING_VERSION_IDS = ("plus-monthly-table-mapping-v1",)
 TEMPLATE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 SLACK_WEBHOOK_SECRET = os.environ.get(
@@ -440,6 +442,19 @@ def get_report_definition_storage_allowlist() -> dict[str, list[str]]:
     }
 
 
+def get_report_definition_query_mapping_allowlist() -> dict[str, list[str]]:
+    return {
+        "query_config_ids": _split_allowlist(
+            os.environ.get("REPORT_ALLOWED_QUERY_CONFIG_IDS"),
+            DEFAULT_REPORT_ALLOWED_QUERY_CONFIG_IDS,
+        ),
+        "mapping_version_ids": _split_allowlist(
+            os.environ.get("REPORT_ALLOWED_MAPPING_VERSION_IDS"),
+            DEFAULT_REPORT_ALLOWED_MAPPING_VERSION_IDS,
+        ),
+    }
+
+
 def _normalize_storage_prefix(value: str) -> str:
     normalized = (value or "").strip().replace("\\", "/")
     while "//" in normalized.replace("gs://", "gs:/"):
@@ -690,6 +705,55 @@ def _public_template_version_result(report_id: str, version_doc: dict[str, Any])
     }
 
 
+def _build_query_mapping_version_doc(
+    *,
+    version: int,
+    current_version: dict[str, Any],
+    query_config_id: str,
+    mapping_version_id: str,
+    note: str,
+    now: datetime,
+) -> dict[str, Any]:
+    copied_keys = (
+        "template_name",
+        "template_file_name",
+        "template_gcs_uri",
+        "template_size_bytes",
+        "template_sha256",
+        "template_sheet_count",
+        "template_sheets",
+    )
+    version_doc = {
+        key: current_version[key]
+        for key in copied_keys
+        if key in current_version and current_version.get(key) not in (None, "")
+    }
+    version_doc.update(
+        {
+            "version": version,
+            "status": "published",
+            "note": (note or "query mapping published").strip(),
+            "query_config_id": query_config_id,
+            "mapping_version_id": mapping_version_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    return version_doc
+
+
+def _public_query_mapping_version_result(report_id: str, version_doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "report_id": report_id,
+        "version": version_doc.get("version"),
+        "status": version_doc.get("status") or "",
+        "query_config_id": version_doc.get("query_config_id") or "",
+        "mapping_version_id": version_doc.get("mapping_version_id") or "",
+        "created_at": _format_dt(version_doc.get("created_at")),
+        "updated_at": _format_dt(version_doc.get("updated_at")),
+    }
+
+
 def _find_report_definition_current_version(definition: dict[str, Any]) -> dict[str, Any]:
     current_version = definition.get("current_version")
     if current_version is None:
@@ -823,6 +887,64 @@ def publish_report_definition_template(
     return {
         "item": _public_report_definition(report_id, current, include_versions=True),
         "template": _public_template_version_result(report_id, version_doc),
+    }
+
+
+def publish_report_definition_query_mapping(
+    report_id: str,
+    *,
+    query_config_id: str = "",
+    mapping_version_id: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+    allowlist = get_report_definition_query_mapping_allowlist()
+    query_config_id = (query_config_id or DEFAULT_REPORT_ALLOWED_QUERY_CONFIG_IDS[0]).strip()
+    mapping_version_id = (mapping_version_id or DEFAULT_REPORT_ALLOWED_MAPPING_VERSION_IDS[0]).strip()
+
+    if query_config_id not in allowlist["query_config_ids"]:
+        raise ValueError("query_config_id is not allowed")
+    if mapping_version_id not in allowlist["mapping_version_ids"]:
+        raise ValueError("mapping_version_id is not allowed")
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    current = snap.to_dict() or {}
+    if current.get("archived") or current.get("status") == "archived":
+        raise ValueError("report definition is archived")
+
+    versions = list(current.get("versions") or [])
+    current_version_doc: dict[str, Any] = {}
+    if versions and current.get("current_version") is not None:
+        current_version_doc = _find_report_definition_current_version(current)
+
+    next_version = max([int(v.get("version") or 0) for v in versions] or [0]) + 1
+    now = utcnow()
+    version_doc = _build_query_mapping_version_doc(
+        version=next_version,
+        current_version=current_version_doc,
+        query_config_id=query_config_id,
+        mapping_version_id=mapping_version_id,
+        note=note,
+        now=now,
+    )
+
+    versions.append(version_doc)
+    update_doc = {
+        "versions": versions,
+        "current_version": next_version,
+        "updated_at": now,
+    }
+    ref.update(update_doc)
+
+    current.update(update_doc)
+    return {
+        "item": _public_report_definition(report_id, current, include_versions=True),
+        "query_mapping": _public_query_mapping_version_result(report_id, version_doc),
     }
 
 

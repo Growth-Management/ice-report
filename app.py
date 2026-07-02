@@ -29,6 +29,7 @@ from distribution import (
     list_report_definitions,
     log_download,
     make_signed_download_url,
+    publish_report_definition_query_mapping,
     publish_report_definition_template,
     rollback_report_definition_template,
     set_report_definition_schedule,
@@ -915,6 +916,10 @@ def render_admin_ui() -> str:
     <div class="toolbar">
       <button class="secondary" id="queryMappingPreviewButton" onclick="previewQueryMapping()">query / mapping dry-run</button>
     </div>
+    <div class="field"><label>query / mapping version note</label><input id="queryMappingVersionNote" placeholder="query mapping update note"></div>
+    <div class="toolbar">
+      <button class="secondary" id="queryMappingPublishButton" onclick="publishQueryMapping()">query / mapping publish</button>
+    </div>
     <pre id="queryMappingPreviewResult">not loaded</pre>
     <div class="inline-fields">
       <div class="field"><label><input id="scheduleEnabled" type="checkbox"> schedule enabled</label></div>
@@ -1271,6 +1276,7 @@ function setDefinitionButtons(disabled) {
     "templatePublishButton",
     "templateRollbackButton",
     "queryMappingPreviewButton",
+    "queryMappingPublishButton",
     "scheduleSaveButton",
     "storageAllowlistButton"
   ].forEach(id => {
@@ -1293,7 +1299,8 @@ function clearDefinitionForm() {
     "definitionDriveFolder",
     "definitionVersionNote",
     "templateVersionNote",
-    "templateRollbackVersion"
+    "templateRollbackVersion",
+    "queryMappingVersionNote"
   ].forEach(id => {
     const input = document.getElementById(id);
     if (input) {
@@ -1573,6 +1580,46 @@ async function previewQueryMapping() {
     showToast("query / mapping preview completed");
   } catch (e) {
     resultEl.textContent = "query / mapping preview failed\n" + e.message;
+  } finally {
+    templatePreviewInProgress = false;
+    button.disabled = false;
+  }
+}
+
+async function publishQueryMapping() {
+  if (templatePreviewInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  const resultEl = document.getElementById("queryMappingPreviewResult");
+  const button = document.getElementById("queryMappingPublishButton");
+
+  if (!reportId) {
+    resultEl.textContent = "report_id is required";
+    return;
+  }
+  if (!confirm("publish query / mapping for " + reportId + "?")) {
+    return;
+  }
+
+  templatePreviewInProgress = true;
+  button.disabled = true;
+  resultEl.textContent = "publishing query / mapping metadata...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/query-mapping-publish", {
+      method: "POST",
+      body: JSON.stringify({
+        note: document.getElementById("queryMappingVersionNote").value || ""
+      })
+    });
+    resultEl.textContent = "query / mapping published\n" + JSON.stringify(data.query_mapping || data.result || data, null, 2);
+    showToast("query / mapping published");
+    delete reportDefinitionDetails[reportId];
+    await loadReportDefinitions();
+  } catch (e) {
+    resultEl.textContent = "query / mapping publish failed\n" + e.message;
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -2530,6 +2577,33 @@ def preview_report_definition_query_mapping(report_id: str):
     preview["report_id"] = report_id
     _log_report_definition_action("query_mapping_preview", "success", report_id, 200)
     return jsonify({"preview": preview, "result": preview})
+
+
+@app.post("/report-definitions/<report_id>/query-mapping-publish")
+def publish_report_definition_query_mapping_route(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = publish_report_definition_query_mapping(
+            report_id,
+            query_config_id=payload.get("query_config_id") or "",
+            mapping_version_id=payload.get("mapping_version_id") or "",
+            note=payload.get("note") or "",
+        )
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 400
+        _log_report_definition_action("query_mapping_publish", "failure", "", status_code)
+        return jsonify({"error": str(exc)}), status_code
+    except Exception:
+        logging.error("ICE_REPORT_QUERY_MAPPING_PUBLISH_FAILED")
+        _log_report_definition_action("query_mapping_publish", "failure", "", 500)
+        return jsonify({"error": "query mapping publish failed"}), 500
+
+    _log_report_definition_action("query_mapping_publish", "success", report_id, 201)
+    return jsonify({**result, "result": result.get("query_mapping")}), 201
 
 
 @app.post("/report-definitions/<report_id>/template-preview")

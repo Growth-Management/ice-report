@@ -110,6 +110,7 @@ def _install_app_import_stubs():
         "list_report_definitions",
         "log_download",
         "make_signed_download_url",
+        "publish_report_definition_query_mapping",
         "publish_report_definition_template",
         "render_download_form",
         "rollback_report_definition_template",
@@ -474,6 +475,92 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertEqual(result["template_sha256"], "b" * 64)
         self.assertNotIn("template_gcs_uri", result)
         self.assertNotIn("template_sheets", result)
+
+    def test_publish_query_mapping_copies_template_metadata_without_exposing_details(self):
+        distribution = _load_distribution_module()
+        doc_data = {
+            "name": "Monthly downloads",
+            "versions": [
+                {
+                    "version": 1,
+                    "status": "published",
+                    "template_name": "template.xlsx",
+                    "template_gcs_uri": "gs://bucket/report-templates/monthly/v1/template.xlsx",
+                    "template_sha256": "c" * 64,
+                    "template_sheets": [{"name": "Sheet1", "max_row": 10}],
+                    "query_sql": "select raw_email from table",
+                    "template_mapping": {"A1": "raw_email"},
+                }
+            ],
+            "current_version": 1,
+        }
+        updates = []
+
+        class _Snapshot:
+            exists = True
+
+            def to_dict(self):
+                return dict(doc_data)
+
+        class _Document:
+            def get(self):
+                return _Snapshot()
+
+            def update(self, update_doc):
+                updates.append(update_doc)
+                doc_data.update(update_doc)
+
+        class _Collection:
+            def document(self, report_id):
+                self.report_id = report_id
+                return _Document()
+
+        class _Client:
+            def collection(self, name):
+                self.collection_name = name
+                return _Collection()
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        result = distribution.publish_report_definition_query_mapping(
+            "monthly-downloads",
+            note="publish query mapping",
+        )
+
+        version_doc = updates[0]["versions"][-1]
+        self.assertEqual(version_doc["version"], 2)
+        self.assertEqual(version_doc["query_config_id"], "plus-monthly-default-v1")
+        self.assertEqual(version_doc["mapping_version_id"], "plus-monthly-table-mapping-v1")
+        self.assertEqual(
+            version_doc["template_gcs_uri"],
+            "gs://bucket/report-templates/monthly/v1/template.xlsx",
+        )
+        self.assertNotIn("query_sql", version_doc)
+        self.assertNotIn("template_mapping", version_doc)
+
+        query_mapping = result["query_mapping"]
+        self.assertEqual(query_mapping["version"], 2)
+        self.assertEqual(query_mapping["query_config_id"], "plus-monthly-default-v1")
+        self.assertNotIn("template_gcs_uri", query_mapping)
+        self.assertNotIn("template_sheets", query_mapping)
+        self.assertNotIn("raw_email", str(result["item"]))
+
+    def test_publish_query_mapping_rejects_unlisted_ids(self):
+        distribution = _load_distribution_module()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "REPORT_ALLOWED_QUERY_CONFIG_IDS": "plus-monthly-default-v1",
+                "REPORT_ALLOWED_MAPPING_VERSION_IDS": "plus-monthly-table-mapping-v1",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "query_config_id is not allowed"):
+                distribution.publish_report_definition_query_mapping(
+                    "monthly-downloads",
+                    query_config_id="ad-hoc-query",
+                )
 
 
 class SelectedReportSummaryTest(unittest.TestCase):
