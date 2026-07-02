@@ -103,6 +103,7 @@ def _install_import_stubs():
         "list_report_definitions",
         "log_download",
         "make_signed_download_url",
+        "publish_report_definition_query_mapping",
         "publish_report_definition_template",
         "render_download_form",
         "rollback_report_definition_template",
