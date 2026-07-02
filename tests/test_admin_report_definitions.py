@@ -112,6 +112,7 @@ def _install_app_import_stubs():
         "render_download_form",
         "rollback_report_definition_template",
         "set_delivery_active",
+        "set_report_definition_schedule",
         "update_report_definition",
         "validate_delivery_access",
     ):
@@ -247,6 +248,125 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertNotIn("query_sql", payload)
         self.assertNotIn("template_mapping", payload)
         self.assertNotIn("allowed_emails", payload)
+
+    def test_public_report_definition_includes_safe_schedule_metadata(self):
+        distribution = _load_distribution_module()
+
+        item = distribution._public_report_definition(
+            "monthly-downloads",
+            {
+                "schedule": {
+                    "enabled": True,
+                    "frequency": "monthly",
+                    "day_of_month": 5,
+                    "time_of_day": "10:30",
+                    "timezone": "Asia/Tokyo",
+                    "created_by_email": "user@example.com",
+                    "signed_url": "https://example.test/signed",
+                    "query_sql": "select raw_email from table",
+                }
+            },
+        )
+
+        self.assertTrue(item["schedule_enabled"])
+        self.assertEqual(
+            item["schedule"],
+            {
+                "enabled": True,
+                "frequency": "monthly",
+                "day_of_month": 5,
+                "time_of_day": "10:30",
+                "timezone": "Asia/Tokyo",
+            },
+        )
+        self.assertNotIn("created_by_email", str(item))
+        self.assertNotIn("signed_url", str(item))
+        self.assertNotIn("raw_email", str(item))
+
+    def test_report_definition_schedule_payload_is_limited_to_safe_monthly_metadata(self):
+        distribution = _load_distribution_module()
+
+        payload = distribution._report_definition_schedule_payload(
+            {
+                "enabled": "true",
+                "frequency": "monthly",
+                "day_of_month": "28",
+                "time_of_day": "23:59",
+                "timezone": "Asia/Tokyo",
+                "query_sql": "select secret_value from table",
+            }
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "enabled": True,
+                "frequency": "monthly",
+                "day_of_month": 28,
+                "time_of_day": "23:59",
+                "timezone": "Asia/Tokyo",
+            },
+        )
+        self.assertNotIn("query_sql", payload)
+
+        with self.assertRaisesRegex(ValueError, "between 1 and 28"):
+            distribution._report_definition_schedule_payload({"day_of_month": 31})
+        with self.assertRaisesRegex(ValueError, "HH:MM"):
+            distribution._report_definition_schedule_payload({"time_of_day": "9:00"})
+        with self.assertRaisesRegex(ValueError, "not allowed"):
+            distribution._report_definition_schedule_payload({"timezone": "UTC"})
+
+    def test_set_report_definition_schedule_updates_only_safe_schedule_fields(self):
+        distribution = _load_distribution_module()
+        doc_data = {
+            "name": "Monthly downloads",
+            "versions": [{"version": 1}],
+            "current_version": 1,
+        }
+        updates = []
+
+        class _Snapshot:
+            exists = True
+
+            def to_dict(self):
+                return dict(doc_data)
+
+        class _Document:
+            def get(self):
+                return _Snapshot()
+
+            def update(self, update_doc):
+                updates.append(update_doc)
+                doc_data.update(update_doc)
+
+        class _Collection:
+            def document(self, report_id):
+                self.report_id = report_id
+                return _Document()
+
+        class _Client:
+            def collection(self, name):
+                self.collection_name = name
+                return _Collection()
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        result = distribution.set_report_definition_schedule(
+            "monthly-downloads",
+            {
+                "enabled": True,
+                "day_of_month": 12,
+                "time_of_day": "08:15",
+                "timezone": "Asia/Tokyo",
+                "raw_email": "user@example.com",
+            },
+        )
+
+        self.assertTrue(result["schedule_enabled"])
+        self.assertEqual(result["schedule"]["day_of_month"], 12)
+        self.assertEqual(updates[0]["schedule"]["time_of_day"], "08:15")
+        self.assertTrue(updates[0]["schedule_enabled"])
+        self.assertNotIn("raw_email", str(updates[0]))
 
     def test_report_definition_id_pattern_accepts_slug(self):
         distribution = _load_distribution_module()

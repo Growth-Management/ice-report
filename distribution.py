@@ -31,6 +31,8 @@ REPORT_DEFINITION_EDITABLE_FIELDS = (
     "gcs_prefix",
     "drive_folder_name",
 )
+REPORT_DEFINITION_SCHEDULE_TIME_PATTERN = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+REPORT_DEFINITION_SCHEDULE_TIMEZONE_ALLOWLIST = {"Asia/Tokyo"}
 TEMPLATE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 SLACK_WEBHOOK_SECRET = os.environ.get(
@@ -329,7 +331,9 @@ def _public_report_definition(
     storage = definition.get("storage") or {}
     drive = definition.get("drive") or {}
     gcs = definition.get("gcs") or {}
-    schedule = definition.get("schedule") or {}
+    schedule = dict(definition.get("schedule") or {})
+    if "enabled" not in schedule:
+        schedule["enabled"] = definition.get("schedule_enabled", False)
 
     item = {
         "report_id": report_id,
@@ -353,7 +357,8 @@ def _public_report_definition(
             or storage.get("drive_folder_name")
             or ""
         ),
-        "schedule_enabled": bool(schedule.get("enabled", definition.get("schedule_enabled", False))),
+        "schedule_enabled": bool(schedule.get("enabled", False)),
+        "schedule": _public_report_definition_schedule(schedule),
         "created_at": _format_dt(definition.get("created_at")),
         "updated_at": _format_dt(definition.get("updated_at")),
         "archived_at": _format_dt(definition.get("archived_at")),
@@ -400,6 +405,53 @@ def _report_definition_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         key: str(payload.get(key) or "").strip()
         for key in REPORT_DEFINITION_EDITABLE_FIELDS
+    }
+
+
+def _bool_from_payload(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _public_report_definition_schedule(schedule: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(schedule.get("enabled", False)),
+        "frequency": schedule.get("frequency") or "monthly",
+        "day_of_month": int(schedule.get("day_of_month") or 1),
+        "time_of_day": schedule.get("time_of_day") or "09:00",
+        "timezone": schedule.get("timezone") or "Asia/Tokyo",
+    }
+
+
+def _report_definition_schedule_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    frequency = str(payload.get("frequency") or "monthly").strip().lower()
+    if frequency != "monthly":
+        raise ValueError("schedule frequency must be monthly")
+
+    try:
+        day_of_month = int(payload.get("day_of_month") or 1)
+    except (TypeError, ValueError):
+        raise ValueError("schedule day_of_month must be a number") from None
+    if day_of_month < 1 or day_of_month > 28:
+        raise ValueError("schedule day_of_month must be between 1 and 28")
+
+    time_of_day = str(payload.get("time_of_day") or "09:00").strip()
+    if not REPORT_DEFINITION_SCHEDULE_TIME_PATTERN.match(time_of_day):
+        raise ValueError("schedule time_of_day must be HH:MM")
+
+    timezone_name = str(payload.get("timezone") or "Asia/Tokyo").strip()
+    if timezone_name not in REPORT_DEFINITION_SCHEDULE_TIMEZONE_ALLOWLIST:
+        raise ValueError("schedule timezone is not allowed")
+
+    return {
+        "enabled": _bool_from_payload(payload.get("enabled", False)),
+        "frequency": frequency,
+        "day_of_month": day_of_month,
+        "time_of_day": time_of_day,
+        "timezone": timezone_name,
     }
 
 
@@ -455,6 +507,33 @@ def update_report_definition(report_id: str, payload: dict[str, Any]) -> dict[st
     update_doc = {
         **item,
         "updated_at": utcnow(),
+    }
+    ref.update(update_doc)
+
+    current = snap.to_dict() or {}
+    current.update(update_doc)
+    return _public_report_definition(report_id, current, include_versions=True)
+
+
+def set_report_definition_schedule(report_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+    schedule = _report_definition_schedule_payload(payload)
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    now = utcnow()
+    schedule_doc = {
+        **schedule,
+        "updated_at": now,
+    }
+    update_doc = {
+        "schedule": schedule_doc,
+        "schedule_enabled": schedule["enabled"],
+        "updated_at": now,
     }
     ref.update(update_doc)
 

@@ -1045,6 +1045,9 @@ published template runtime switch smoke:
 20. Run query / mapping dry-run preview for a test report definition and confirm BigQuery dry-run succeeds for the default query config.
 21. Confirm query / mapping preview response includes only safe metadata such as query IDs, SQL file names, bytes processed, mapping source IDs, expected column counts, and total-row flags.
 22. Confirm query / mapping preview response and logs do not include SQL text, template mapping cell details, Excel cell values, raw email, token fragments, Signed URL, IP, user agent, or Admin key fingerprint.
+23. Save schedule metadata for a test report definition with `enabled=true`, `frequency=monthly`, `day_of_month`, `time_of_day`, and `timezone=Asia/Tokyo`.
+24. Save schedule metadata again with `enabled=false` and confirm only the report definition schedule metadata changes. Cloud Scheduler jobs and automatic generation must not be created.
+25. Confirm schedule save response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
 rollback:
 

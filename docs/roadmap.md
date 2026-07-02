@@ -312,6 +312,13 @@ Query config / template mapping dry-run preview foundation:
 - Preview responses include query IDs, SQL file names, dry-run status, bytes processed, mapping source IDs, expected column counts, and total-row flags.
 - Preview responses and logs must not include SQL text, template mapping cell details, Excel cell values, raw email, token fragments, Signed URL, IP, user agent, or Admin key fingerprint.
 
+Schedule ON/OFF foundation:
+
+- Admin API/UI can save monthly schedule metadata per report definition.
+- The first implementation stores only `enabled`, `frequency=monthly`, `day_of_month`, `time_of_day`, and `timezone=Asia/Tokyo`.
+- This step does not create Cloud Scheduler jobs, trigger automatic generation, edit SQL, edit template mapping, or change Drive/GCS destinations.
+- Schedule responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+
 Cloud Run / smoke / rollback:
 
 - `app.py` と `distribution.py` を変更するため、反映には `report-generator-admin` と必要に応じて `report-generator` のdeployが必要
