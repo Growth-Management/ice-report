@@ -319,6 +319,15 @@ Schedule ON/OFF foundation:
 - This step does not create Cloud Scheduler jobs, trigger automatic generation, edit SQL, edit template mapping, or change Drive/GCS destinations.
 - Schedule responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
+Storage destination allowlist foundation:
+
+- Admin API/UI can show the configured report definition storage allowlist.
+- Report definition create/update validates `gcs_prefix` and `drive_folder_name` when those fields are set.
+- Allowed GCS prefixes come from `REPORT_ALLOWED_GCS_PREFIXES`; allowed Drive folder names or IDs come from `REPORT_ALLOWED_DRIVE_FOLDERS`.
+- Defaults are limited to the current baseline: `gs://ice-report-files/reports/plus/`, `reports/plus/`, `OMFダウンロード数報告`, and `126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt`.
+- This step does not create Drive folders, move GCS objects, register arbitrary Drive URLs, or change runtime delivery destinations automatically.
+- Allowlist responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+
 Cloud Run / smoke / rollback:
 
 - `app.py` と `distribution.py` を変更するため、反映には `report-generator-admin` と必要に応じて `report-generator` のdeployが必要
