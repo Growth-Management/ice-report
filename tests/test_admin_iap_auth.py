@@ -106,6 +106,7 @@ def _install_import_stubs():
         "render_download_form",
         "rollback_report_definition_template",
         "set_delivery_active",
+        "set_report_definition_schedule",
         "update_report_definition",
         "validate_delivery_access",
     ):
