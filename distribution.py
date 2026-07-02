@@ -33,6 +33,14 @@ REPORT_DEFINITION_EDITABLE_FIELDS = (
 )
 REPORT_DEFINITION_SCHEDULE_TIME_PATTERN = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 REPORT_DEFINITION_SCHEDULE_TIMEZONE_ALLOWLIST = {"Asia/Tokyo"}
+DEFAULT_REPORT_ALLOWED_GCS_PREFIXES = (
+    "gs://ice-report-files/reports/plus/",
+    "reports/plus/",
+)
+DEFAULT_REPORT_ALLOWED_DRIVE_FOLDERS = (
+    "OMFダウンロード数報告",
+    "126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt",
+)
 TEMPLATE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 SLACK_WEBHOOK_SECRET = os.environ.get(
@@ -402,10 +410,76 @@ def _validate_report_id(report_id: str) -> str:
 
 
 def _report_definition_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    item = {
         key: str(payload.get(key) or "").strip()
         for key in REPORT_DEFINITION_EDITABLE_FIELDS
     }
+    _validate_report_definition_storage(item)
+    return item
+
+
+def _split_allowlist(value: str | None, defaults: tuple[str, ...]) -> list[str]:
+    items = [
+        item.strip()
+        for item in (value or "").split(",")
+        if item.strip()
+    ]
+    return items or list(defaults)
+
+
+def get_report_definition_storage_allowlist() -> dict[str, list[str]]:
+    return {
+        "gcs_prefixes": _split_allowlist(
+            os.environ.get("REPORT_ALLOWED_GCS_PREFIXES"),
+            DEFAULT_REPORT_ALLOWED_GCS_PREFIXES,
+        ),
+        "drive_folders": _split_allowlist(
+            os.environ.get("REPORT_ALLOWED_DRIVE_FOLDERS"),
+            DEFAULT_REPORT_ALLOWED_DRIVE_FOLDERS,
+        ),
+    }
+
+
+def _normalize_storage_prefix(value: str) -> str:
+    normalized = (value or "").strip().replace("\\", "/")
+    while "//" in normalized.replace("gs://", "gs:/"):
+        normalized = normalized.replace("//", "/")
+        normalized = normalized.replace("gs:/", "gs://")
+    return normalized
+
+
+def _is_allowed_gcs_prefix(gcs_prefix: str, allowed_prefixes: list[str]) -> bool:
+    if not gcs_prefix:
+        return True
+    normalized = _normalize_storage_prefix(gcs_prefix)
+    if ".." in normalized.split("/"):
+        return False
+
+    for allowed in allowed_prefixes:
+        allowed_normalized = _normalize_storage_prefix(allowed)
+        if normalized == allowed_normalized or normalized.startswith(allowed_normalized):
+            return True
+    return False
+
+
+def _is_allowed_drive_folder(drive_folder_name: str, allowed_folders: list[str]) -> bool:
+    if not drive_folder_name:
+        return True
+    normalized = drive_folder_name.strip()
+    return normalized in {item.strip() for item in allowed_folders if item.strip()}
+
+
+def _validate_report_definition_storage(item: dict[str, Any]) -> None:
+    allowlist = get_report_definition_storage_allowlist()
+
+    if not _is_allowed_gcs_prefix(str(item.get("gcs_prefix") or ""), allowlist["gcs_prefixes"]):
+        raise ValueError("gcs_prefix is not allowed")
+
+    if not _is_allowed_drive_folder(
+        str(item.get("drive_folder_name") or ""),
+        allowlist["drive_folders"],
+    ):
+        raise ValueError("drive_folder_name is not allowed")
 
 
 def _bool_from_payload(value: Any) -> bool:

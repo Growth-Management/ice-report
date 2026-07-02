@@ -91,6 +91,8 @@ python -m flask run --host 127.0.0.1 --port 8080
 - `BIGQUERY_PROJECT_ID=jumpplus-4a5f4`
 - `PUBLIC_BASE_URL`
 - `BUCKET_NAME`
+- `REPORT_ALLOWED_GCS_PREFIXES`: optional comma-separated report definition GCS prefix allowlist
+- `REPORT_ALLOWED_DRIVE_FOLDERS`: optional comma-separated report definition Drive folder name/ID allowlist
 
 任意設定または既定値のある主要項目:
 

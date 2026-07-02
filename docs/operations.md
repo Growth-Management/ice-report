@@ -1048,6 +1048,9 @@ published template runtime switch smoke:
 23. Save schedule metadata for a test report definition with `enabled=true`, `frequency=monthly`, `day_of_month`, `time_of_day`, and `timezone=Asia/Tokyo`.
 24. Save schedule metadata again with `enabled=false` and confirm only the report definition schedule metadata changes. Cloud Scheduler jobs and automatic generation must not be created.
 25. Confirm schedule save response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+26. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
+27. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
+28. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
 rollback:
 

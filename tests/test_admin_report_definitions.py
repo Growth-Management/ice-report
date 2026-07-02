@@ -5,6 +5,7 @@ import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _install_google_stubs():
@@ -103,6 +104,7 @@ def _install_app_import_stubs():
         "find_delivery_by_token",
         "get_current_version",
         "get_report_definition",
+        "get_report_definition_storage_allowlist",
         "list_delivery_records",
         "list_download_log_records",
         "list_report_definitions",
@@ -236,7 +238,7 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
                 "customer_name": "一ツ橋企画",
                 "default_report_month": "2026-06",
                 "gcs_prefix": "reports/plus/",
-                "drive_folder_name": "OMF",
+                "drive_folder_name": "OMFダウンロード数報告",
                 "query_sql": "select raw_email from table",
                 "template_mapping": {"A1": "raw_email"},
                 "allowed_emails": ["user@example.com"],
@@ -248,6 +250,69 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertNotIn("query_sql", payload)
         self.assertNotIn("template_mapping", payload)
         self.assertNotIn("allowed_emails", payload)
+
+    def test_report_definition_storage_allowlist_uses_safe_defaults(self):
+        distribution = _load_distribution_module()
+
+        with patch.dict("os.environ", {}, clear=True):
+            allowlist = distribution.get_report_definition_storage_allowlist()
+
+        self.assertIn("reports/plus/", allowlist["gcs_prefixes"])
+        self.assertIn("OMFダウンロード数報告", allowlist["drive_folders"])
+
+    def test_report_definition_payload_accepts_allowed_storage_destinations(self):
+        distribution = _load_distribution_module()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "REPORT_ALLOWED_GCS_PREFIXES": "gs://ice-report-files/reports/plus/,reports/plus/",
+                "REPORT_ALLOWED_DRIVE_FOLDERS": "OMFダウンロード数報告,126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt",
+            },
+            clear=True,
+        ):
+            payload = distribution._report_definition_payload(
+                {
+                    "name": "Monthly downloads",
+                    "gcs_prefix": "reports/plus/2606/",
+                    "drive_folder_name": "OMFダウンロード数報告",
+                    "signed_url": "https://example.test/signed",
+                    "raw_email": "user@example.com",
+                }
+            )
+
+        self.assertEqual(payload["gcs_prefix"], "reports/plus/2606/")
+        self.assertEqual(payload["drive_folder_name"], "OMFダウンロード数報告")
+        self.assertNotIn("signed_url", payload)
+        self.assertNotIn("raw_email", payload)
+
+    def test_report_definition_payload_rejects_unlisted_storage_destinations(self):
+        distribution = _load_distribution_module()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "REPORT_ALLOWED_GCS_PREFIXES": "reports/plus/",
+                "REPORT_ALLOWED_DRIVE_FOLDERS": "OMFダウンロード数報告",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "gcs_prefix is not allowed"):
+                distribution._report_definition_payload(
+                    {"name": "Monthly downloads", "gcs_prefix": "reports/private/"}
+                )
+            with self.assertRaisesRegex(ValueError, "drive_folder_name is not allowed"):
+                distribution._report_definition_payload(
+                    {"name": "Monthly downloads", "drive_folder_name": "Unlisted folder"}
+                )
+
+    def test_report_definition_payload_rejects_parent_directory_storage_prefix(self):
+        distribution = _load_distribution_module()
+
+        with self.assertRaisesRegex(ValueError, "gcs_prefix is not allowed"):
+            distribution._report_definition_payload(
+                {"name": "Monthly downloads", "gcs_prefix": "reports/plus/../private/"}
+            )
 
     def test_public_report_definition_includes_safe_schedule_metadata(self):
         distribution = _load_distribution_module()

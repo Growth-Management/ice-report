@@ -23,6 +23,7 @@ from distribution import (
     find_delivery_by_token,
     get_current_version,
     get_report_definition,
+    get_report_definition_storage_allowlist,
     list_delivery_records,
     list_download_log_records,
     list_report_definitions,
@@ -888,6 +889,10 @@ def render_admin_ui() -> str:
       <div class="field"><label>GCS prefix</label><input id="definitionGcsPrefix" placeholder="reports/plus/"></div>
       <div class="field"><label>Drive folder name</label><input id="definitionDriveFolder" placeholder="OMFダウンロード数報告"></div>
     </div>
+    <div class="toolbar">
+      <button class="secondary" id="storageAllowlistButton" onclick="loadStorageAllowlist()">storage allowlist</button>
+    </div>
+    <pre id="storageAllowlistResult">not loaded</pre>
     <div class="field"><label>initial version note</label><input id="definitionVersionNote" placeholder="initial definition"></div>
     <div class="toolbar">
       <button id="definitionCreateButton" onclick="createReportDefinition()">定義を追加</button>
@@ -1266,7 +1271,8 @@ function setDefinitionButtons(disabled) {
     "templatePublishButton",
     "templateRollbackButton",
     "queryMappingPreviewButton",
-    "scheduleSaveButton"
+    "scheduleSaveButton",
+    "storageAllowlistButton"
   ].forEach(id => {
     const button = document.getElementById(id);
     if (button) {
@@ -1300,6 +1306,7 @@ function clearDefinitionForm() {
   document.getElementById("scheduleTimeOfDay").value = "09:00";
   document.getElementById("scheduleTimezone").value = "Asia/Tokyo";
   document.getElementById("scheduleResult").textContent = "not loaded";
+  document.getElementById("storageAllowlistResult").textContent = "not loaded";
 }
 
 function fillDefinitionForm(reportId) {
@@ -1604,6 +1611,24 @@ async function saveReportSchedule() {
     resultEl.textContent = "schedule save failed\n" + e.message;
   } finally {
     reportDefinitionInProgress = false;
+    button.disabled = false;
+  }
+}
+
+async function loadStorageAllowlist() {
+  const resultEl = document.getElementById("storageAllowlistResult");
+  const button = document.getElementById("storageAllowlistButton");
+
+  button.disabled = true;
+  resultEl.textContent = "loading storage allowlist...";
+
+  try {
+    const data = await api("/report-definitions/storage-allowlist");
+    resultEl.textContent = JSON.stringify(data.allowlist || data.result || data, null, 2);
+    showToast("storage allowlist loaded");
+  } catch (e) {
+    resultEl.textContent = "storage allowlist load failed\n" + e.message;
+  } finally {
     button.disabled = false;
   }
 }
@@ -2368,6 +2393,16 @@ def report_definitions():
     result = list_report_definitions(limit=limit)
 
     return jsonify({"items": result})
+
+
+@app.get("/report-definitions/storage-allowlist")
+def report_definition_storage_allowlist_route():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    allowlist = get_report_definition_storage_allowlist()
+    return jsonify({"allowlist": allowlist, "result": allowlist})
 
 
 def _log_report_definition_action(action: str, result: str, report_id: str, status_code: int) -> None:
