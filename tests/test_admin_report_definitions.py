@@ -113,6 +113,7 @@ def _install_app_import_stubs():
         "publish_report_definition_query_mapping",
         "publish_report_definition_template",
         "render_download_form",
+        "rollback_report_definition_version",
         "rollback_report_definition_template",
         "set_delivery_active",
         "set_report_definition_schedule",
@@ -561,6 +562,70 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
                     "monthly-downloads",
                     query_config_id="ad-hoc-query",
                 )
+
+    def test_rollback_report_definition_version_updates_only_current_version(self):
+        distribution = _load_distribution_module()
+        doc_data = {
+            "name": "Monthly downloads",
+            "versions": [
+                {
+                    "version": 1,
+                    "status": "published",
+                    "template_gcs_uri": "gs://bucket/template-v1.xlsx",
+                    "query_sql": "select raw_email from table",
+                    "template_mapping": {"A1": "raw_email"},
+                    "signed_url": "https://example.test/signed",
+                },
+                {
+                    "version": 2,
+                    "status": "published",
+                    "query_config_id": "plus-monthly-default-v1",
+                    "mapping_version_id": "plus-monthly-table-mapping-v1",
+                },
+            ],
+            "current_version": 2,
+        }
+        updates = []
+
+        class _Snapshot:
+            exists = True
+
+            def to_dict(self):
+                return dict(doc_data)
+
+        class _Document:
+            def get(self):
+                return _Snapshot()
+
+            def update(self, update_doc):
+                updates.append(update_doc)
+                doc_data.update(update_doc)
+
+        class _Collection:
+            def document(self, report_id):
+                self.report_id = report_id
+                return _Document()
+
+        class _Client:
+            def collection(self, name):
+                self.collection_name = name
+                return _Collection()
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        result = distribution.rollback_report_definition_version("monthly-downloads", 1)
+
+        self.assertEqual(updates[0]["current_version"], 1)
+        self.assertNotIn("versions", updates[0])
+        self.assertEqual(result["current_version"], 1)
+        self.assertTrue(result["versions"][1]["current"])
+        self.assertNotIn("query_sql", str(result))
+        self.assertNotIn("template_mapping", str(result))
+        self.assertNotIn("signed_url", str(result))
+        self.assertNotIn("template_gcs_uri", str(result))
+
+        with self.assertRaisesRegex(ValueError, "version not found"):
+            distribution.rollback_report_definition_version("monthly-downloads", 99)
 
 
 class SelectedReportSummaryTest(unittest.TestCase):
