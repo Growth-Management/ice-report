@@ -948,7 +948,7 @@ def publish_report_definition_query_mapping(
     }
 
 
-def rollback_report_definition_template(report_id: str, version: int) -> dict[str, Any]:
+def rollback_report_definition_version(report_id: str, version: int) -> dict[str, Any]:
     report_id = _validate_report_id(report_id)
     if int(version or 0) <= 0:
         raise ValueError("version is required")
@@ -976,6 +976,10 @@ def rollback_report_definition_template(report_id: str, version: int) -> dict[st
 
     current.update(update_doc)
     return _public_report_definition(report_id, current, include_versions=True)
+
+
+def rollback_report_definition_template(report_id: str, version: int) -> dict[str, Any]:
+    return rollback_report_definition_version(report_id, version)
 
 
 def get_report_definition(report_id: str) -> dict[str, Any]:

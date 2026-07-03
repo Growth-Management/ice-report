@@ -31,6 +31,7 @@ from distribution import (
     make_signed_download_url,
     publish_report_definition_query_mapping,
     publish_report_definition_template,
+    rollback_report_definition_version,
     rollback_report_definition_template,
     set_report_definition_schedule,
     update_report_definition,
@@ -910,7 +911,7 @@ def render_admin_ui() -> str:
     <div class="toolbar">
       <button class="secondary" id="templatePreviewButton" onclick="previewReportTemplate()">template preview</button>
       <button class="secondary" id="templatePublishButton" onclick="publishReportTemplate()">template publish</button>
-      <button class="secondary" id="templateRollbackButton" onclick="rollbackReportTemplate()">template rollback</button>
+      <button class="secondary" id="templateRollbackButton" onclick="rollbackReportTemplate()">version rollback</button>
     </div>
     <pre id="templatePreviewResult">not loaded</pre>
     <div class="toolbar">
@@ -1528,25 +1529,25 @@ async function rollbackReportTemplate() {
     resultEl.textContent = "rollback version is required";
     return;
   }
-  if (!confirm("rollback template current_version to v" + version + " for " + reportId + "?")) {
+  if (!confirm("rollback report definition current_version to v" + version + " for " + reportId + "?")) {
     return;
   }
 
   templatePreviewInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "rolling back template...";
+  resultEl.textContent = "rolling back report definition version...";
 
   try {
-    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/template-rollback", {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/version-rollback", {
       method: "POST",
       body: JSON.stringify({version: Number(version)})
     });
-    resultEl.textContent = "template rolled back\n" + JSON.stringify(data.result || data.item || data, null, 2);
-    showToast("template rolled back");
+    resultEl.textContent = "version rolled back\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    showToast("version rolled back");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "template rollback failed\n" + e.message;
+    resultEl.textContent = "version rollback failed\n" + e.message;
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -2699,6 +2700,29 @@ def rollback_report_definition_template_route(report_id: str):
         return jsonify({"error": "template rollback failed"}), 500
 
     _log_report_definition_action("template_rollback", "success", report_id, 200)
+    return jsonify({"item": result, "result": result})
+
+
+@app.post("/report-definitions/<report_id>/version-rollback")
+def rollback_report_definition_version_route(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        version = int(payload.get("version") or 0)
+        result = rollback_report_definition_version(report_id, version)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 400
+        _log_report_definition_action("version_rollback", "failure", "", status_code)
+        return jsonify({"error": str(exc)}), status_code
+    except Exception:
+        logging.error("ICE_REPORT_VERSION_ROLLBACK_FAILED")
+        _log_report_definition_action("version_rollback", "failure", "", 500)
+        return jsonify({"error": "version rollback failed"}), 500
+
+    _log_report_definition_action("version_rollback", "success", report_id, 200)
     return jsonify({"item": result, "result": result})
 
 

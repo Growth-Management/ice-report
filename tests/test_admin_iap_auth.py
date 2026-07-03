@@ -106,6 +106,7 @@ def _install_import_stubs():
         "publish_report_definition_query_mapping",
         "publish_report_definition_template",
         "render_download_form",
+        "rollback_report_definition_version",
         "rollback_report_definition_template",
         "set_delivery_active",
         "set_report_definition_schedule",

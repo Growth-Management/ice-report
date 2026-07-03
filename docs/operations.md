@@ -1048,12 +1048,15 @@ published template runtime switch smoke:
 23. Publish query / mapping metadata for a test report definition and confirm a new version is appended with only `query_config_id`, `mapping_version_id`, status, note, and timestamps in the public response.
 24. Confirm an unlisted `query_config_id` or `mapping_version_id` is rejected with `400`.
 25. Confirm query / mapping publish response and logs do not include SQL text, template mapping cell details, Excel cell values, template GCS URI, raw email, token fragments, Signed URL, IP, user agent, or Admin key fingerprint.
-26. Save schedule metadata for a test report definition with `enabled=true`, `frequency=monthly`, `day_of_month`, `time_of_day`, and `timezone=Asia/Tokyo`.
-27. Save schedule metadata again with `enabled=false` and confirm only the report definition schedule metadata changes. Cloud Scheduler jobs and automatic generation must not be created.
-28. Confirm schedule save response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
-29. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
-30. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
-31. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+26. Roll back report definition `current_version` through `/report-definitions/<report_id>/version-rollback` and confirm only `current_version` / `updated_at` changes.
+27. Confirm the existing `/report-definitions/<report_id>/template-rollback` path still works as a compatibility route when needed.
+28. Confirm version rollback response and logs do not include SQL text, template mapping cell details, Excel cell values, template GCS URI, raw email, token fragments, Signed URL, IP, user agent, or Admin key fingerprint.
+29. Save schedule metadata for a test report definition with `enabled=true`, `frequency=monthly`, `day_of_month`, `time_of_day`, and `timezone=Asia/Tokyo`.
+30. Save schedule metadata again with `enabled=false` and confirm only the report definition schedule metadata changes. Cloud Scheduler jobs and automatic generation must not be created.
+31. Confirm schedule save response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+32. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
+33. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
+34. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
 rollback:
 
