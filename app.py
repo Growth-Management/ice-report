@@ -29,6 +29,7 @@ from distribution import (
     list_report_definitions,
     log_download,
     make_signed_download_url,
+    preview_report_definition_schedule_run,
     publish_report_definition_query_mapping,
     publish_report_definition_template,
     rollback_report_definition_version,
@@ -932,6 +933,7 @@ def render_admin_ui() -> str:
     </div>
     <div class="toolbar">
       <button class="secondary" id="scheduleSaveButton" onclick="saveReportSchedule()">schedule save</button>
+      <button class="secondary" id="schedulePreviewButton" onclick="previewReportSchedules()">schedule dry-run</button>
     </div>
     <pre id="scheduleResult">not loaded</pre>
     <div class="toolbar">
@@ -1279,6 +1281,7 @@ function setDefinitionButtons(disabled) {
     "queryMappingPreviewButton",
     "queryMappingPublishButton",
     "scheduleSaveButton",
+    "schedulePreviewButton",
     "storageAllowlistButton"
   ].forEach(id => {
     const button = document.getElementById(id);
@@ -1657,6 +1660,30 @@ async function saveReportSchedule() {
     await loadReportDefinitions();
   } catch (e) {
     resultEl.textContent = "schedule save failed\n" + e.message;
+  } finally {
+    reportDefinitionInProgress = false;
+    button.disabled = false;
+  }
+}
+
+async function previewReportSchedules() {
+  if (reportDefinitionInProgress) {
+    return;
+  }
+
+  const resultEl = document.getElementById("scheduleResult");
+  const button = document.getElementById("schedulePreviewButton");
+
+  reportDefinitionInProgress = true;
+  button.disabled = true;
+  resultEl.textContent = "loading schedule dry-run...";
+
+  try {
+    const data = await api("/report-definitions/schedule-preview?limit=100");
+    resultEl.textContent = "schedule dry-run\n" + JSON.stringify(data.preview || data.result || data, null, 2);
+    showToast("schedule dry-run completed");
+  } catch (e) {
+    resultEl.textContent = "schedule dry-run failed\n" + e.message;
   } finally {
     reportDefinitionInProgress = false;
     button.disabled = false;
@@ -2451,6 +2478,27 @@ def report_definition_storage_allowlist_route():
 
     allowlist = get_report_definition_storage_allowlist()
     return jsonify({"allowlist": allowlist, "result": allowlist})
+
+
+@app.get("/report-definitions/schedule-preview")
+def report_definition_schedule_preview_route():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    try:
+        limit = int(request.args.get("limit", "100"))
+        preview = preview_report_definition_schedule_run(limit=limit)
+    except ValueError as exc:
+        _log_report_definition_action("schedule_preview", "failure", "", 400)
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logging.error("ICE_REPORT_SCHEDULE_PREVIEW_FAILED")
+        _log_report_definition_action("schedule_preview", "failure", "", 500)
+        return jsonify({"error": "schedule preview failed"}), 500
+
+    _log_report_definition_action("schedule_preview", "success", "", 200)
+    return jsonify({"preview": preview, "result": preview})
 
 
 def _log_report_definition_action(action: str, result: str, report_id: str, status_code: int) -> None:

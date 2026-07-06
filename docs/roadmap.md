@@ -336,6 +336,13 @@ Schedule ON/OFF foundation:
 - This step does not create Cloud Scheduler jobs, trigger automatic generation, edit SQL, edit template mapping, or change Drive/GCS destinations.
 - Schedule responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
+Schedule automation dry-run preview foundation:
+
+- Admin API/UI can run a read-only schedule preview at `/report-definitions/schedule-preview`.
+- Preview evaluates enabled monthly schedules against the current evaluation time and returns due candidates with safe metadata only.
+- This step does not create Cloud Scheduler jobs, trigger report generation, create deliveries, send mail, edit SQL, edit template mapping, or change Drive/GCS destinations.
+- Preview responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, or Excel cell values.
+
 Storage destination allowlist foundation:
 
 - Admin API/UI can show the configured report definition storage allowlist.

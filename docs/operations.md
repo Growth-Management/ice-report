@@ -1054,9 +1054,12 @@ published template runtime switch smoke:
 29. Save schedule metadata for a test report definition with `enabled=true`, `frequency=monthly`, `day_of_month`, `time_of_day`, and `timezone=Asia/Tokyo`.
 30. Save schedule metadata again with `enabled=false` and confirm only the report definition schedule metadata changes. Cloud Scheduler jobs and automatic generation must not be created.
 31. Confirm schedule save response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
-32. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
-33. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
-34. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+32. Run `/report-definitions/schedule-preview` and confirm enabled monthly schedules are evaluated as read-only dry-run candidates.
+33. Confirm schedule preview does not create Cloud Scheduler jobs, generate reports, create deliveries, send mail, or change report definition metadata.
+34. Confirm schedule preview response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, or Excel cell values.
+35. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
+36. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
+37. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
 rollback:
 

@@ -110,6 +110,7 @@ def _install_app_import_stubs():
         "list_report_definitions",
         "log_download",
         "make_signed_download_url",
+        "preview_report_definition_schedule_run",
         "publish_report_definition_query_mapping",
         "publish_report_definition_template",
         "render_download_form",
@@ -434,6 +435,116 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertEqual(updates[0]["schedule"]["time_of_day"], "08:15")
         self.assertTrue(updates[0]["schedule_enabled"])
         self.assertNotIn("raw_email", str(updates[0]))
+
+    def test_schedule_preview_returns_safe_due_candidates_without_generation(self):
+        distribution = _load_distribution_module()
+        docs = [
+            (
+                "due-report",
+                {
+                    "name": "Due report",
+                    "status": "active",
+                    "current_version": 2,
+                    "versions": [{"version": 1}, {"version": 2}],
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                        "query_sql": "select raw_email from table",
+                    },
+                    "template_gcs_uri": "gs://bucket/template.xlsx",
+                    "allowed_emails": ["user@example.com"],
+                },
+            ),
+            (
+                "future-report",
+                {
+                    "name": "Future report",
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 7,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                },
+            ),
+            (
+                "disabled-report",
+                {
+                    "name": "Disabled report",
+                    "schedule": {
+                        "enabled": False,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                },
+            ),
+            (
+                "archived-report",
+                {
+                    "name": "Archived report",
+                    "status": "archived",
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                },
+            ),
+        ]
+
+        class _Snapshot:
+            def __init__(self, doc_id, data):
+                self.id = doc_id
+                self._data = data
+
+            def to_dict(self):
+                return dict(self._data)
+
+        class _Query:
+            def limit(self, limit):
+                self.limit_value = limit
+                return self
+
+            def stream(self):
+                return [_Snapshot(doc_id, data) for doc_id, data in docs]
+
+        class _Client:
+            def collection(self, name):
+                self.collection_name = name
+                return _Query()
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        preview = distribution.preview_report_definition_schedule_run(
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["counts"]["checked"], 3)
+        self.assertEqual(preview["counts"]["scheduled"], 2)
+        self.assertEqual(preview["counts"]["due"], 1)
+        self.assertEqual(preview["due_items"][0]["report_id"], "due-report")
+        self.assertEqual(preview["due_items"][0]["reason"], "due")
+        self.assertEqual(preview["due_items"][0]["local_date"], "2026-07-06")
+
+        future = next(item for item in preview["items"] if item["report_id"] == "future-report")
+        self.assertEqual(future["reason"], "day_mismatch")
+        disabled = next(item for item in preview["items"] if item["report_id"] == "disabled-report")
+        self.assertEqual(disabled["reason"], "disabled")
+
+        self.assertNotIn("archived-report", str(preview))
+        self.assertNotIn("raw_email", str(preview))
+        self.assertNotIn("allowed_emails", str(preview))
+        self.assertNotIn("template_gcs_uri", str(preview))
+        self.assertNotIn("query_sql", str(preview))
 
     def test_report_definition_id_pattern_accepts_slug(self):
         distribution = _load_distribution_module()
