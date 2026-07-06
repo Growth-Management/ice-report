@@ -33,6 +33,9 @@ REPORT_DEFINITION_EDITABLE_FIELDS = (
 )
 REPORT_DEFINITION_SCHEDULE_TIME_PATTERN = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 REPORT_DEFINITION_SCHEDULE_TIMEZONE_ALLOWLIST = {"Asia/Tokyo"}
+REPORT_DEFINITION_SCHEDULE_TIMEZONES = {
+    "Asia/Tokyo": timezone(timedelta(hours=9), "Asia/Tokyo"),
+}
 DEFAULT_REPORT_ALLOWED_GCS_PREFIXES = (
     "gs://ice-report-files/reports/plus/",
     "reports/plus/",
@@ -629,6 +632,100 @@ def set_report_definition_schedule(report_id: str, payload: dict[str, Any]) -> d
     current = snap.to_dict() or {}
     current.update(update_doc)
     return _public_report_definition(report_id, current, include_versions=True)
+
+
+def _report_definition_schedule_preview_item(
+    report_id: str,
+    definition: dict[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    schedule = dict(definition.get("schedule") or {})
+    if "enabled" not in schedule:
+        schedule["enabled"] = definition.get("schedule_enabled", False)
+    public_schedule = _public_report_definition_schedule(schedule)
+
+    local_now = now
+    timezone_name = public_schedule["timezone"]
+    schedule_timezone = REPORT_DEFINITION_SCHEDULE_TIMEZONES.get(timezone_name)
+    if schedule_timezone is None:
+        timezone_name = "UTC"
+        local_now = now.astimezone(timezone.utc)
+    else:
+        local_now = now.astimezone(schedule_timezone)
+
+    scheduled_time = public_schedule["time_of_day"]
+    local_time = local_now.strftime("%H:%M")
+    due = False
+    reason = "disabled"
+
+    if public_schedule["enabled"]:
+        if public_schedule["frequency"] != "monthly":
+            reason = "unsupported_frequency"
+        elif public_schedule["day_of_month"] != local_now.day:
+            reason = "day_mismatch"
+        elif scheduled_time > local_time:
+            reason = "before_scheduled_time"
+        else:
+            due = True
+            reason = "due"
+
+    public_definition = _public_report_definition(report_id, definition, include_versions=False)
+    return {
+        "report_id": report_id,
+        "name": public_definition["name"],
+        "status": public_definition["status"],
+        "current_version": public_definition["current_version"],
+        "schedule": public_schedule,
+        "due": due,
+        "reason": reason,
+        "local_date": local_now.strftime("%Y-%m-%d"),
+        "local_time": local_time,
+        "timezone": timezone_name,
+    }
+
+
+def preview_report_definition_schedule_run(
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    evaluation_time = now or utcnow()
+    if evaluation_time.tzinfo is None:
+        evaluation_time = evaluation_time.replace(tzinfo=timezone.utc)
+
+    db = get_firestore_client()
+    query = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).limit(limit)
+    items: list[dict[str, Any]] = []
+
+    for doc in query.stream():
+        definition = doc.to_dict() or {}
+        if definition.get("archived") or definition.get("status") == "archived":
+            continue
+        items.append(
+            _report_definition_schedule_preview_item(
+                doc.id,
+                definition,
+                now=evaluation_time,
+            )
+        )
+
+    items.sort(key=lambda item: (not item["due"], item["report_id"]))
+    due_items = [item for item in items if item["due"]]
+    scheduled_items = [item for item in items if item["schedule"]["enabled"]]
+    return {
+        "generated_at": _format_dt(utcnow()),
+        "evaluation_time": _format_dt(evaluation_time),
+        "dry_run": True,
+        "items": items,
+        "due_items": due_items,
+        "counts": {
+            "checked": len(items),
+            "scheduled": len(scheduled_items),
+            "due": len(due_items),
+            "not_due": len(items) - len(due_items),
+        },
+    }
 
 
 def archive_report_definition(report_id: str) -> dict[str, Any]:
