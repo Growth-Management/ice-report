@@ -351,6 +351,14 @@ Schedule automation guarded executor design:
 - The first executor implementation must not create Cloud Scheduler jobs, enable unattended automation, send email, edit SQL, edit template mappings, or change Drive/GCS destinations.
 - Executor responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, Excel cell values, provider event JSON, or raw idempotency keys.
 
+Schedule automation guarded executor validation foundation:
+
+- Admin API can validate guarded schedule runs at `POST /report-definitions/schedule-runs`.
+- The endpoint defaults to dry-run and returns safe due / eligible / action metadata only.
+- Execute mode requires `confirm=RUN_DUE_REPORTS` and a valid `idempotency_key`.
+- Execute guard validation stores only hashed idempotency metadata and rejects duplicate validated runs for the same schedule window.
+- This step still does not generate reports, create deliveries, send mail, create Cloud Scheduler jobs, edit SQL, edit template mappings, or change Drive/GCS destinations.
+
 Storage destination allowlist foundation:
 
 - Admin API/UI can show the configured report definition storage allowlist.

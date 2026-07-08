@@ -257,3 +257,27 @@ Executor implementation rollback:
 Proceed next with a small implementation PR for `POST /report-definitions/schedule-runs` dry-run
 and execute-guard validation only. Keep actual generation, delivery creation, email sending, and
 Cloud Scheduler attachment as later tasks unless explicitly approved in that PR scope.
+
+## Guard Validation Foundation
+
+The first implementation adds `POST /report-definitions/schedule-runs` as an admin-only guarded
+executor validation path.
+
+Implemented behavior:
+
+- Defaults to dry-run mode.
+- Reuses schedule preview evaluation for due checks.
+- Requires `mode=execute`, `confirm=RUN_DUE_REPORTS`, and a valid `idempotency_key` before execute
+  guard validation.
+- Stores only hashed idempotency metadata in `scheduled_report_runs` for validated execute requests.
+- Rejects duplicate execute requests for the same report, schedule window, timezone, and idempotency
+  key hash.
+- Returns safe metadata only.
+
+Still intentionally not implemented:
+
+- Report generation from schedule execution.
+- Delivery creation.
+- Email notification.
+- Cloud Scheduler job creation or recurring automation.
+- SQL editing, template mapping editing, or storage destination changes.

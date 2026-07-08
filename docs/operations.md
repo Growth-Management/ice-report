@@ -1061,9 +1061,12 @@ published template runtime switch smoke:
 36. Confirm the first guarded executor implementation keeps dry-run as the default and requires explicit `mode=execute`, confirmation text, and an idempotency key before running eligible schedules.
 37. Confirm guarded executor implementation does not create Cloud Scheduler jobs, enable unattended automation, send email, edit SQL, edit template mappings, or change Drive/GCS destinations unless a later PR explicitly scopes that behavior.
 38. Confirm guarded executor responses and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, Excel cell values, provider event JSON, or raw idempotency keys.
-39. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
-40. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
-41. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+39. Run `POST /report-definitions/schedule-runs` without `mode=execute` and confirm the response is dry-run only.
+40. Run `POST /report-definitions/schedule-runs` with `mode=execute` but without `confirm=RUN_DUE_REPORTS` and confirm it is rejected with `400`.
+41. Run `POST /report-definitions/schedule-runs` with execute confirmation and a valid idempotency key against an eligible test definition, then repeat the same request and confirm duplicate rejection.
+42. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
+43. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
+44. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
 rollback:
 

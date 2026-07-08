@@ -9,6 +9,11 @@ from unittest.mock import patch
 
 
 def _install_google_stubs():
+    if "flask" not in sys.modules:
+        flask_stub = types.ModuleType("flask")
+        flask_stub.Request = object
+        sys.modules["flask"] = flask_stub
+
     google_stub = sys.modules.get("google") or types.ModuleType("google")
     google_auth_stub = types.ModuleType("google.auth")
     google_auth_transport_stub = types.ModuleType("google.auth.transport")
@@ -72,19 +77,18 @@ def _load_create_report_module():
 
 
 def _install_app_import_stubs():
-    if "flask" not in sys.modules:
-        flask_stub = types.ModuleType("flask")
-        flask_stub.Flask = lambda name: types.SimpleNamespace(
-            get=lambda *args, **kwargs: (lambda func: func),
-            post=lambda *args, **kwargs: (lambda func: func),
-            route=lambda *args, **kwargs: (lambda func: func),
-            patch=lambda *args, **kwargs: (lambda func: func),
-        )
-        flask_stub.jsonify = lambda value=None, **kwargs: value if value is not None else kwargs
-        flask_stub.make_response = lambda value=None, *args, **kwargs: value
-        flask_stub.redirect = lambda *args, **kwargs: None
-        flask_stub.request = types.SimpleNamespace(headers={}, path="/", method="GET", remote_addr="", form={}, cookies={})
-        sys.modules["flask"] = flask_stub
+    flask_stub = sys.modules.get("flask") or types.ModuleType("flask")
+    flask_stub.Flask = lambda name: types.SimpleNamespace(
+        get=lambda *args, **kwargs: (lambda func: func),
+        post=lambda *args, **kwargs: (lambda func: func),
+        route=lambda *args, **kwargs: (lambda func: func),
+        patch=lambda *args, **kwargs: (lambda func: func),
+    )
+    flask_stub.jsonify = lambda value=None, **kwargs: value if value is not None else kwargs
+    flask_stub.make_response = lambda value=None, *args, **kwargs: value
+    flask_stub.redirect = lambda *args, **kwargs: None
+    flask_stub.request = types.SimpleNamespace(headers={}, path="/", method="GET", remote_addr="", form={}, cookies={})
+    sys.modules["flask"] = flask_stub
 
     _install_google_stubs()
 
@@ -116,6 +120,7 @@ def _install_app_import_stubs():
         "render_download_form",
         "rollback_report_definition_version",
         "rollback_report_definition_template",
+        "run_report_definition_schedule_runs",
         "set_delivery_active",
         "set_report_definition_schedule",
         "update_report_definition",
@@ -545,6 +550,202 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertNotIn("allowed_emails", str(preview))
         self.assertNotIn("template_gcs_uri", str(preview))
         self.assertNotIn("query_sql", str(preview))
+
+    def test_schedule_runs_dry_run_defaults_to_safe_guard_validation(self):
+        distribution = _load_distribution_module()
+        docs = [
+            (
+                "due-report",
+                {
+                    "name": "Due report",
+                    "status": "active",
+                    "current_version": 2,
+                    "gcs_prefix": "reports/plus/",
+                    "drive_folder_name": "126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt",
+                    "versions": [
+                        {"version": 1},
+                        {
+                            "version": 2,
+                            "template_gcs_uri": "gs://bucket/template.xlsx",
+                            "query_config_id": "plus-monthly-default-v1",
+                            "mapping_version_id": "plus-monthly-table-mapping-v1",
+                        },
+                    ],
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                    "allowed_emails": ["user@example.com"],
+                    "query_sql": "select raw_email from table",
+                },
+            ),
+        ]
+        run_docs = {}
+
+        class _Snapshot:
+            def __init__(self, doc_id, data):
+                self.id = doc_id
+                self._data = data
+
+            def to_dict(self):
+                return dict(self._data)
+
+        class _ReportQuery:
+            def limit(self, limit):
+                return self
+
+            def stream(self):
+                return [_Snapshot(doc_id, data) for doc_id, data in docs]
+
+        class _RunCollection:
+            def document(self, doc_id):
+                raise AssertionError("dry-run must not create scheduled run records")
+
+        class _Client:
+            def collection(self, name):
+                if name == distribution.FIRESTORE_COLLECTION_REPORT_DEFINITIONS:
+                    return _ReportQuery()
+                return _RunCollection()
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        result = distribution.run_report_definition_schedule_runs(
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["mode"], "dry_run")
+        self.assertEqual(result["counts"]["checked"], 1)
+        self.assertEqual(result["counts"]["due"], 1)
+        self.assertEqual(result["counts"]["eligible"], 1)
+        self.assertEqual(result["items"][0]["action"], "would_execute")
+        self.assertEqual(run_docs, {})
+        self.assertNotIn("raw_email", str(result))
+        self.assertNotIn("allowed_emails", str(result))
+        self.assertNotIn("template_gcs_uri", str(result))
+        self.assertNotIn("query_sql", str(result))
+
+    def test_schedule_runs_execute_requires_confirmation_and_idempotency_key(self):
+        distribution = _load_distribution_module()
+
+        with self.assertRaisesRegex(ValueError, "execute confirmation is required"):
+            distribution.run_report_definition_schedule_runs({"mode": "execute"})
+
+        with self.assertRaisesRegex(ValueError, "idempotency_key is required"):
+            distribution.run_report_definition_schedule_runs(
+                {"mode": "execute", "confirm": "RUN_DUE_REPORTS"}
+            )
+
+        with self.assertRaisesRegex(ValueError, "idempotency_key is invalid"):
+            distribution.run_report_definition_schedule_runs(
+                {
+                    "mode": "execute",
+                    "confirm": "RUN_DUE_REPORTS",
+                    "idempotency_key": "bad key",
+                }
+            )
+
+    def test_schedule_runs_execute_records_hashed_idempotency_and_rejects_duplicate(self):
+        distribution = _load_distribution_module()
+        docs = [
+            (
+                "due-report",
+                {
+                    "name": "Due report",
+                    "status": "active",
+                    "current_version": 2,
+                    "gcs_prefix": "reports/plus/",
+                    "drive_folder_name": "126n9wGJ9DMU3hR-4yPgsd-atLhaeRdVt",
+                    "versions": [
+                        {"version": 1},
+                        {
+                            "version": 2,
+                            "template_gcs_uri": "gs://bucket/template.xlsx",
+                            "query_config_id": "plus-monthly-default-v1",
+                            "mapping_version_id": "plus-monthly-table-mapping-v1",
+                        },
+                    ],
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                },
+            ),
+        ]
+        run_docs = {}
+
+        class _Snapshot:
+            def __init__(self, doc_id, data, exists=True):
+                self.id = doc_id
+                self._data = data
+                self.exists = exists
+
+            def to_dict(self):
+                return dict(self._data)
+
+        class _ReportQuery:
+            def limit(self, limit):
+                return self
+
+            def stream(self):
+                return [_Snapshot(doc_id, data) for doc_id, data in docs]
+
+        class _RunRef:
+            def __init__(self, doc_id):
+                self.doc_id = doc_id
+
+            def get(self):
+                return _Snapshot(self.doc_id, run_docs.get(self.doc_id, {}), self.doc_id in run_docs)
+
+            def set(self, data):
+                run_docs[self.doc_id] = dict(data)
+
+        class _RunCollection:
+            def document(self, doc_id):
+                return _RunRef(doc_id)
+
+        class _Client:
+            def collection(self, name):
+                if name == distribution.FIRESTORE_COLLECTION_REPORT_DEFINITIONS:
+                    return _ReportQuery()
+                if name == distribution.FIRESTORE_COLLECTION_SCHEDULED_REPORT_RUNS:
+                    return _RunCollection()
+                raise AssertionError(name)
+
+        distribution.get_firestore_client = lambda: _Client()
+        payload = {
+            "mode": "execute",
+            "confirm": "RUN_DUE_REPORTS",
+            "idempotency_key": "manual-2026-07-06-0900",
+        }
+
+        first = distribution.run_report_definition_schedule_runs(
+            payload,
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+        )
+        self.assertFalse(first["dry_run"])
+        self.assertEqual(first["counts"]["validated"], 1)
+        self.assertEqual(first["items"][0]["action"], "execute_guard_validated")
+        self.assertEqual(len(run_docs), 1)
+        run_doc = next(iter(run_docs.values()))
+        self.assertEqual(run_doc["status"], "validated")
+        self.assertEqual(run_doc["result_code"], "execute_guard_validated")
+        self.assertNotIn("manual-2026-07-06-0900", str(run_doc))
+
+        second = distribution.run_report_definition_schedule_runs(
+            payload,
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(second["counts"]["duplicates"], 1)
+        self.assertEqual(second["counts"]["validated"], 0)
+        self.assertEqual(second["items"][0]["action"], "duplicate")
+        self.assertNotIn("manual-2026-07-06-0900", str(second))
 
     def test_report_definition_id_pattern_accepts_slug(self):
         distribution = _load_distribution_module()

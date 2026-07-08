@@ -21,6 +21,10 @@ FIRESTORE_COLLECTION_REPORT_DEFINITIONS = os.environ.get(
     "REPORT_DEFINITIONS_COLLECTION",
     "report_definitions",
 )
+FIRESTORE_COLLECTION_SCHEDULED_REPORT_RUNS = os.environ.get(
+    "SCHEDULED_REPORT_RUNS_COLLECTION",
+    "scheduled_report_runs",
+)
 REPORT_DEFINITION_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}$")
 REPORT_DEFINITION_EDITABLE_FIELDS = (
     "name",
@@ -32,6 +36,8 @@ REPORT_DEFINITION_EDITABLE_FIELDS = (
     "drive_folder_name",
 )
 REPORT_DEFINITION_SCHEDULE_TIME_PATTERN = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+REPORT_DEFINITION_SCHEDULE_RUN_IDEMPOTENCY_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{7,127}$")
+REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION = "RUN_DUE_REPORTS"
 REPORT_DEFINITION_SCHEDULE_TIMEZONE_ALLOWLIST = {"Asia/Tokyo"}
 REPORT_DEFINITION_SCHEDULE_TIMEZONES = {
     "Asia/Tokyo": timezone(timedelta(hours=9), "Asia/Tokyo"),
@@ -724,6 +730,227 @@ def preview_report_definition_schedule_run(
             "scheduled": len(scheduled_items),
             "due": len(due_items),
             "not_due": len(items) - len(due_items),
+        },
+    }
+
+
+def _parse_schedule_run_evaluation_time(value: Any, *, now: datetime | None = None) -> datetime:
+    if now is not None:
+        evaluation_time = now
+    elif value:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            evaluation_time = datetime.fromisoformat(text)
+        except ValueError:
+            raise ValueError("evaluation_time must be ISO-8601") from None
+    else:
+        evaluation_time = utcnow()
+
+    if evaluation_time.tzinfo is None:
+        evaluation_time = evaluation_time.replace(tzinfo=timezone.utc)
+    return evaluation_time
+
+
+def _schedule_run_report_ids(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raise ValueError("report_ids must be a list")
+
+    report_ids = [_validate_report_id(item) for item in raw_items if item]
+    return sorted(set(report_ids))
+
+
+def _schedule_run_mode(payload: dict[str, Any]) -> str:
+    mode = str(payload.get("mode") or "dry_run").strip().lower()
+    if mode not in {"dry_run", "execute"}:
+        raise ValueError("mode must be dry_run or execute")
+    return mode
+
+
+def _schedule_run_idempotency_hash(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        raise ValueError("idempotency_key is required")
+    if not REPORT_DEFINITION_SCHEDULE_RUN_IDEMPOTENCY_PATTERN.match(key):
+        raise ValueError("idempotency_key is invalid")
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _schedule_run_current_version(definition: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    try:
+        return _find_report_definition_current_version(definition), ""
+    except (TypeError, ValueError):
+        return None, "current_version_not_found"
+
+
+def _schedule_run_eligibility(
+    report_id: str,
+    definition: dict[str, Any],
+    item: dict[str, Any],
+) -> tuple[bool, str]:
+    if not item["due"]:
+        return False, str(item["reason"] or "not_due")
+    if item["status"] != "active":
+        return False, "inactive"
+    if item["current_version"] is None:
+        return False, "current_version_required"
+
+    current_version, error_reason = _schedule_run_current_version(definition)
+    if current_version is None:
+        return False, error_reason
+    if not str(current_version.get("template_gcs_uri") or "").strip():
+        return False, "published_template_required"
+    if not str(current_version.get("query_config_id") or "").strip():
+        return False, "query_config_required"
+    if not str(current_version.get("mapping_version_id") or "").strip():
+        return False, "mapping_version_required"
+
+    public_definition = _public_report_definition(report_id, definition)
+    try:
+        _validate_report_definition_storage(public_definition)
+    except ValueError:
+        return False, "storage_not_allowed"
+
+    return True, "eligible"
+
+
+def _schedule_run_record_id(item: dict[str, Any], idempotency_key_hash: str) -> str:
+    source = "|".join(
+        [
+            str(item.get("report_id") or ""),
+            str(item.get("local_date") or ""),
+            str((item.get("schedule") or {}).get("time_of_day") or ""),
+            str(item.get("timezone") or ""),
+            idempotency_key_hash,
+        ]
+    )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def run_report_definition_schedule_runs(
+    payload: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    payload = payload or {}
+    mode = _schedule_run_mode(payload)
+    dry_run = mode != "execute"
+    try:
+        limit = int(payload.get("limit") or 100)
+    except (TypeError, ValueError):
+        raise ValueError("limit must be a number") from None
+    if limit < 1 or limit > 500:
+        raise ValueError("limit must be between 1 and 500")
+
+    report_ids = _schedule_run_report_ids(payload.get("report_ids"))
+    report_id_filter = set(report_ids)
+    evaluation_time = _parse_schedule_run_evaluation_time(
+        payload.get("evaluation_time"),
+        now=now,
+    )
+
+    idempotency_key_hash = ""
+    if not dry_run:
+        if str(payload.get("confirm") or "").strip() != REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION:
+            raise ValueError("execute confirmation is required")
+        idempotency_key_hash = _schedule_run_idempotency_hash(payload.get("idempotency_key"))
+
+    db = get_firestore_client()
+    query = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).limit(limit)
+    items: list[dict[str, Any]] = []
+    seen_report_ids: set[str] = set()
+    run_collection = db.collection(FIRESTORE_COLLECTION_SCHEDULED_REPORT_RUNS) if not dry_run else None
+    record_time = utcnow()
+
+    for doc in query.stream():
+        if report_id_filter and doc.id not in report_id_filter:
+            continue
+        seen_report_ids.add(doc.id)
+        definition = doc.to_dict() or {}
+        if definition.get("archived") or definition.get("status") == "archived":
+            continue
+
+        item = _report_definition_schedule_preview_item(
+            doc.id,
+            definition,
+            now=evaluation_time,
+        )
+        eligible, reason = _schedule_run_eligibility(doc.id, definition, item)
+        item["eligible"] = eligible
+        item["reason"] = reason
+        item["action"] = "would_execute" if dry_run and eligible else "skip"
+
+        if not dry_run and eligible:
+            run_record_id = _schedule_run_record_id(item, idempotency_key_hash)
+            run_ref = run_collection.document(run_record_id)  # type: ignore[union-attr]
+            if run_ref.get().exists:
+                item["eligible"] = False
+                item["reason"] = "duplicate_run"
+                item["action"] = "duplicate"
+            else:
+                run_ref.set(
+                    {
+                        "report_id": item["report_id"],
+                        "schedule_local_date": item["local_date"],
+                        "schedule_time": item["schedule"]["time_of_day"],
+                        "schedule_timezone": item["timezone"],
+                        "idempotency_key_hash": idempotency_key_hash,
+                        "status": "validated",
+                        "result_code": "execute_guard_validated",
+                        "created_at": record_time,
+                        "updated_at": record_time,
+                    }
+                )
+                item["action"] = "execute_guard_validated"
+
+        items.append(item)
+
+    for missing_report_id in sorted(report_id_filter - seen_report_ids):
+        items.append(
+            {
+                "report_id": missing_report_id,
+                "name": missing_report_id,
+                "status": "missing",
+                "current_version": None,
+                "schedule": {},
+                "due": False,
+                "eligible": False,
+                "reason": "report_id_not_found",
+                "action": "skip",
+                "local_date": "",
+                "local_time": "",
+                "timezone": "",
+            }
+        )
+
+    items.sort(key=lambda item: (not item["due"], not item["eligible"], item["report_id"]))
+    due_items = [item for item in items if item["due"]]
+    eligible_items = [item for item in items if item["eligible"]]
+    duplicate_items = [item for item in items if item["action"] == "duplicate"]
+    validated_items = [item for item in items if item["action"] == "execute_guard_validated"]
+
+    return {
+        "generated_at": _format_dt(utcnow()),
+        "evaluation_time": _format_dt(evaluation_time),
+        "mode": mode,
+        "dry_run": dry_run,
+        "items": items,
+        "due_items": due_items,
+        "eligible_items": eligible_items,
+        "counts": {
+            "checked": len(items),
+            "due": len(due_items),
+            "eligible": len(eligible_items),
+            "validated": len(validated_items),
+            "duplicates": len(duplicate_items),
+            "skipped": len(items) - len(eligible_items) - len(duplicate_items),
         },
     }
 
