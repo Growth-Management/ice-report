@@ -34,6 +34,7 @@ from distribution import (
     publish_report_definition_template,
     rollback_report_definition_version,
     rollback_report_definition_template,
+    run_report_definition_schedule_runs,
     set_report_definition_schedule,
     update_report_definition,
     render_download_form,
@@ -2499,6 +2500,27 @@ def report_definition_schedule_preview_route():
 
     _log_report_definition_action("schedule_preview", "success", "", 200)
     return jsonify({"preview": preview, "result": preview})
+
+
+@app.post("/report-definitions/schedule-runs")
+def report_definition_schedule_runs_route():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = run_report_definition_schedule_runs(payload)
+    except ValueError as exc:
+        _log_report_definition_action("schedule_run", "failure", "", 400)
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logging.error("ICE_REPORT_SCHEDULE_RUN_FAILED")
+        _log_report_definition_action("schedule_run", "failure", "", 500)
+        return jsonify({"error": "schedule run failed"}), 500
+
+    _log_report_definition_action("schedule_run", "success", "", 200)
+    return jsonify({"run": result, "result": result})
 
 
 def _log_report_definition_action(action: str, result: str, report_id: str, status_code: int) -> None:
