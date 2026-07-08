@@ -1057,9 +1057,13 @@ published template runtime switch smoke:
 32. Run `/report-definitions/schedule-preview` and confirm enabled monthly schedules are evaluated as read-only dry-run candidates.
 33. Confirm schedule preview does not create Cloud Scheduler jobs, generate reports, create deliveries, send mail, or change report definition metadata.
 34. Confirm schedule preview response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, or Excel cell values.
-35. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
-36. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
-37. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+35. For the guarded schedule executor design, review `docs/schedule-automation-guarded-executor.md` before implementing execution behavior.
+36. Confirm the first guarded executor implementation keeps dry-run as the default and requires explicit `mode=execute`, confirmation text, and an idempotency key before running eligible schedules.
+37. Confirm guarded executor implementation does not create Cloud Scheduler jobs, enable unattended automation, send email, edit SQL, edit template mappings, or change Drive/GCS destinations unless a later PR explicitly scopes that behavior.
+38. Confirm guarded executor responses and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, Excel cell values, provider event JSON, or raw idempotency keys.
+39. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
+40. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
+41. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
 rollback:
 

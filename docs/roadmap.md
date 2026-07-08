@@ -343,6 +343,14 @@ Schedule automation dry-run preview foundation:
 - This step does not create Cloud Scheduler jobs, trigger report generation, create deliveries, send mail, edit SQL, edit template mapping, or change Drive/GCS destinations.
 - Preview responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, or Excel cell values.
 
+Schedule automation guarded executor design:
+
+- Guarded executor design is tracked in `docs/schedule-automation-guarded-executor.md`.
+- The next implementation should add an admin-only `POST /report-definitions/schedule-runs` endpoint with dry-run default behavior.
+- Execute mode must require explicit confirmation, an idempotency key, and due schedule eligibility before any generation work starts.
+- The first executor implementation must not create Cloud Scheduler jobs, enable unattended automation, send email, edit SQL, edit template mappings, or change Drive/GCS destinations.
+- Executor responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, Excel cell values, provider event JSON, or raw idempotency keys.
+
 Storage destination allowlist foundation:
 
 - Admin API/UI can show the configured report definition storage allowlist.
