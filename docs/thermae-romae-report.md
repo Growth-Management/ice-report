@@ -28,11 +28,30 @@ THERMAE_WORK_IDS=100040643,100040644
 `BIGQUERY_PROJECT_ID`, `PROJECT_ID`, or `GOOGLE_CLOUD_PROJECT` is used for the BigQuery client
 project.
 
+Drive authentication defaults to the Cloud Run runtime service account through Application Default
+Credentials. For the short-term Shared Drive restriction workaround, use user OAuth:
+
+```text
+DRIVE_AUTH_MODE=oauth
+DRIVE_OAUTH_CLIENT_ID_SECRET_NAME=drive-oauth-client-id
+DRIVE_OAUTH_CLIENT_SECRET_SECRET_NAME=drive-oauth-client-secret
+DRIVE_OAUTH_REFRESH_TOKEN_SECRET_NAME=drive-oauth-refresh-token
+```
+
+The short-term OAuth subject is `sinohara@impress.co.jp`. Store the OAuth client secret and refresh
+token only in Secret Manager or Cloud Run secret env vars. Do not commit them, paste them into
+Notion, or include them in smoke output.
+
+Longer term, evaluate Google Workspace domain-wide delegation so a service account can act on behalf
+of a dedicated Workspace user. This is expected to apply to broader ICE Report Generator Drive
+operations as well.
+
 The Cloud Run runtime service account must be able to:
 
 - Read the target BigQuery table.
-- Read the Drive template file.
-- Create files in the Drive output folder.
+- Read the Drive template file, unless user OAuth is enabled.
+- Create files in the Drive output folder, unless user OAuth is enabled.
+- Read OAuth Secret Manager secrets when `DRIVE_AUTH_MODE=oauth` and secret-name env vars are used.
 
 Do not record service account credentials, Drive access tokens, Admin keys, or raw API tokens in
 Notion, Slack, GitHub, logs, or screenshots.
@@ -76,6 +95,7 @@ Successful responses include:
 
 1. Confirm the Drive template file is shared with the Cloud Run runtime service account.
 2. Confirm the Drive output folder allows the runtime service account to create files.
+   - If `DRIVE_AUTH_MODE=oauth`, confirm the OAuth user has access instead.
 3. Run the API with an explicit historical `target_month`.
 4. Confirm the response has Drive `file_id`, `file_name`, and `webViewLink`.
 5. Open the uploaded `.xlsx` in Excel and confirm both target sheets are updated.
