@@ -156,6 +156,7 @@ class ThermaeRomaeReportTest(unittest.TestCase):
 
         self.assertEqual(rows[0]["title_name"], "テルマエ・ロマエ 1")
         self.assertIn("`project.dataset.table`", captured["sql"])
+        self.assertIn("cast(work_id as int64) in unnest(@work_ids)", captured["sql"])
         params = {param.name: param for param in captured["job_config"].query_parameters}
         self.assertEqual(params["target_month"].value, date(2026, 6, 1))
         self.assertEqual(params["work_ids"].values, [100040643, 100040644])
