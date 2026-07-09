@@ -375,6 +375,8 @@ Thermae Romae Drive-output report:
 - This report downloads an `.xlsx` template directly from Drive, writes the workbook with openpyxl, and uploads the completed `.xlsx` back to Drive.
 - It intentionally stays outside the main `report_definitions` / delivery / OTP flow.
 - Monthly automation / Cloud Scheduler attachment remains a later task.
+- Short-term Drive access uses normal OAuth for `sinohara@impress.co.jp` when Shared Drive policy blocks service account sharing.
+- Long-term Drive access should evaluate domain-wide delegation with a dedicated Workspace user. This is expected to apply to broader ICE Report Generator Drive operations.
 - Responses and logs must not include secret, PIN, raw email, token fragments, Admin key fingerprint, IP, user agent, Signed URL, SQL text, Excel cell values, or provider event JSON.
 
 Cloud Run / smoke / rollback:
