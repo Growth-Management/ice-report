@@ -50,7 +50,7 @@ with base as (
         `{source_table}`
     where 1=1
         and purchase_date_month_jst = @target_month
-        and work_id in unnest(@work_ids)
+        and cast(work_id as int64) in unnest(@work_ids)
 )
 
 , aggregated as (
