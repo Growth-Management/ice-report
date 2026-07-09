@@ -2270,6 +2270,74 @@ def generate():
     return jsonify({"items": result["items"] if "items" in result else [result], "result": result})
 
 
+@app.post("/admin/reports/thermae-romae/generate")
+def generate_thermae_romae():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    target_month = str(payload.get("target_month") or "").strip() or None
+
+    try:
+        from thermae_romae_report import ThermaeReportError, generate_thermae_romae_report
+
+        result = generate_thermae_romae_report(
+            project_id=project_id,
+            target_month_text=target_month,
+        )
+    except ImportError:
+        logging.error("ICE_REPORT_THERMAE_REPORT_DEPENDENCY_MISSING")
+        _log_admin_audit_event(
+            action="thermae_romae_generate",
+            result="failure",
+            target_type="report",
+            target_id="thermae-romae",
+            status_code=500,
+            reason="dependency_missing",
+        )
+        return jsonify({"error": "dependency_missing"}), 500
+    except Exception as exc:
+        error_code = getattr(exc, "code", "thermae_romae_generate_failed")
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        details = getattr(exc, "details", {}) or {}
+        log_level = logging.warning if status_code < 500 else logging.error
+        log_level("ICE_REPORT_THERMAE_REPORT_FAILED reason=%s", error_code)
+        _log_admin_audit_event(
+            action="thermae_romae_generate",
+            result="failure",
+            target_type="report",
+            target_id="thermae-romae",
+            status_code=status_code,
+            reason=error_code,
+            detail={
+                "target_month": target_month or "",
+                "title_name": details.get("title_name", ""),
+            },
+        )
+        response = {"error": error_code}
+        if details.get("title_name"):
+            response["title_name"] = details["title_name"]
+        return jsonify(response), status_code
+
+    _log_admin_audit_event(
+        action="thermae_romae_generate",
+        result="success",
+        target_type="report",
+        target_id="thermae-romae",
+        status_code=200,
+        detail={
+            "target_month": result.get("target_month"),
+            "detail_row_count": result.get("detail_row_count"),
+            "payment_total": result.get("payment_total"),
+            "tax": result.get("tax"),
+            "total_with_tax": result.get("total_with_tax"),
+        },
+    )
+    return jsonify({"result": result, **result})
+
+
 @app.post("/deliveries")
 def create_delivery():
     ok, error_response = _check_admin()

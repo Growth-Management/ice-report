@@ -1068,6 +1068,10 @@ published template runtime switch smoke:
 43. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
 44. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
+45. For the Thermae Romae Drive-output report, run `POST /admin/reports/thermae-romae/generate` with an explicit historical `target_month`.
+46. Confirm the uploaded Drive `.xlsx` opens in Excel and `支払通知書` print preview is not broken.
+47. Confirm the Thermae Romae report does not create delivery records, send email, create OTP/PIN download URLs, or create Cloud Scheduler jobs.
+
 rollback:
 
 - 表示のみの問題であれば直前 Cloud Run revision へ戻す

@@ -368,6 +368,15 @@ Storage destination allowlist foundation:
 - This step does not create Drive folders, move GCS objects, register arbitrary Drive URLs, or change runtime delivery destinations automatically.
 - Allowlist responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
+Thermae Romae Drive-output report:
+
+- Dedicated report documentation is tracked in `docs/thermae-romae-report.md`.
+- The first implementation adds `POST /admin/reports/thermae-romae/generate`.
+- This report downloads an `.xlsx` template directly from Drive, writes the workbook with openpyxl, and uploads the completed `.xlsx` back to Drive.
+- It intentionally stays outside the main `report_definitions` / delivery / OTP flow.
+- Monthly automation / Cloud Scheduler attachment remains a later task.
+- Responses and logs must not include secret, PIN, raw email, token fragments, Admin key fingerprint, IP, user agent, Signed URL, SQL text, Excel cell values, or provider event JSON.
+
 Cloud Run / smoke / rollback:
 
 - `app.py` と `distribution.py` を変更するため、反映には `report-generator-admin` と必要に応じて `report-generator` のdeployが必要
