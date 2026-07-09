@@ -4,14 +4,43 @@ import os
 from pathlib import Path
 
 import google.auth
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials as OAuthCredentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 
 DRIVE_XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+
+class DriveOperationError(Exception):
+    def __init__(self, code: str, *, status_code: int = 500) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status_code = status_code
+
+
+def _drive_http_error_code(exc: HttpError) -> str:
+    status = int(getattr(exc.resp, "status", 500) or 500)
+    if status in {401, 403}:
+        return "drive_access_denied"
+    if status == 404:
+        return "drive_not_found"
+    return "drive_api_error"
+
+
+def _raise_drive_error(exc: Exception) -> None:
+    if isinstance(exc, DriveOperationError):
+        raise exc
+    if isinstance(exc, RefreshError):
+        raise DriveOperationError("drive_oauth_refresh_failed", status_code=500) from exc
+    if isinstance(exc, HttpError):
+        status = int(getattr(exc.resp, "status", 500) or 500)
+        raise DriveOperationError(_drive_http_error_code(exc), status_code=status) from exc
+    raise exc
 
 
 def _project_id() -> str:
@@ -102,12 +131,15 @@ def download_drive_file(file_id: str, destination_path: str | Path, *, service=N
     destination = Path(destination_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-    with destination.open("wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+    try:
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        with destination.open("wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+    except Exception as exc:
+        _raise_drive_error(exc)
 
     return destination
 
@@ -126,13 +158,16 @@ def upload_xlsx_to_drive(
         "parents": [folder_id],
     }
     media = MediaFileUpload(str(path), mimetype=DRIVE_XLSX_MIME_TYPE, resumable=False)
-    return (
-        service.files()
-        .create(
-            body=metadata,
-            media_body=media,
-            fields="id,name,webViewLink",
-            supportsAllDrives=True,
+    try:
+        return (
+            service.files()
+            .create(
+                body=metadata,
+                media_body=media,
+                fields="id,name,webViewLink",
+                supportsAllDrives=True,
+            )
+            .execute()
         )
-        .execute()
-    )
+    except Exception as exc:
+        _raise_drive_error(exc)

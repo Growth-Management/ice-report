@@ -2,6 +2,8 @@ import os
 import unittest
 from unittest import mock
 
+from google.auth.exceptions import RefreshError
+
 import drive_io
 
 
@@ -79,6 +81,13 @@ class DriveIoTests(unittest.TestCase):
         self.assertEqual(credentials.client_id, "client-id")
         self.assertEqual(credentials.client_secret, "client-secret")
         self.assertEqual(credentials.refresh_token, "refresh-token")
+
+    def test_refresh_error_is_sanitized(self):
+        with self.assertRaises(drive_io.DriveOperationError) as ctx:
+            drive_io._raise_drive_error(RefreshError("invalid token"))
+
+        self.assertEqual(ctx.exception.code, "drive_oauth_refresh_failed")
+        self.assertEqual(ctx.exception.status_code, 500)
 
 
 if __name__ == "__main__":
