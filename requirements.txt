@@ -11,3 +11,4 @@ google-cloud-firestore==2.19.0
 google-cloud-secret-manager==2.20.2
 requests==2.32.3
 boto3==1.39.4
+google-api-python-client==2.154.0
