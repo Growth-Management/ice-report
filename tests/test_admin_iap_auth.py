@@ -10,6 +10,7 @@ class _RequestStub:
     path = "/"
     method = "GET"
     remote_addr = ""
+    base_url = "https://example.com/admin/reports/thermae-romae/scheduled-generate"
 
 
 class _RequestContextStub:
@@ -17,16 +18,19 @@ class _RequestContextStub:
         self.path = path
         self.headers = headers or {}
         self.method = method
+        self.base_url = "https://example.com" + path
 
     def __enter__(self):
         _RequestStub.path = self.path
         _RequestStub.headers = self.headers
         _RequestStub.method = self.method
+        _RequestStub.base_url = self.base_url
 
     def __exit__(self, exc_type, exc, traceback):
         _RequestStub.path = "/"
         _RequestStub.headers = {}
         _RequestStub.method = "GET"
+        _RequestStub.base_url = "https://example.com/admin/reports/thermae-romae/scheduled-generate"
 
 
 class _FlaskStub:
@@ -181,6 +185,8 @@ class AdminIapAuthTest(unittest.TestCase):
         "ADMIN_IAP_AUTH_ENABLED",
         "ADMIN_IAP_SERVICE_NAME",
         "K_SERVICE",
+        "THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS",
+        "THERMAE_SCHEDULER_AUDIENCE",
     }
 
     def _env(self, **values):
@@ -215,6 +221,59 @@ class AdminIapAuthTest(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIsNone(error)
+
+    def test_thermae_scheduler_auth_requires_allowed_service_account_config(self):
+        with app_module.app.test_request_context(
+            "/admin/reports/thermae-romae/scheduled-generate",
+            headers={"Authorization": "Bearer token"},
+            method="POST",
+        ):
+            ok, reason = app_module._check_thermae_scheduler_auth()
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "scheduler_auth_not_configured")
+
+    def test_thermae_scheduler_auth_accepts_allowed_oidc_service_account(self):
+        with self._env(
+            THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS="thermae-scheduler@ice-sh.iam.gserviceaccount.com",
+            THERMAE_SCHEDULER_AUDIENCE="https://example.com/admin/reports/thermae-romae/scheduled-generate",
+        ):
+            with patch.object(
+                app_module,
+                "_verify_thermae_scheduler_oidc_token",
+                return_value={"email": "thermae-scheduler@ice-sh.iam.gserviceaccount.com"},
+            ):
+                with app_module.app.test_request_context(
+                    "/admin/reports/thermae-romae/scheduled-generate",
+                    headers={"Authorization": "Bearer token"},
+                    method="POST",
+                ):
+                    ok, reason = app_module._check_thermae_scheduler_auth()
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_thermae_scheduled_result_excludes_drive_url_and_file_id(self):
+        safe = app_module._safe_thermae_scheduled_result(
+            {
+                "status": "ok",
+                "target_month": "2026-06-01",
+                "generated_date": "2026-07-10",
+                "file_id": "drive-file-id",
+                "file_name": "report.xlsx",
+                "webViewLink": "https://drive.google.com/file/d/drive-file-id/view",
+                "detail_row_count": 54,
+                "payment_total": 66862,
+                "tax": 6686,
+                "total_with_tax": 73548,
+            }
+        )
+
+        self.assertTrue(safe["has_drive_file"])
+        self.assertEqual(safe["file_name"], "report.xlsx")
+        self.assertNotIn("file_id", safe)
+        self.assertNotIn("webViewLink", safe)
+        self.assertNotIn("drive-file-id", str(safe))
 
     def test_iap_allowed_email_accepts_multiple_explicit_users(self):
         with self._env(
