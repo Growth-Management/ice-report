@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from google.cloud import bigquery
 from openpyxl import load_workbook
+from openpyxl.styles import Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -34,6 +35,68 @@ DETAIL_HEADERS = (
     "支払額（税抜）",
 )
 DETAIL_TOTAL_LABELS = ("支払額計", "消費税額（※支払額計×0.1）", "税込計")
+DETAIL_DATA_START_ROW = 2
+DETAIL_TOTAL_START_ROW = 56
+DETAIL_TOTAL_LABEL_COL = 6
+DETAIL_TOTAL_AMOUNT_COL = 7
+INVOICE_GENERATED_DATE_CELL = "G3"
+INVOICE_PAYMENT_DUE_CELL = "B53"
+THERMAE_FIXED_DETAIL_ITEMS: tuple[tuple[str, str], ...] = (
+    ("04726127A01564800000", "テルマエ・ロマエ 1"),
+    ("04726770A01564900000", "テルマエ・ロマエ 2"),
+    ("04727232A01565000000", "テルマエ・ロマエ 3"),
+    ("04727515A01541000000", "テルマエ・ロマエ 4"),
+    ("04728225A01487700000", "テルマエ・ロマエ 5"),
+    ("04728895A02356000000", "テルマエ・ロマエ 6"),
+    ("04726127A01564801520", "[第1話-①]テルマエ・ロマエ"),
+    ("04726127A01564802520", "[第1話-②]テルマエ・ロマエ"),
+    ("04726127A01564803520", "[第2話-①]テルマエ・ロマエ"),
+    ("04726127A01564804520", "[第2話-②]テルマエ・ロマエ"),
+    ("04726127A01564805520", "[第3話-①]テルマエ・ロマエ"),
+    ("04726127A01564806520", "[第3話-②]テルマエ・ロマエ"),
+    ("04726127A01564807520", "[第4話-①]テルマエ・ロマエ"),
+    ("04726127A01564808520", "[第4話-②]テルマエ・ロマエ"),
+    ("04726127A01564809520", "[第5話-①]テルマエ・ロマエ"),
+    ("04726127A01564810520", "[第5話-②]テルマエ・ロマエ"),
+    ("04726770A01564901520", "[第6話-①]テルマエ・ロマエ"),
+    ("04726770A01564902520", "[第6話-②]テルマエ・ロマエ"),
+    ("04726770A01564903520", "[第7話-①]テルマエ・ロマエ"),
+    ("04726770A01564904520", "[第7話-②]テルマエ・ロマエ"),
+    ("04726770A01564905520", "[第8話-①]テルマエ・ロマエ"),
+    ("04726770A01564906520", "[第8話-②]テルマエ・ロマエ"),
+    ("04726770A01564907520", "[第9話-①]テルマエ・ロマエ"),
+    ("04726770A01564908520", "[第9話-②]テルマエ・ロマエ"),
+    ("04726770A01564909520", "[第10話-①]テルマエ・ロマエ"),
+    ("04726770A01564910520", "[第10話-②]テルマエ・ロマエ"),
+    ("04727232A01565001520", "[第11話]テルマエ・ロマエ"),
+    ("04727232A01565002520", "[第12話]テルマエ・ロマエ"),
+    ("04727232A01565003520", "[第13話]テルマエ・ロマエ"),
+    ("04727232A01565004520", "[第14話]テルマエ・ロマエ"),
+    ("04727232A01565005520", "[第15話]テルマエ・ロマエ"),
+    ("04727232A01565006520", "[第16話]テルマエ・ロマエ"),
+    ("04727232A01565007520", "[第17話]テルマエ・ロマエ"),
+    ("04727515A01541001520", "[第18話]テルマエ・ロマエ"),
+    ("04727515A01541002520", "[第19話]テルマエ・ロマエ"),
+    ("04727515A01541003520", "[第20話]テルマエ・ロマエ"),
+    ("04727515A01541004520", "[第21話]テルマエ・ロマエ"),
+    ("04727515A01541005520", "[第22話]テルマエ・ロマエ"),
+    ("04727515A01541006520", "[第23話]テルマエ・ロマエ"),
+    ("04727515A01541007520", "[第24話]テルマエ・ロマエ"),
+    ("04728225A01487701520", "[第25話]テルマエ・ロマエ"),
+    ("04728225A01487702520", "[第26話]テルマエ・ロマエ"),
+    ("04728225A01487703520", "[第27話]テルマエ・ロマエ"),
+    ("04728225A01487704520", "[第28話]テルマエ・ロマエ"),
+    ("04728225A01487705520", "[第29話]テルマエ・ロマエ"),
+    ("04728225A01487706520", "[第30話]テルマエ・ロマエ"),
+    ("04728225A01487707520", "[第31話]テルマエ・ロマエ"),
+    ("04728895A02356001520", "[第32話]テルマエ・ロマエ"),
+    ("04728895A02356002520", "[第33話]テルマエ・ロマエ"),
+    ("04728895A02356003520", "[第34話]テルマエ・ロマエ"),
+    ("04728895A02356004520", "[第35話]テルマエ・ロマエ"),
+    ("04728895A02356005520", "[第36話]テルマエ・ロマエ"),
+    ("04728895A02356006520", "[第37話]テルマエ・ロマエ"),
+    ("04728895A02356007520", "[第38話]テルマエ・ロマエ"),
+)
 
 THERMAE_SQL = """
 with base as (
@@ -158,9 +221,9 @@ def period_label(target_month: date) -> str:
     return f"{target_month:%Y年%m月%d日}〜{end:%m月%d日}"
 
 
-def payment_due_text(target_month: date) -> str:
-    due = payment_due_month_end(target_month)
-    return f"お支払い予定：{due.year}年{due.month}月末"
+def payment_due_text(generated_date: date) -> str:
+    due = payment_due_month_end(generated_date)
+    return f"※御支払いは{due.year}年{due.month}月末を予定しております。"
 
 
 def output_file_name(target_month: date) -> str:
@@ -230,20 +293,37 @@ def extract_book_code_mapping(ws: Worksheet) -> dict[str, str]:
     return mapping
 
 
-def build_detail_rows(records: list[dict[str, Any]], book_code_mapping: dict[str, str]) -> list[dict[str, Any]]:
+def sales_month_label(target_month: date) -> str:
+    return f"{target_month.year}年{target_month.month}月"
+
+
+def build_detail_rows(
+    records: list[dict[str, Any]],
+    book_code_mapping: dict[str, str] | None = None,
+    *,
+    target_month: date | None = None,
+    fixed_items: Iterable[tuple[str, str]] = THERMAE_FIXED_DETAIL_ITEMS,
+) -> list[dict[str, Any]]:
+    fixed = tuple(fixed_items)
+    fixed_titles = {title for _, title in fixed}
+    by_title = {_cell_text(record.get("title_name")): record for record in records}
+    unexpected_titles = sorted(title for title in by_title if title and title not in fixed_titles)
+    if unexpected_titles:
+        raise ThermaeReportError(
+            "unexpected_title_name",
+            "title_name is not in fixed Thermae Romae detail list",
+            title_name=unexpected_titles[0],
+        )
+
+    default_sales_month = sales_month_label(target_month) if target_month else (
+        _cell_text(records[0].get("sales_month_label")) if records else ""
+    )
     rows = []
-    for record in records:
-        title_name = _cell_text(record.get("title_name"))
-        book_code = book_code_mapping.get(title_name)
-        if not book_code:
-            raise ThermaeReportError(
-                "book_code_not_found",
-                "book code not found for title_name",
-                title_name=title_name,
-            )
+    for book_code, title_name in fixed:
+        record = by_title.get(title_name) or {}
         rows.append(
             {
-                "売上月/売上日": record.get("sales_month_label") or "",
+                "売上月/売上日": record.get("sales_month_label") or default_sales_month,
                 "出版社名": record.get("publisher_name") or "KADOKAWA",
                 "書籍コード": book_code,
                 "タイトル名": title_name,
@@ -289,24 +369,65 @@ def _first_total_row(ws: Worksheet, header_row: int) -> int | None:
     return None
 
 
+def _border_with_outline(
+    border: Border,
+    *,
+    left: Side | None = None,
+    right: Side | None = None,
+    top: Side | None = None,
+    bottom: Side | None = None,
+) -> Border:
+    return Border(
+        left=left or border.left,
+        right=right or border.right,
+        top=top or border.top,
+        bottom=bottom or border.bottom,
+        diagonal=border.diagonal,
+        diagonal_direction=border.diagonal_direction,
+        diagonalUp=border.diagonalUp,
+        diagonalDown=border.diagonalDown,
+        outline=border.outline,
+        vertical=border.vertical,
+        horizontal=border.horizontal,
+        start=border.start,
+        end=border.end,
+    )
+
+
+def _apply_thick_outline(
+    ws: Worksheet,
+    *,
+    min_row: int,
+    max_row: int,
+    min_col: int,
+    max_col: int,
+) -> None:
+    thick = Side(style="thick", color="000000")
+    for row_idx in range(min_row, max_row + 1):
+        for col_idx in range(min_col, max_col + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.border = _border_with_outline(
+                cell.border,
+                left=thick if col_idx == min_col else None,
+                right=thick if col_idx == max_col else None,
+                top=thick if row_idx == min_row else None,
+                bottom=thick if row_idx == max_row else None,
+            )
+
+
 def write_detail_sheet(ws: Worksheet, rows: list[dict[str, Any]], summary: dict[str, int]) -> None:
     header_row, columns = find_header_row(ws)
     min_col = min(columns[header] for header in DETAIL_HEADERS)
     max_col = max(columns[header] for header in DETAIL_HEADERS)
-    data_start = header_row + 1
-    old_total_row = _first_total_row(ws, header_row) or max(data_start, ws.max_row + 1)
-    capacity = max(old_total_row - data_start, 0)
+    data_start = DETAIL_DATA_START_ROW
+    data_capacity = DETAIL_TOTAL_START_ROW - DETAIL_DATA_START_ROW
+    if len(rows) > data_capacity:
+        raise ThermaeReportError("too_many_detail_rows", "fixed detail rows exceed template capacity")
 
-    if len(rows) > capacity:
-        insert_count = len(rows) - capacity
-        ws.insert_rows(old_total_row, insert_count)
-        style_source = max(data_start, old_total_row - 1)
-        for row_idx in range(old_total_row, old_total_row + insert_count):
-            _copy_row_style(ws, style_source, row_idx, min_col, max_col)
-
-    clear_until = max(old_total_row + 2, data_start + len(rows) + 2)
+    clear_max_col = max(max_col, DETAIL_TOTAL_AMOUNT_COL)
+    clear_until = DETAIL_TOTAL_START_ROW + len(DETAIL_TOTAL_LABELS) - 1
     for row_idx in range(data_start, clear_until + 1):
-        for col in range(min_col, max_col + 1):
+        for col in range(min_col, clear_max_col + 1):
             ws.cell(row=row_idx, column=col).value = None
 
     for row_offset, row_values in enumerate(rows):
@@ -314,26 +435,38 @@ def write_detail_sheet(ws: Worksheet, rows: list[dict[str, Any]], summary: dict[
         for header in DETAIL_HEADERS:
             ws.cell(row=row_idx, column=columns[header]).value = row_values.get(header)
 
-    total_row = data_start + len(rows)
-    label_col = min_col
-    amount_col = columns["支払額（税抜）"]
     totals = (
         ("支払額計", summary["payment_total"]),
         ("消費税額（※支払額計×0.1）", summary["tax"]),
         ("税込計", summary["total_with_tax"]),
     )
     for offset, (label, value) in enumerate(totals):
-        row_idx = total_row + offset
-        ws.cell(row=row_idx, column=label_col).value = label
-        ws.cell(row=row_idx, column=amount_col).value = value
+        row_idx = DETAIL_TOTAL_START_ROW + offset
+        ws.cell(row=row_idx, column=DETAIL_TOTAL_LABEL_COL).value = label
+        ws.cell(row=row_idx, column=DETAIL_TOTAL_AMOUNT_COL).value = value
+
+    _apply_thick_outline(
+        ws,
+        min_row=DETAIL_TOTAL_START_ROW,
+        max_row=DETAIL_TOTAL_START_ROW + len(DETAIL_TOTAL_LABELS) - 1,
+        min_col=DETAIL_TOTAL_LABEL_COL,
+        max_col=DETAIL_TOTAL_AMOUNT_COL,
+    )
 
 
-def write_invoice_sheet(ws: Worksheet, target_month: date, summary: dict[str, int]) -> None:
+def write_invoice_sheet(
+    ws: Worksheet,
+    target_month: date,
+    summary: dict[str, int],
+    *,
+    generated_date: date,
+) -> None:
+    ws[INVOICE_GENERATED_DATE_CELL] = generated_date
     ws["D30"] = period_label(target_month)
     ws["E42"] = summary["payment_total"]
     ws["E43"] = summary["tax"]
     ws["E44"] = summary["total_with_tax"]
-    ws["B53"] = payment_due_text(target_month)
+    ws[INVOICE_PAYMENT_DUE_CELL] = payment_due_text(generated_date)
     ws.print_area = "A3:G61"
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
     ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
@@ -346,8 +479,10 @@ def create_thermae_workbook(
     template_path: str | Path,
     output_path: str | Path,
     target_month: date,
+    generated_date: date | None = None,
     records: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    generated_date = generated_date or date.today()
     workbook = load_workbook(template_path)
     if INVOICE_SHEET not in workbook.sheetnames:
         raise ThermaeReportError("invoice_sheet_not_found", "支払通知書 sheet not found")
@@ -355,11 +490,10 @@ def create_thermae_workbook(
         raise ThermaeReportError("detail_sheet_not_found", "売上明細 sheet not found")
 
     detail_ws = workbook[DETAIL_SHEET]
-    book_code_mapping = extract_book_code_mapping(detail_ws)
-    detail_rows = build_detail_rows(records, book_code_mapping)
+    detail_rows = build_detail_rows(records, target_month=target_month)
     summary = summarize_detail_rows(detail_rows)
     write_detail_sheet(detail_ws, detail_rows, summary)
-    write_invoice_sheet(workbook[INVOICE_SHEET], target_month, summary)
+    write_invoice_sheet(workbook[INVOICE_SHEET], target_month, summary, generated_date=generated_date)
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -367,6 +501,7 @@ def create_thermae_workbook(
 
     return {
         "target_month": target_month.isoformat(),
+        "generated_date": generated_date.isoformat(),
         "file_name": output.name,
         "detail_row_count": summary["detail_row_count"],
         "payment_total": summary["payment_total"],
@@ -387,7 +522,8 @@ def generate_thermae_romae_report(
     if not project_id:
         raise ThermaeReportError("project_required", "BIGQUERY_PROJECT_ID or PROJECT_ID is required")
 
-    target_month = parse_target_month(target_month_text, today=today)
+    generated_date = today or date.today()
+    target_month = parse_target_month(target_month_text, today=generated_date)
     template_id = template_file_id or os.environ.get("THERMAE_TEMPLATE_FILE_ID", DEFAULT_THERMAE_TEMPLATE_FILE_ID)
     folder_id = output_folder_id or os.environ.get("THERMAE_OUTPUT_FOLDER_ID", DEFAULT_THERMAE_OUTPUT_FOLDER_ID)
     file_name = output_file_name(target_month)
@@ -405,6 +541,7 @@ def generate_thermae_romae_report(
             template_path=template_path,
             output_path=output_path,
             target_month=target_month,
+            generated_date=generated_date,
             records=records,
         )
         uploaded = upload_xlsx_to_drive(
@@ -418,6 +555,7 @@ def generate_thermae_romae_report(
         "report": THERMAE_REPORT_ID,
         "report_name": THERMAE_REPORT_NAME,
         "target_month": target_month.isoformat(),
+        "generated_date": result["generated_date"],
         "file_id": uploaded.get("id", ""),
         "file_name": uploaded.get("name") or file_name,
         "webViewLink": uploaded.get("webViewLink", ""),
