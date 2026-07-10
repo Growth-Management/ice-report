@@ -29,7 +29,8 @@ THERMAE_WORK_IDS=100040643,100040644
 project.
 
 Drive authentication defaults to the Cloud Run runtime service account through Application Default
-Credentials. For the short-term Shared Drive restriction workaround, use user OAuth:
+Credentials. For initial implementation and the first several months of operations, use user OAuth
+because the target Shared Drive policy blocks direct service account sharing:
 
 ```text
 DRIVE_AUTH_MODE=oauth
@@ -38,13 +39,13 @@ DRIVE_OAUTH_CLIENT_SECRET_SECRET_NAME=drive-oauth-client-secret
 DRIVE_OAUTH_REFRESH_TOKEN_SECRET_NAME=drive-oauth-refresh-token
 ```
 
-The short-term OAuth subject is `sinohara@impress.co.jp`. Store the OAuth client secret and refresh
+The initial OAuth subject is `sinohara@impress.co.jp`. Store the OAuth client secret and refresh
 token only in Secret Manager or Cloud Run secret env vars. Do not commit them, paste them into
 Notion, or include them in smoke output.
 
-Longer term, evaluate Google Workspace domain-wide delegation so a service account can act on behalf
-of a dedicated Workspace user. This is expected to apply to broader ICE Report Generator Drive
-operations as well.
+After several months of OAuth operation, evaluate Google Workspace domain-wide delegation so a
+service account can act on behalf of a dedicated Workspace user. This is expected to apply to broader
+ICE Report Generator Drive operations as well.
 
 The Cloud Run runtime service account must be able to:
 

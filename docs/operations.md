@@ -1071,8 +1071,8 @@ published template runtime switch smoke:
 45. For the Thermae Romae Drive-output report, run `POST /admin/reports/thermae-romae/generate` with an explicit historical `target_month`.
 46. Confirm the uploaded Drive `.xlsx` opens in Excel and `支払通知書` print preview is not broken.
 47. Confirm the Thermae Romae report does not create delivery records, send email, create OTP/PIN download URLs, or create Cloud Scheduler jobs.
-48. If `DRIVE_AUTH_MODE=oauth` is enabled, confirm OAuth secrets are injected from Secret Manager and only the OAuth subject's Drive permissions are used for template read / output upload.
-49. If `DRIVE_AUTH_MODE=domain_wide_delegation` is enabled in a later PR, follow `docs/drive-domain-wide-delegation.md` and confirm the delegated Workspace user, not a personal operator account, owns Drive access.
+48. During the initial OAuth operating period, confirm `DRIVE_AUTH_MODE=oauth`, OAuth secrets are injected from Secret Manager, and only the OAuth subject's Drive permissions are used for template read / output upload.
+49. If `DRIVE_AUTH_MODE=domain_wide_delegation` is enabled after the initial OAuth operating period, follow `docs/drive-domain-wide-delegation.md` and confirm the delegated Workspace user, not a personal operator account, owns Drive access.
 
 rollback:
 
