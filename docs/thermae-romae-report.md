@@ -85,12 +85,18 @@ Successful responses include:
 
 - The template is opened as `.xlsx` with openpyxl.
 - Google Sheets conversion is not used.
-- `支払通知書` is updated at `D30`, `E42`, `E43`, `E44`, and `B53`.
+- `支払通知書` is updated at `G3`, `D30`, `E42`, `E43`, `E44`, and `B53`.
+- `G3` is the generation date.
+- `B53` is `※御支払いはyyyy年m月末を予定しております。`; the year/month is generation
+  month + 3 months.
 - `支払通知書` print settings are preserved where possible and the expected print area / A4 /
   portrait / scale / horizontal centering settings are reinforced.
-- `売上明細` is updated using the existing template mapping from `タイトル名` to `書籍コード`.
-- If a BigQuery result title has no matching book code in the template, the API fails with
-  `book_code_not_found`.
+- `売上明細` rows are fixed to the approved 54-row Thermae Romae code/title order in
+  `thermae_romae_report.py`; missing BigQuery rows remain as zero-value rows.
+- `売上明細` totals are fixed at `F56:G58`, with labels in `F56:F58`, amounts in `G56:G58`,
+  and a thick outline around the totals range.
+- If a BigQuery result title is not in the approved fixed code/title list, the API fails with
+  `unexpected_title_name`.
 
 ## Smoke
 
