@@ -346,7 +346,7 @@ Schedule automation dry-run preview foundation:
 Schedule automation guarded executor design:
 
 - Guarded executor design is tracked in `docs/schedule-automation-guarded-executor.md`.
-- The next implementation should add an admin-only `POST /report-definitions/schedule-runs` endpoint with dry-run default behavior.
+- The implementation adds an admin-only `POST /report-definitions/schedule-runs` endpoint with dry-run default behavior.
 - Execute mode must require explicit confirmation, an idempotency key, and due schedule eligibility before any generation work starts.
 - The first executor implementation must not create Cloud Scheduler jobs, enable unattended automation, send email, edit SQL, edit template mappings, or change Drive/GCS destinations.
 - Executor responses and logs must not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, Excel cell values, provider event JSON, or raw idempotency keys.
@@ -357,7 +357,9 @@ Schedule automation guarded executor validation foundation:
 - The endpoint defaults to dry-run and returns safe due / eligible / action metadata only.
 - Execute mode requires `confirm=RUN_DUE_REPORTS` and a valid `idempotency_key`.
 - Execute guard validation stores only hashed idempotency metadata and rejects duplicate validated runs for the same schedule window.
-- This step still does not generate reports, create deliveries, send mail, create Cloud Scheduler jobs, edit SQL, edit template mappings, or change Drive/GCS destinations.
+- `execute_step=generate` adds a separate manual generation path that also requires `confirm_generation=GENERATE_REPORTS`.
+- Scheduled generation reuses the published template and allowed GCS destination, then stores only safe generation metadata.
+- This step still does not create deliveries, send mail, create Cloud Scheduler jobs, edit SQL, edit template mappings, or change Drive/GCS destinations.
 
 Storage destination allowlist foundation:
 

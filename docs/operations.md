@@ -1064,15 +1064,19 @@ published template runtime switch smoke:
 39. Run `POST /report-definitions/schedule-runs` without `mode=execute` and confirm the response is dry-run only.
 40. Run `POST /report-definitions/schedule-runs` with `mode=execute` but without `confirm=RUN_DUE_REPORTS` and confirm it is rejected with `400`.
 41. Run `POST /report-definitions/schedule-runs` with execute confirmation and a valid idempotency key against an eligible test definition, then repeat the same request and confirm duplicate rejection.
-42. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
-43. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
-44. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
+42. Run `POST /report-definitions/schedule-runs` with `mode=execute`, `execute_step=generate`, and missing `confirm_generation=GENERATE_REPORTS`; confirm it is rejected with `400`.
+43. Run `POST /report-definitions/schedule-runs` with `mode=execute`, `execute_step=generate`, both confirmation strings, and a valid idempotency key against an eligible test definition; confirm it generates the report using the published template and allowed GCS destination.
+44. Confirm scheduled generation response, run record, and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, template mapping details, template GCS URI, Excel cell values, provider event JSON, raw idempotency keys, local file paths, or GCS URI.
+45. Confirm scheduled generation does not create delivery records, send email, create Cloud Scheduler jobs, or change SQL/template mapping/storage destinations.
+46. Load `/report-definitions/storage-allowlist` and confirm it includes only allowed GCS prefixes and Drive folder names/IDs.
+47. Create or update a test report definition with an allowed `gcs_prefix` / `drive_folder_name`, then confirm an unlisted storage destination is rejected with `400`.
+48. Confirm storage allowlist response and logs do not include secret, PIN, raw email, token fragments, Signed URL, IP, user agent, Admin key fingerprint, SQL text, or template mapping details.
 
-45. For the Thermae Romae Drive-output report, run `POST /admin/reports/thermae-romae/generate` with an explicit historical `target_month`.
-46. Confirm the uploaded Drive `.xlsx` opens in Excel and `支払通知書` print preview is not broken.
-47. Confirm the Thermae Romae report does not create delivery records, send email, create OTP/PIN download URLs, or create Cloud Scheduler jobs.
-48. During the initial OAuth operating period, confirm `DRIVE_AUTH_MODE=oauth`, OAuth secrets are injected from Secret Manager, and only the OAuth subject's Drive permissions are used for template read / output upload.
-49. If `DRIVE_AUTH_MODE=domain_wide_delegation` is enabled after the initial OAuth operating period, follow `docs/drive-domain-wide-delegation.md` and confirm the delegated Workspace user, not a personal operator account, owns Drive access.
+49. For the Thermae Romae Drive-output report, run `POST /admin/reports/thermae-romae/generate` with an explicit historical `target_month`.
+50. Confirm the uploaded Drive `.xlsx` opens in Excel and `支払通知書` print preview is not broken.
+51. Confirm the Thermae Romae report does not create delivery records, send email, create OTP/PIN download URLs, or create Cloud Scheduler jobs.
+52. During the initial OAuth operating period, confirm `DRIVE_AUTH_MODE=oauth`, OAuth secrets are injected from Secret Manager, and only the OAuth subject's Drive permissions are used for template read / output upload.
+53. If `DRIVE_AUTH_MODE=domain_wide_delegation` is enabled after the initial OAuth operating period, follow `docs/drive-domain-wide-delegation.md` and confirm the delegated Workspace user, not a personal operator account, owns Drive access.
 
 rollback:
 

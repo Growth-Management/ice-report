@@ -276,8 +276,39 @@ Implemented behavior:
 
 Still intentionally not implemented:
 
-- Report generation from schedule execution.
 - Delivery creation.
 - Email notification.
 - Cloud Scheduler job creation or recurring automation.
 - SQL editing, template mapping editing, or storage destination changes.
+
+## Manual Generation Foundation
+
+The second implementation keeps the same admin-only endpoint and adds an explicitly guarded manual
+generation step.
+
+Implemented behavior:
+
+- `POST /report-definitions/schedule-runs` still defaults to dry-run mode.
+- `mode=execute` without `execute_step=generate` remains validation-only.
+- Actual generation requires all of:
+  - `mode=execute`
+  - `execute_step=generate`
+  - `confirm=RUN_DUE_REPORTS`
+  - `confirm_generation=GENERATE_REPORTS`
+  - a valid `idempotency_key`
+  - an eligible due schedule
+- The endpoint reuses the published template selected by the report definition current version.
+- The output destination uses the report definition `gcs_prefix` when set, otherwise the runtime
+  `BUCKET_NAME` / `OBJECT_PREFIX` defaults.
+- The scheduled run record is marked `running`, then `succeeded` with `generation_succeeded`, or
+  `failed` with `generation_failed`.
+- Responses and run records include only safe generation metadata such as report month, output file
+  name, row counts, and whether a GCS object was produced.
+
+Still intentionally not implemented:
+
+- Delivery creation.
+- Email notification.
+- Cloud Scheduler job creation or recurring automation.
+- SQL editing, template mapping editing, or storage destination changes.
+- Signed URL generation from schedule execution.
