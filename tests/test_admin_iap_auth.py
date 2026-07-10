@@ -53,6 +53,25 @@ class _FlaskStub:
         return func
 
 
+class _OAuthCredentialsStub:
+    def __init__(
+        self,
+        token,
+        *,
+        refresh_token=None,
+        token_uri=None,
+        client_id=None,
+        client_secret=None,
+        scopes=None,
+    ):
+        self.token = token
+        self.refresh_token = refresh_token
+        self.token_uri = token_uri
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.scopes = scopes
+
+
 def _install_import_stubs():
     flask_stub = types.ModuleType("flask")
     flask_stub.Flask = _FlaskStub
@@ -65,21 +84,42 @@ def _install_import_stubs():
 
     google_stub = types.ModuleType("google")
     google_auth_stub = types.ModuleType("google.auth")
+    google_auth_exceptions_stub = types.ModuleType("google.auth.exceptions")
     google_auth_transport_stub = types.ModuleType("google.auth.transport")
     google_auth_transport_requests_stub = types.ModuleType("google.auth.transport.requests")
+    google_oauth2_stub = types.ModuleType("google.oauth2")
+    google_oauth2_credentials_stub = types.ModuleType("google.oauth2.credentials")
     google_cloud_stub = types.ModuleType("google.cloud")
+    googleapiclient_stub = types.ModuleType("googleapiclient")
+    googleapiclient_discovery_stub = types.ModuleType("googleapiclient.discovery")
+    googleapiclient_errors_stub = types.ModuleType("googleapiclient.errors")
+    googleapiclient_http_stub = types.ModuleType("googleapiclient.http")
     google_cloud_stub.bigquery = types.SimpleNamespace()
     google_cloud_stub.firestore = types.SimpleNamespace(Client=object)
     google_cloud_stub.secretmanager = types.SimpleNamespace()
     google_cloud_stub.storage = types.SimpleNamespace(Client=object)
+    google_auth_exceptions_stub.RefreshError = RuntimeError
     google_auth_transport_requests_stub.Request = object
+    google_oauth2_credentials_stub.Credentials = _OAuthCredentialsStub
+    googleapiclient_discovery_stub.build = lambda *args, **kwargs: None
+    googleapiclient_errors_stub.HttpError = RuntimeError
+    googleapiclient_http_stub.MediaFileUpload = object
+    googleapiclient_http_stub.MediaIoBaseDownload = object
     google_stub.auth = google_auth_stub
     google_stub.cloud = google_cloud_stub
+    google_stub.oauth2 = google_oauth2_stub
     sys.modules.setdefault("google", google_stub)
     sys.modules.setdefault("google.auth", google_auth_stub)
+    sys.modules.setdefault("google.auth.exceptions", google_auth_exceptions_stub)
     sys.modules.setdefault("google.auth.transport", google_auth_transport_stub)
     sys.modules.setdefault("google.auth.transport.requests", google_auth_transport_requests_stub)
+    sys.modules.setdefault("google.oauth2", google_oauth2_stub)
+    sys.modules.setdefault("google.oauth2.credentials", google_oauth2_credentials_stub)
     sys.modules.setdefault("google.cloud", google_cloud_stub)
+    sys.modules.setdefault("googleapiclient", googleapiclient_stub)
+    sys.modules.setdefault("googleapiclient.discovery", googleapiclient_discovery_stub)
+    sys.modules.setdefault("googleapiclient.errors", googleapiclient_errors_stub)
+    sys.modules.setdefault("googleapiclient.http", googleapiclient_http_stub)
 
     create_report_stub = types.ModuleType("create_report")
     create_report_stub.DEFAULT_TEMPLATE = "template.xlsx"
@@ -92,6 +132,7 @@ def _install_import_stubs():
         "add_delivery_version",
         "archive_report_definition",
         "create_delivery_record",
+        "create_scheduled_delivery_record",
         "create_report_definition",
         "download_report_definition_template",
         "find_delivery_by_token",

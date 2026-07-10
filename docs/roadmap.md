@@ -359,7 +359,9 @@ Schedule automation guarded executor validation foundation:
 - Execute guard validation stores only hashed idempotency metadata and rejects duplicate validated runs for the same schedule window.
 - `execute_step=generate` adds a separate manual generation path that also requires `confirm_generation=GENERATE_REPORTS`.
 - Scheduled generation reuses the published template and allowed GCS destination, then stores only safe generation metadata.
-- This step still does not create deliveries, send mail, create Cloud Scheduler jobs, edit SQL, edit template mappings, or change Drive/GCS destinations.
+- `execute_step=deliver` adds a separate manual delivery-record path that also requires `confirm_delivery=CREATE_DELIVERY_RECORDS` and explicit request-time `allowed_domains` or `allowed_emails`.
+- Scheduled delivery creation generates the report, creates an active delivery record, and stores only safe delivery metadata; it does not send email or post download URLs to Slack.
+- This step still does not send mail, create Cloud Scheduler jobs, edit SQL, edit template mappings, change Drive/GCS destinations, or persist per-report delivery allowlists on report definitions.
 
 Storage destination allowlist foundation:
 

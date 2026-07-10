@@ -18,6 +18,7 @@ from distribution import (
     add_delivery_version,
     archive_report_definition,
     create_delivery_record,
+    create_scheduled_delivery_record,
     create_report_definition,
     download_report_definition_template,
     find_delivery_by_token,
@@ -2587,7 +2588,7 @@ def _scheduled_generation_storage(context: dict) -> tuple[str, str]:
     return default_bucket, (gcs_prefix.strip("/") or default_prefix)
 
 
-def _run_scheduled_report_generation(context: dict) -> dict:
+def _generate_scheduled_report_for_schedule(context: dict) -> tuple[str, dict, dict]:
     report_id = str(context.get("report_id") or "").strip()
     local_date = str(context.get("local_date") or "").strip()
     project_id = _bigquery_project_id()
@@ -2621,8 +2622,46 @@ def _run_scheduled_report_generation(context: dict) -> dict:
         "free_rows": result.get("free_rows"),
         "has_gcs_object": bool(result.get("gcs_object") or result.get("gcs_uri")),
     }
+    return report_id, result, safe_result
+
+
+def _run_scheduled_report_generation(context: dict) -> dict:
+    report_id, _result, safe_result = _generate_scheduled_report_for_schedule(context)
     logging.warning(
         "ICE_REPORT_SCHEDULE_GENERATION_COMPLETED report_id=%s report_month=%s",
+        report_id,
+        safe_result["report_month"],
+    )
+    return safe_result
+
+
+def _run_scheduled_report_delivery(context: dict) -> dict:
+    report_id, result, safe_result = _generate_scheduled_report_for_schedule(context)
+    gcs_uri = str(result.get("gcs_uri") or "").strip()
+    if not gcs_uri:
+        raise ValueError("gcs_uri was not generated")
+
+    allowed_domains = context.get("allowed_domains") or []
+    allowed_emails = context.get("allowed_emails") or []
+    delivery = create_scheduled_delivery_record(
+        customer_name=str(context.get("customer_name") or context.get("name") or report_id),
+        report_month=str(safe_result.get("report_month") or ""),
+        gcs_uri=gcs_uri,
+        allowed_domains=allowed_domains,
+        allowed_emails=allowed_emails,
+        expires_days=int(os.environ.get("DEFAULT_EXPIRES_DAYS", "7")),
+        version_note="scheduled",
+    )
+    safe_result.update(
+        {
+            "status": "delivery_created",
+            "delivery": delivery,
+            "allowed_domain_count": delivery.get("allowed_domain_count"),
+            "allowed_email_count": delivery.get("allowed_email_count"),
+        }
+    )
+    logging.warning(
+        "ICE_REPORT_SCHEDULE_DELIVERY_CREATED report_id=%s report_month=%s",
         report_id,
         safe_result["report_month"],
     )
@@ -2638,8 +2677,11 @@ def report_definition_schedule_runs_route():
     payload = request.get_json(silent=True) or {}
     try:
         executor = None
-        if str(payload.get("execute_step") or "").strip().lower() == "generate":
+        execute_step = str(payload.get("execute_step") or "").strip().lower()
+        if execute_step == "generate":
             executor = _run_scheduled_report_generation
+        elif execute_step == "deliver":
+            executor = _run_scheduled_report_delivery
         result = run_report_definition_schedule_runs(payload, executor=executor)
     except ValueError as exc:
         _log_report_definition_action("schedule_run", "failure", "", 400)
