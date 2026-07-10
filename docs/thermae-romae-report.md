@@ -14,7 +14,8 @@ It is intentionally separate from the main `report_definitions` / delivery / OTP
 - Output: completed `.xlsx` uploaded to a Drive folder.
 
 This implementation does not create a delivery record, send email, create OTP/PIN download URLs,
-or attach Cloud Scheduler. Monthly automation is a later task.
+or create ICE Report Generator delivery records. Monthly automation uses a dedicated scheduled
+endpoint and remains separate from the main `report_definitions` scheduler.
 
 ## Environment
 
@@ -23,6 +24,9 @@ THERMAE_TEMPLATE_FILE_ID=1KvfIA96o17oHfTp5dWMCByL8THxU_Txp
 THERMAE_OUTPUT_FOLDER_ID=12kjj_xdQ-O6QAFl5QvDWXn4dUIYGlMCa
 THERMAE_SOURCE_TABLE=jumpplus-4a5f4.dataset_datamart_tables.report_plus_monthly_coin_content_report
 THERMAE_WORK_IDS=100040643,100040644
+THERMAE_SCHEDULED_RUNS_COLLECTION=thermae_scheduled_runs
+THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS=thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com
+THERMAE_SCHEDULER_AUDIENCE=https://report-generator-635067190197.asia-northeast1.run.app/admin/reports/thermae-romae/scheduled-generate
 ```
 
 `BIGQUERY_PROJECT_ID`, `PROJECT_ID`, or `GOOGLE_CLOUD_PROJECT` is used for the BigQuery client
@@ -56,6 +60,51 @@ The Cloud Run runtime service account must be able to:
 
 Do not record service account credentials, Drive access tokens, Admin keys, or raw API tokens in
 Notion, Slack, GitHub, logs, or screenshots.
+
+## Scheduled Execution Preparation
+
+Dedicated scheduled endpoint:
+
+```text
+POST /admin/reports/thermae-romae/scheduled-generate
+```
+
+Authentication:
+
+- Cloud Scheduler must call the endpoint with an OIDC token.
+- The OIDC service account email must be listed in
+  `THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS`.
+- The token audience must match `THERMAE_SCHEDULER_AUDIENCE`.
+- The endpoint is fail-closed when the allowlist is not configured.
+- Do not use `X-Admin-Key` for the recurring Scheduler job.
+
+Behavior:
+
+- If `target_month` is omitted, the previous month is generated.
+- A Firestore run record is created in `THERMAE_SCHEDULED_RUNS_COLLECTION`.
+- The document id is `YYYY-MM` for the target month.
+- Existing run records reject duplicate monthly execution with `409`.
+- The scheduled response and run record store only safe metadata:
+  target month, generated date, file name, whether a Drive file exists, row count, and totals.
+- The scheduled response and run record must not include Drive file id, Drive URL, token,
+  Signed URL, raw email, IP, user agent, SQL text, or Excel cell values.
+
+Cloud Scheduler job creation example:
+
+```powershell
+gcloud.cmd scheduler jobs create http thermae-romae-monthly-report `
+  --project=ice-sh `
+  --location=asia-northeast1 `
+  --schedule="0 9 10 * *" `
+  --time-zone="Asia/Tokyo" `
+  --uri="https://report-generator-635067190197.asia-northeast1.run.app/admin/reports/thermae-romae/scheduled-generate" `
+  --http-method=POST `
+  --oidc-service-account-email="thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com" `
+  --oidc-token-audience="https://report-generator-635067190197.asia-northeast1.run.app/admin/reports/thermae-romae/scheduled-generate"
+```
+
+Initial recommended cadence is monthly on the 10th at 09:00 JST. Adjust only after confirming
+BigQuery source data availability for the prior month.
 
 ## Manual Execution
 
@@ -109,10 +158,17 @@ Successful responses include:
 6. Confirm `支払通知書` print preview is not broken.
 7. Confirm Cloud Logging does not contain secret, PIN, raw email, token fragments, Admin key
    fingerprint, IP, user agent, Signed URL, SQL text, Excel cell values, or provider event JSON.
+8. For scheduled execution, call `/admin/reports/thermae-romae/scheduled-generate` with a valid
+   Cloud Scheduler OIDC token and an explicit historical `target_month` in a non-production test
+   window.
+9. Confirm a duplicate scheduled call for the same target month returns `409`.
+10. Confirm scheduled response, Firestore run record, and logs do not include Drive file id,
+    Drive URL, token, Signed URL, raw email, IP, user agent, SQL text, or Excel cell values.
 
 ## Rollback
 
 - Route Cloud Run traffic back to the previous public/admin revisions.
+- Pause or delete the `thermae-romae-monthly-report` Cloud Scheduler job if it has been created.
 - Revert the implementation PR if needed.
 - Remove only test output files from Drive after explicit confirmation.
 - Do not change existing `report_definitions`, delivery records, OTP/PIN flow, or scheduled

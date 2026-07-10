@@ -6,7 +6,7 @@ from io import BytesIO
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
@@ -49,6 +49,10 @@ app = Flask(__name__)
 
 TEMPLATE_PREVIEW_MAX_BYTES = int(os.environ.get("TEMPLATE_PREVIEW_MAX_BYTES", str(8 * 1024 * 1024)))
 RUNTIME_TEMPLATE_DIR = os.environ.get("RUNTIME_TEMPLATE_DIR", "/tmp/ice-report-templates")
+THERMAE_SCHEDULED_RUNS_COLLECTION = os.environ.get(
+    "THERMAE_SCHEDULED_RUNS_COLLECTION",
+    "thermae_scheduled_runs",
+)
 
 
 class RuntimeTemplateError(Exception):
@@ -2337,6 +2341,173 @@ def generate_thermae_romae():
         },
     )
     return jsonify({"result": result, **result})
+
+
+def _csv_env_set(name: str) -> set[str]:
+    return {
+        item.strip().lower()
+        for item in os.environ.get(name, "").replace(";", ",").split(",")
+        if item.strip()
+    }
+
+
+def _thermae_scheduler_allowed_service_accounts() -> set[str]:
+    return _csv_env_set("THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS")
+
+
+def _thermae_scheduler_audience() -> str:
+    return os.environ.get("THERMAE_SCHEDULER_AUDIENCE", "").strip() or request.base_url
+
+
+def _verify_thermae_scheduler_oidc_token(token: str, audience: str) -> dict:
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2 import id_token
+
+    return id_token.verify_oauth2_token(token, GoogleAuthRequest(), audience)
+
+
+def _check_thermae_scheduler_auth() -> tuple[bool, str]:
+    allowed = _thermae_scheduler_allowed_service_accounts()
+    if not allowed:
+        logging.error("ICE_REPORT_THERMAE_SCHEDULE_AUTH_NOT_CONFIGURED")
+        return False, "scheduler_auth_not_configured"
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.lower().startswith("bearer "):
+        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
+        return False, "missing_bearer_token"
+
+    token = auth.split(" ", 1)[1].strip()
+    if not token:
+        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
+        return False, "missing_bearer_token"
+
+    try:
+        claims = _verify_thermae_scheduler_oidc_token(token, _thermae_scheduler_audience())
+    except Exception:
+        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=invalid_oidc_token")
+        return False, "invalid_oidc_token"
+
+    email = _normalize_email(str(claims.get("email") or ""))
+    if not email or email not in allowed:
+        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=service_account_not_allowed")
+        return False, "service_account_not_allowed"
+
+    return True, ""
+
+
+def _safe_thermae_scheduled_result(result: dict) -> dict:
+    return {
+        "status": str(result.get("status") or "ok"),
+        "report": "thermae-romae",
+        "target_month": str(result.get("target_month") or ""),
+        "generated_date": str(result.get("generated_date") or ""),
+        "file_name": str(result.get("file_name") or ""),
+        "has_drive_file": bool(result.get("file_id")),
+        "detail_row_count": result.get("detail_row_count"),
+        "payment_total": result.get("payment_total"),
+        "tax": result.get("tax"),
+        "total_with_tax": result.get("total_with_tax"),
+    }
+
+
+def _thermae_scheduled_run_id(target_month: date) -> str:
+    return target_month.strftime("%Y-%m")
+
+
+@app.post("/admin/reports/thermae-romae/scheduled-generate")
+def scheduled_generate_thermae_romae():
+    ok, reason = _check_thermae_scheduler_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized", "reason": reason}), 401
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    target_month_text = str(payload.get("target_month") or "").strip() or None
+    generated_date = date.today()
+
+    try:
+        from thermae_romae_report import ThermaeReportError, generate_thermae_romae_report, parse_target_month
+
+        target_month = parse_target_month(target_month_text, today=generated_date)
+    except ImportError:
+        logging.error("ICE_REPORT_THERMAE_SCHEDULE_DEPENDENCY_MISSING")
+        return jsonify({"error": "dependency_missing"}), 500
+    except Exception as exc:
+        error_code = getattr(exc, "code", "thermae_romae_schedule_invalid_target_month")
+        status_code = int(getattr(exc, "status_code", 400) or 400)
+        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_REJECTED reason=%s", error_code)
+        return jsonify({"error": error_code}), status_code
+
+    run_id = _thermae_scheduled_run_id(target_month)
+    record_time = _now_utc()
+    db = firestore.Client()
+    run_ref = db.collection(THERMAE_SCHEDULED_RUNS_COLLECTION).document(run_id)
+    existing = run_ref.get()
+    if existing.exists:
+        existing_data = existing.to_dict() or {}
+        return jsonify(
+            {
+                "error": "duplicate_scheduled_run",
+                "target_month": target_month.isoformat(),
+                "status": existing_data.get("status", ""),
+            }
+        ), 409
+
+    run_ref.set(
+        {
+            "report": "thermae-romae",
+            "target_month": target_month.isoformat(),
+            "status": "running",
+            "result_code": "generation_started",
+            "created_at": record_time,
+            "updated_at": record_time,
+        }
+    )
+
+    try:
+        result = generate_thermae_romae_report(
+            project_id=project_id,
+            target_month_text=target_month.isoformat(),
+            today=generated_date,
+        )
+        safe_result = _safe_thermae_scheduled_result(result)
+    except ThermaeReportError as exc:
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        run_ref.update(
+            {
+                "status": "failed",
+                "result_code": getattr(exc, "code", "thermae_romae_schedule_failed"),
+                "updated_at": _now_utc(),
+            }
+        )
+        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_FAILED reason=%s", getattr(exc, "code", "failed"))
+        return jsonify({"error": getattr(exc, "code", "thermae_romae_schedule_failed")}), status_code
+    except Exception:
+        run_ref.update(
+            {
+                "status": "failed",
+                "result_code": "thermae_romae_schedule_failed",
+                "updated_at": _now_utc(),
+            }
+        )
+        logging.error("ICE_REPORT_THERMAE_SCHEDULE_FAILED")
+        return jsonify({"error": "thermae_romae_schedule_failed"}), 500
+
+    run_ref.update(
+        {
+            "status": "succeeded",
+            "result_code": "generation_succeeded",
+            "result": safe_result,
+            "updated_at": _now_utc(),
+        }
+    )
+    logging.warning(
+        "ICE_REPORT_THERMAE_SCHEDULE_COMPLETED target_month=%s has_drive_file=%s",
+        safe_result["target_month"],
+        safe_result["has_drive_file"],
+    )
+    return jsonify({"result": safe_result, **safe_result})
 
 
 @app.post("/deliveries")
