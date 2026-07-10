@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import google.auth
 import requests
@@ -38,6 +38,7 @@ REPORT_DEFINITION_EDITABLE_FIELDS = (
 REPORT_DEFINITION_SCHEDULE_TIME_PATTERN = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 REPORT_DEFINITION_SCHEDULE_RUN_IDEMPOTENCY_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{7,127}$")
 REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION = "RUN_DUE_REPORTS"
+REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION = "GENERATE_REPORTS"
 REPORT_DEFINITION_SCHEDULE_TIMEZONE_ALLOWLIST = {"Asia/Tokyo"}
 REPORT_DEFINITION_SCHEDULE_TIMEZONES = {
     "Asia/Tokyo": timezone(timedelta(hours=9), "Asia/Tokyo"),
@@ -774,6 +775,13 @@ def _schedule_run_mode(payload: dict[str, Any]) -> str:
     return mode
 
 
+def _schedule_run_execute_step(payload: dict[str, Any]) -> str:
+    step = str(payload.get("execute_step") or "validate").strip().lower()
+    if step not in {"validate", "generate"}:
+        raise ValueError("execute_step must be validate or generate")
+    return step
+
+
 def _schedule_run_idempotency_hash(value: Any) -> str:
     key = str(value or "").strip()
     if not key:
@@ -834,13 +842,29 @@ def _schedule_run_record_id(item: dict[str, Any], idempotency_key_hash: str) -> 
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
+def _safe_schedule_generation_result(result: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {
+        "status": str(result.get("status") or "generated"),
+        "report_month": str(result.get("report_month") or ""),
+        "output_file": str(result.get("output_file") or ""),
+        "has_gcs_object": bool(result.get("has_gcs_object", False)),
+    }
+    for key in ("paid_rows", "free_rows"):
+        value = result.get(key)
+        if isinstance(value, int):
+            safe[key] = value
+    return safe
+
+
 def run_report_definition_schedule_runs(
     payload: dict[str, Any] | None = None,
     *,
     now: datetime | None = None,
+    executor: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload = payload or {}
     mode = _schedule_run_mode(payload)
+    execute_step = _schedule_run_execute_step(payload)
     dry_run = mode != "execute"
     try:
         limit = int(payload.get("limit") or 100)
@@ -861,6 +885,11 @@ def run_report_definition_schedule_runs(
         if str(payload.get("confirm") or "").strip() != REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION:
             raise ValueError("execute confirmation is required")
         idempotency_key_hash = _schedule_run_idempotency_hash(payload.get("idempotency_key"))
+        if execute_step == "generate":
+            if str(payload.get("confirm_generation") or "").strip() != REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION:
+                raise ValueError("generation confirmation is required")
+            if executor is None:
+                raise ValueError("generation executor is required")
 
     db = get_firestore_client()
     query = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).limit(limit)
@@ -895,20 +924,64 @@ def run_report_definition_schedule_runs(
                 item["reason"] = "duplicate_run"
                 item["action"] = "duplicate"
             else:
-                run_ref.set(
-                    {
-                        "report_id": item["report_id"],
-                        "schedule_local_date": item["local_date"],
-                        "schedule_time": item["schedule"]["time_of_day"],
-                        "schedule_timezone": item["timezone"],
-                        "idempotency_key_hash": idempotency_key_hash,
-                        "status": "validated",
-                        "result_code": "execute_guard_validated",
-                        "created_at": record_time,
-                        "updated_at": record_time,
-                    }
-                )
-                item["action"] = "execute_guard_validated"
+                record = {
+                    "report_id": item["report_id"],
+                    "schedule_local_date": item["local_date"],
+                    "schedule_time": item["schedule"]["time_of_day"],
+                    "schedule_timezone": item["timezone"],
+                    "idempotency_key_hash": idempotency_key_hash,
+                    "execution_step": execute_step,
+                    "status": "validated",
+                    "result_code": "execute_guard_validated",
+                    "created_at": record_time,
+                    "updated_at": record_time,
+                }
+
+                if execute_step != "generate":
+                    run_ref.set(record)
+                    item["action"] = "execute_guard_validated"
+                else:
+                    run_ref.set(
+                        {
+                            **record,
+                            "status": "running",
+                            "result_code": "generation_started",
+                        }
+                    )
+                    try:
+                        public_definition = _public_report_definition(doc.id, definition)
+                        generation_result = _safe_schedule_generation_result(
+                            executor(  # type: ignore[misc]
+                                {
+                                    "report_id": item["report_id"],
+                                    "name": item["name"],
+                                    "local_date": item["local_date"],
+                                    "timezone": item["timezone"],
+                                    "schedule": item["schedule"],
+                                    "gcs_prefix": public_definition.get("gcs_prefix") or "",
+                                }
+                            )
+                        )
+                    except Exception:
+                        run_ref.update(
+                            {
+                                "status": "failed",
+                                "result_code": "generation_failed",
+                                "updated_at": utcnow(),
+                            }
+                        )
+                        raise
+
+                    run_ref.update(
+                        {
+                            "status": "succeeded",
+                            "result_code": "generation_succeeded",
+                            "generation": generation_result,
+                            "updated_at": utcnow(),
+                        }
+                    )
+                    item["action"] = "generated"
+                    item["generation"] = generation_result
 
         items.append(item)
 
@@ -935,11 +1008,13 @@ def run_report_definition_schedule_runs(
     eligible_items = [item for item in items if item["eligible"]]
     duplicate_items = [item for item in items if item["action"] == "duplicate"]
     validated_items = [item for item in items if item["action"] == "execute_guard_validated"]
+    generated_items = [item for item in items if item["action"] == "generated"]
 
     return {
         "generated_at": _format_dt(utcnow()),
         "evaluation_time": _format_dt(evaluation_time),
         "mode": mode,
+        "execute_step": execute_step,
         "dry_run": dry_run,
         "items": items,
         "due_items": due_items,
@@ -949,6 +1024,7 @@ def run_report_definition_schedule_runs(
             "due": len(due_items),
             "eligible": len(eligible_items),
             "validated": len(validated_items),
+            "generated": len(generated_items),
             "duplicates": len(duplicate_items),
             "skipped": len(items) - len(eligible_items) - len(duplicate_items),
         },

@@ -2570,6 +2570,65 @@ def report_definition_schedule_preview_route():
     return jsonify({"preview": preview, "result": preview})
 
 
+def _scheduled_generation_storage(context: dict) -> tuple[str, str]:
+    gcs_prefix = str(context.get("gcs_prefix") or "").strip().replace("\\", "/")
+    default_bucket = os.environ.get("BUCKET_NAME") or ""
+    default_prefix = os.environ.get("OBJECT_PREFIX", "reports/plus")
+
+    if gcs_prefix.startswith("gs://"):
+        bucket_and_prefix = gcs_prefix[5:]
+        bucket_name, _, object_prefix = bucket_and_prefix.partition("/")
+        if not bucket_name:
+            raise ValueError("scheduled generation bucket is required")
+        return bucket_name, (object_prefix.strip("/") or default_prefix)
+
+    if not default_bucket:
+        raise ValueError("BUCKET_NAME is required")
+    return default_bucket, (gcs_prefix.strip("/") or default_prefix)
+
+
+def _run_scheduled_report_generation(context: dict) -> dict:
+    report_id = str(context.get("report_id") or "").strip()
+    local_date = str(context.get("local_date") or "").strip()
+    project_id = _bigquery_project_id()
+    if not project_id:
+        raise ValueError("BIGQUERY_PROJECT_ID or PROJECT_ID is required")
+    if not report_id:
+        raise ValueError("report_id is required")
+    if not local_date:
+        raise ValueError("schedule local_date is required")
+
+    bucket_name, object_prefix = _scheduled_generation_storage(context)
+    today = datetime.strptime(local_date, "%Y-%m-%d").date()
+    template_context = _resolve_generation_template({"report_id": report_id})
+
+    try:
+        result = generate_report(
+            project_id=project_id,
+            bucket_name=bucket_name,
+            object_prefix=object_prefix,
+            template_path=template_context["template_path"],
+            today=today,
+        )
+    finally:
+        _cleanup_runtime_template(template_context.get("local_path") if template_context else None)
+
+    safe_result = {
+        "status": "generated",
+        "report_month": result.get("report_month") or "",
+        "output_file": result.get("output_file") or "",
+        "paid_rows": result.get("paid_rows"),
+        "free_rows": result.get("free_rows"),
+        "has_gcs_object": bool(result.get("gcs_object") or result.get("gcs_uri")),
+    }
+    logging.warning(
+        "ICE_REPORT_SCHEDULE_GENERATION_COMPLETED report_id=%s report_month=%s",
+        report_id,
+        safe_result["report_month"],
+    )
+    return safe_result
+
+
 @app.post("/report-definitions/schedule-runs")
 def report_definition_schedule_runs_route():
     ok, error_response = _check_admin()
@@ -2578,7 +2637,10 @@ def report_definition_schedule_runs_route():
 
     payload = request.get_json(silent=True) or {}
     try:
-        result = run_report_definition_schedule_runs(payload)
+        executor = None
+        if str(payload.get("execute_step") or "").strip().lower() == "generate":
+            executor = _run_scheduled_report_generation
+        result = run_report_definition_schedule_runs(payload, executor=executor)
     except ValueError as exc:
         _log_report_definition_action("schedule_run", "failure", "", 400)
         return jsonify({"error": str(exc)}), 400

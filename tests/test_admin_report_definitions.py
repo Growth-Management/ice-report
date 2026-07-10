@@ -648,6 +648,16 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
                 }
             )
 
+        with self.assertRaisesRegex(ValueError, "generation confirmation is required"):
+            distribution.run_report_definition_schedule_runs(
+                {
+                    "mode": "execute",
+                    "confirm": "RUN_DUE_REPORTS",
+                    "idempotency_key": "manual-2026-07-06-0900",
+                    "execute_step": "generate",
+                }
+            )
+
     def test_schedule_runs_execute_records_hashed_idempotency_and_rejects_duplicate(self):
         distribution = _load_distribution_module()
         docs = [
@@ -746,6 +756,121 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertEqual(second["counts"]["validated"], 0)
         self.assertEqual(second["items"][0]["action"], "duplicate")
         self.assertNotIn("manual-2026-07-06-0900", str(second))
+
+    def test_schedule_runs_generate_step_requires_extra_guard_and_returns_safe_result(self):
+        distribution = _load_distribution_module()
+        docs = [
+            (
+                "due-report",
+                {
+                    "name": "Due report",
+                    "status": "active",
+                    "current_version": 2,
+                    "gcs_prefix": "reports/plus/",
+                    "versions": [
+                        {"version": 1},
+                        {
+                            "version": 2,
+                            "template_gcs_uri": "gs://bucket/template.xlsx",
+                            "query_config_id": "plus-monthly-default-v1",
+                            "mapping_version_id": "plus-monthly-table-mapping-v1",
+                        },
+                    ],
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                    "query_sql": "select raw_email from table",
+                },
+            ),
+        ]
+        run_docs = {}
+        executor_contexts = []
+
+        class _Snapshot:
+            def __init__(self, doc_id, data, exists=True):
+                self.id = doc_id
+                self._data = data
+                self.exists = exists
+
+            def to_dict(self):
+                return dict(self._data)
+
+        class _ReportQuery:
+            def limit(self, limit):
+                return self
+
+            def stream(self):
+                return [_Snapshot(doc_id, data) for doc_id, data in docs]
+
+        class _RunRef:
+            def __init__(self, doc_id):
+                self.doc_id = doc_id
+
+            def get(self):
+                return _Snapshot(self.doc_id, run_docs.get(self.doc_id, {}), self.doc_id in run_docs)
+
+            def set(self, data):
+                run_docs[self.doc_id] = dict(data)
+
+            def update(self, data):
+                run_docs[self.doc_id].update(dict(data))
+
+        class _RunCollection:
+            def document(self, doc_id):
+                return _RunRef(doc_id)
+
+        class _Client:
+            def collection(self, name):
+                if name == distribution.FIRESTORE_COLLECTION_REPORT_DEFINITIONS:
+                    return _ReportQuery()
+                if name == distribution.FIRESTORE_COLLECTION_SCHEDULED_REPORT_RUNS:
+                    return _RunCollection()
+                raise AssertionError(name)
+
+        def _executor(context):
+            executor_contexts.append(dict(context))
+            return {
+                "status": "generated",
+                "report_month": "2026-06",
+                "output_file": "report.xlsx",
+                "has_gcs_object": True,
+                "gcs_uri": "gs://bucket/reports/plus/report.xlsx",
+                "local_path": "/tmp/report.xlsx",
+            }
+
+        distribution.get_firestore_client = lambda: _Client()
+        result = distribution.run_report_definition_schedule_runs(
+            {
+                "mode": "execute",
+                "execute_step": "generate",
+                "confirm": "RUN_DUE_REPORTS",
+                "confirm_generation": "GENERATE_REPORTS",
+                "idempotency_key": "manual-2026-07-06-0900",
+            },
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+            executor=_executor,
+        )
+
+        self.assertEqual(result["execute_step"], "generate")
+        self.assertEqual(result["counts"]["generated"], 1)
+        self.assertEqual(result["items"][0]["action"], "generated")
+        self.assertEqual(result["items"][0]["generation"]["report_month"], "2026-06")
+        self.assertEqual(executor_contexts[0]["report_id"], "due-report")
+        self.assertEqual(executor_contexts[0]["local_date"], "2026-07-06")
+        run_doc = next(iter(run_docs.values()))
+        self.assertEqual(run_doc["status"], "succeeded")
+        self.assertEqual(run_doc["result_code"], "generation_succeeded")
+        self.assertEqual(run_doc["generation"]["has_gcs_object"], True)
+        self.assertNotIn("raw_email", str(result))
+        self.assertNotIn("query_sql", str(result))
+        self.assertNotIn("template_gcs_uri", str(result))
+        self.assertNotIn("manual-2026-07-06-0900", str(result))
+        self.assertNotIn("gs://bucket", str(result))
+        self.assertNotIn("/tmp/report.xlsx", str(result))
 
     def test_report_definition_id_pattern_accepts_slug(self):
         distribution = _load_distribution_module()
