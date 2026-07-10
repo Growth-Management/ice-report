@@ -16,25 +16,65 @@ def _install_google_stubs():
 
     google_stub = sys.modules.get("google") or types.ModuleType("google")
     google_auth_stub = types.ModuleType("google.auth")
+    google_auth_exceptions_stub = types.ModuleType("google.auth.exceptions")
     google_auth_transport_stub = types.ModuleType("google.auth.transport")
     google_auth_transport_requests_stub = types.ModuleType("google.auth.transport.requests")
+    google_oauth2_stub = types.ModuleType("google.oauth2")
+    google_oauth2_credentials_stub = types.ModuleType("google.oauth2.credentials")
     google_cloud_stub = types.ModuleType("google.cloud")
+    googleapiclient_stub = types.ModuleType("googleapiclient")
+    googleapiclient_discovery_stub = types.ModuleType("googleapiclient.discovery")
+    googleapiclient_errors_stub = types.ModuleType("googleapiclient.errors")
+    googleapiclient_http_stub = types.ModuleType("googleapiclient.http")
 
     google_auth_stub.default = lambda: (types.SimpleNamespace(refresh=lambda request: None, token="token"), None)
+    google_auth_exceptions_stub.RefreshError = RuntimeError
     google_auth_transport_requests_stub.Request = object
+    google_oauth2_credentials_stub.Credentials = _OAuthCredentialsStub
     google_cloud_stub.bigquery = types.SimpleNamespace(Client=object, QueryJobConfig=object)
     google_cloud_stub.firestore = types.SimpleNamespace(Client=object, Query=types.SimpleNamespace(DESCENDING="DESC"))
     google_cloud_stub.secretmanager = types.SimpleNamespace()
     google_cloud_stub.storage = types.SimpleNamespace(Client=object)
+    googleapiclient_discovery_stub.build = lambda *args, **kwargs: None
+    googleapiclient_errors_stub.HttpError = RuntimeError
+    googleapiclient_http_stub.MediaFileUpload = object
+    googleapiclient_http_stub.MediaIoBaseDownload = object
 
     google_stub.auth = google_auth_stub
     google_stub.cloud = google_cloud_stub
+    google_stub.oauth2 = google_oauth2_stub
 
     sys.modules["google"] = google_stub
     sys.modules["google.auth"] = google_auth_stub
+    sys.modules["google.auth.exceptions"] = google_auth_exceptions_stub
     sys.modules["google.auth.transport"] = google_auth_transport_stub
     sys.modules["google.auth.transport.requests"] = google_auth_transport_requests_stub
+    sys.modules["google.oauth2"] = google_oauth2_stub
+    sys.modules["google.oauth2.credentials"] = google_oauth2_credentials_stub
     sys.modules["google.cloud"] = google_cloud_stub
+    sys.modules["googleapiclient"] = googleapiclient_stub
+    sys.modules["googleapiclient.discovery"] = googleapiclient_discovery_stub
+    sys.modules["googleapiclient.errors"] = googleapiclient_errors_stub
+    sys.modules["googleapiclient.http"] = googleapiclient_http_stub
+
+
+class _OAuthCredentialsStub:
+    def __init__(
+        self,
+        token,
+        *,
+        refresh_token=None,
+        token_uri=None,
+        client_id=None,
+        client_secret=None,
+        scopes=None,
+    ):
+        self.token = token
+        self.refresh_token = refresh_token
+        self.token_uri = token_uri
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.scopes = scopes
 
 
 def _load_distribution_module():
@@ -103,6 +143,7 @@ def _install_app_import_stubs():
         "add_delivery_version",
         "archive_report_definition",
         "create_delivery_record",
+        "create_scheduled_delivery_record",
         "create_report_definition",
         "download_report_definition_template",
         "find_delivery_by_token",
@@ -658,6 +699,31 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
                 }
             )
 
+        with self.assertRaisesRegex(ValueError, "delivery confirmation is required"):
+            distribution.run_report_definition_schedule_runs(
+                {
+                    "mode": "execute",
+                    "confirm": "RUN_DUE_REPORTS",
+                    "confirm_generation": "GENERATE_REPORTS",
+                    "idempotency_key": "manual-2026-07-06-0900",
+                    "execute_step": "deliver",
+                },
+                executor=lambda context: {},
+            )
+
+        with self.assertRaisesRegex(ValueError, "allowed_domains or allowed_emails is required"):
+            distribution.run_report_definition_schedule_runs(
+                {
+                    "mode": "execute",
+                    "confirm": "RUN_DUE_REPORTS",
+                    "confirm_generation": "GENERATE_REPORTS",
+                    "confirm_delivery": "CREATE_DELIVERY_RECORDS",
+                    "idempotency_key": "manual-2026-07-06-0900",
+                    "execute_step": "deliver",
+                },
+                executor=lambda context: {},
+            )
+
     def test_schedule_runs_execute_records_hashed_idempotency_and_rejects_duplicate(self):
         distribution = _load_distribution_module()
         docs = [
@@ -871,6 +937,138 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertNotIn("manual-2026-07-06-0900", str(result))
         self.assertNotIn("gs://bucket", str(result))
         self.assertNotIn("/tmp/report.xlsx", str(result))
+
+    def test_schedule_runs_deliver_step_requires_guard_and_returns_safe_result(self):
+        distribution = _load_distribution_module()
+        docs = [
+            (
+                "due-report",
+                {
+                    "name": "Due report",
+                    "customer_name": "Customer A",
+                    "status": "active",
+                    "current_version": 2,
+                    "gcs_prefix": "reports/plus/",
+                    "versions": [
+                        {"version": 1},
+                        {
+                            "version": 2,
+                            "template_gcs_uri": "gs://bucket/template.xlsx",
+                            "query_config_id": "plus-monthly-default-v1",
+                            "mapping_version_id": "plus-monthly-table-mapping-v1",
+                        },
+                    ],
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                    "query_sql": "select raw_email from table",
+                },
+            ),
+        ]
+        run_docs = {}
+        executor_contexts = []
+
+        class _Snapshot:
+            def __init__(self, doc_id, data, exists=True):
+                self.id = doc_id
+                self._data = data
+                self.exists = exists
+
+            def to_dict(self):
+                return dict(self._data)
+
+        class _ReportQuery:
+            def limit(self, limit):
+                return self
+
+            def stream(self):
+                return [_Snapshot(doc_id, data) for doc_id, data in docs]
+
+        class _RunRef:
+            def __init__(self, doc_id):
+                self.doc_id = doc_id
+
+            def get(self):
+                return _Snapshot(self.doc_id, run_docs.get(self.doc_id, {}), self.doc_id in run_docs)
+
+            def set(self, data):
+                run_docs[self.doc_id] = dict(data)
+
+            def update(self, data):
+                run_docs[self.doc_id].update(dict(data))
+
+        class _RunCollection:
+            def document(self, doc_id):
+                return _RunRef(doc_id)
+
+        class _Client:
+            def collection(self, name):
+                if name == distribution.FIRESTORE_COLLECTION_REPORT_DEFINITIONS:
+                    return _ReportQuery()
+                if name == distribution.FIRESTORE_COLLECTION_SCHEDULED_REPORT_RUNS:
+                    return _RunCollection()
+                raise AssertionError(name)
+
+        def _executor(context):
+            executor_contexts.append(dict(context))
+            return {
+                "status": "delivery_created",
+                "report_month": "2026-06",
+                "output_file": "report.xlsx",
+                "has_gcs_object": True,
+                "paid_rows": 10,
+                "free_rows": 2,
+                "allowed_domain_count": 1,
+                "allowed_email_count": 1,
+                "gcs_uri": "gs://bucket/reports/plus/report.xlsx",
+                "download_url": "https://example.com/d/raw-token",
+                "token": "raw-token",
+                "raw_email": "user@example.com",
+                "delivery": {
+                    "delivery_id": "delivery-1",
+                    "expires_at": "2026-07-13T00:00:00+00:00",
+                    "download_url": "https://example.com/d/raw-token",
+                    "token": "raw-token",
+                },
+            }
+
+        distribution.get_firestore_client = lambda: _Client()
+        result = distribution.run_report_definition_schedule_runs(
+            {
+                "mode": "execute",
+                "execute_step": "deliver",
+                "confirm": "RUN_DUE_REPORTS",
+                "confirm_generation": "GENERATE_REPORTS",
+                "confirm_delivery": "CREATE_DELIVERY_RECORDS",
+                "idempotency_key": "manual-2026-07-06-0900",
+                "allowed_domains": ["example.com"],
+                "allowed_emails": ["user@example.com"],
+            },
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+            executor=_executor,
+        )
+
+        self.assertEqual(result["execute_step"], "deliver")
+        self.assertEqual(result["counts"]["delivered"], 1)
+        self.assertEqual(result["items"][0]["action"], "delivery_created")
+        self.assertEqual(result["items"][0]["delivery"]["delivery_id"], "delivery-1")
+        self.assertEqual(result["items"][0]["delivery"]["allowed_domain_count"], 1)
+        self.assertEqual(executor_contexts[0]["customer_name"], "Customer A")
+        self.assertEqual(executor_contexts[0]["allowed_domains"], ["example.com"])
+        run_doc = next(iter(run_docs.values()))
+        self.assertEqual(run_doc["status"], "succeeded")
+        self.assertEqual(run_doc["result_code"], "delivery_succeeded")
+        self.assertEqual(run_doc["delivery"]["has_delivery_record"], True)
+        self.assertNotIn("raw-token", str(result))
+        self.assertNotIn("download_url", str(result))
+        self.assertNotIn("gs://bucket", str(result))
+        self.assertNotIn("user@example.com", str(result))
+        self.assertNotIn("template_gcs_uri", str(result))
+        self.assertNotIn("manual-2026-07-06-0900", str(result))
 
     def test_report_definition_id_pattern_accepts_slug(self):
         distribution = _load_distribution_module()

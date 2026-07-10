@@ -307,8 +307,39 @@ Implemented behavior:
 
 Still intentionally not implemented:
 
-- Delivery creation.
 - Email notification.
 - Cloud Scheduler job creation or recurring automation.
 - SQL editing, template mapping editing, or storage destination changes.
 - Signed URL generation from schedule execution.
+
+## Manual Delivery Record Foundation
+
+The third implementation adds a guarded manual delivery-record step after scheduled generation.
+
+Implemented behavior:
+
+- `POST /report-definitions/schedule-runs` supports `execute_step=deliver`.
+- Actual delivery-record creation requires all of:
+  - `mode=execute`
+  - `execute_step=deliver`
+  - `confirm=RUN_DUE_REPORTS`
+  - `confirm_generation=GENERATE_REPORTS`
+  - `confirm_delivery=CREATE_DELIVERY_RECORDS`
+  - a valid `idempotency_key`
+  - at least one `allowed_domains` or `allowed_emails` entry in the request payload
+  - an eligible due schedule
+- The endpoint generates the report with the published template, creates one active delivery
+  record for the generated GCS object, and stores only safe delivery metadata in the scheduled
+  run record.
+- Scheduled delivery creation does not send email and does not post the download URL to Slack.
+- Responses and run records include only safe metadata such as report month, output file name,
+  row counts, whether a delivery record exists, delivery id, expiry timestamp, and allowlist
+  counts.
+
+Still intentionally not implemented:
+
+- Email notification.
+- Cloud Scheduler job creation or recurring automation.
+- SQL editing, template mapping editing, or storage destination changes.
+- Signed URL generation from schedule execution.
+- Persisting per-report delivery allowlists on report definitions.

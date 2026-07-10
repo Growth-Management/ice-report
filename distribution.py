@@ -39,6 +39,7 @@ REPORT_DEFINITION_SCHEDULE_TIME_PATTERN = re.compile(r"^([01][0-9]|2[0-3]):[0-5]
 REPORT_DEFINITION_SCHEDULE_RUN_IDEMPOTENCY_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{7,127}$")
 REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION = "RUN_DUE_REPORTS"
 REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION = "GENERATE_REPORTS"
+REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION = "CREATE_DELIVERY_RECORDS"
 REPORT_DEFINITION_SCHEDULE_TIMEZONE_ALLOWLIST = {"Asia/Tokyo"}
 REPORT_DEFINITION_SCHEDULE_TIMEZONES = {
     "Asia/Tokyo": timezone(timedelta(hours=9), "Asia/Tokyo"),
@@ -276,6 +277,81 @@ def create_delivery_record(
     )
 
     return result
+
+
+def create_scheduled_delivery_record(
+    *,
+    customer_name: str,
+    report_month: str,
+    gcs_uri: str,
+    allowed_domains: list[str] | None = None,
+    allowed_emails: list[str] | None = None,
+    expires_days: int = DEFAULT_EXPIRES_DAYS,
+    version_note: str | None = None,
+) -> dict[str, Any]:
+    token = generate_token()
+    token_hash = hash_token(token)
+    now = utcnow()
+    expires_at = now + timedelta(days=expires_days)
+
+    bucket, object_name = parse_gcs_uri(gcs_uri)
+    file_name = object_name.rsplit("/", 1)[-1]
+    url = f"{PUBLIC_BASE_URL.rstrip('/')}/d/{token}" if PUBLIC_BASE_URL else f"/d/{token}"
+
+    normalized_allowed_emails = sorted(
+        {
+            normalize_email(e)
+            for e in (allowed_emails or [])
+            if str(e).strip()
+        }
+    )
+    normalized_allowed_domains = sorted(
+        {
+            d.strip().lower()
+            for d in (allowed_domains or [])
+            if str(d).strip()
+        }
+    )
+
+    doc = {
+        "token_hash": token_hash,
+        "token": token,
+        "public_download_url": url,
+        "customer_name": customer_name,
+        "report_month": report_month,
+        "current_version": 1,
+        "active": True,
+        "expires_at": expires_at,
+        "allowed_domains": normalized_allowed_domains,
+        "allowed_emails": normalized_allowed_emails,
+        "versions": [
+            {
+                "version": 1,
+                "gcs_uri": gcs_uri,
+                "bucket": bucket,
+                "object_name": object_name,
+                "file_name": file_name,
+                "created_at": now,
+                "note": version_note or "scheduled",
+            }
+        ],
+        "created_at": now,
+        "updated_at": now,
+        "source": "schedule_run",
+    }
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_DELIVERIES).document()
+    ref.set(doc)
+
+    return {
+        "delivery_id": ref.id,
+        "expires_at": expires_at.isoformat(),
+        "report_month": report_month,
+        "output_file": file_name,
+        "allowed_domain_count": len(normalized_allowed_domains),
+        "allowed_email_count": len(normalized_allowed_emails),
+    }
 
 
 def _format_dt(value: Any) -> Any:
@@ -777,8 +853,8 @@ def _schedule_run_mode(payload: dict[str, Any]) -> str:
 
 def _schedule_run_execute_step(payload: dict[str, Any]) -> str:
     step = str(payload.get("execute_step") or "validate").strip().lower()
-    if step not in {"validate", "generate"}:
-        raise ValueError("execute_step must be validate or generate")
+    if step not in {"validate", "generate", "deliver"}:
+        raise ValueError("execute_step must be validate, generate, or deliver")
     return step
 
 
@@ -856,6 +932,50 @@ def _safe_schedule_generation_result(result: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _schedule_run_allowed_domains(payload: dict[str, Any]) -> list[str]:
+    value = payload.get("allowed_domains")
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raise ValueError("allowed_domains must be a list")
+    return sorted({item.lower() for item in raw_items if item})
+
+
+def _schedule_run_allowed_emails(payload: dict[str, Any]) -> list[str]:
+    value = payload.get("allowed_emails")
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raise ValueError("allowed_emails must be a list")
+    return sorted({normalize_email(item) for item in raw_items if item})
+
+
+def _safe_schedule_delivery_result(result: dict[str, Any]) -> dict[str, Any]:
+    delivery = result.get("delivery") if isinstance(result.get("delivery"), dict) else result
+    safe: dict[str, Any] = {
+        "status": str(result.get("status") or delivery.get("status") or "delivery_created"),
+        "report_month": str(result.get("report_month") or delivery.get("report_month") or ""),
+        "output_file": str(result.get("output_file") or delivery.get("output_file") or ""),
+        "has_gcs_object": bool(result.get("has_gcs_object", False)),
+        "has_delivery_record": bool(delivery.get("delivery_id")),
+        "delivery_id": str(delivery.get("delivery_id") or ""),
+        "expires_at": str(delivery.get("expires_at") or ""),
+    }
+    for key in ("paid_rows", "free_rows", "allowed_domain_count", "allowed_email_count"):
+        value = result.get(key)
+        if isinstance(value, int):
+            safe[key] = value
+    return safe
+
+
 def run_report_definition_schedule_runs(
     payload: dict[str, Any] | None = None,
     *,
@@ -885,11 +1005,21 @@ def run_report_definition_schedule_runs(
         if str(payload.get("confirm") or "").strip() != REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION:
             raise ValueError("execute confirmation is required")
         idempotency_key_hash = _schedule_run_idempotency_hash(payload.get("idempotency_key"))
-        if execute_step == "generate":
+        if execute_step in {"generate", "deliver"}:
             if str(payload.get("confirm_generation") or "").strip() != REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION:
                 raise ValueError("generation confirmation is required")
             if executor is None:
                 raise ValueError("generation executor is required")
+        if execute_step == "deliver":
+            if str(payload.get("confirm_delivery") or "").strip() != REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION:
+                raise ValueError("delivery confirmation is required")
+            allowed_domains = _schedule_run_allowed_domains(payload)
+            allowed_emails = _schedule_run_allowed_emails(payload)
+            if not allowed_domains and not allowed_emails:
+                raise ValueError("allowed_domains or allowed_emails is required")
+        else:
+            allowed_domains = []
+            allowed_emails = []
 
     db = get_firestore_client()
     query = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).limit(limit)
@@ -937,51 +1067,61 @@ def run_report_definition_schedule_runs(
                     "updated_at": record_time,
                 }
 
-                if execute_step != "generate":
+                if execute_step == "validate":
                     run_ref.set(record)
                     item["action"] = "execute_guard_validated"
                 else:
+                    started_code = "generation_started" if execute_step == "generate" else "delivery_started"
                     run_ref.set(
                         {
                             **record,
                             "status": "running",
-                            "result_code": "generation_started",
+                            "result_code": started_code,
                         }
                     )
                     try:
                         public_definition = _public_report_definition(doc.id, definition)
-                        generation_result = _safe_schedule_generation_result(
-                            executor(  # type: ignore[misc]
-                                {
-                                    "report_id": item["report_id"],
-                                    "name": item["name"],
-                                    "local_date": item["local_date"],
-                                    "timezone": item["timezone"],
-                                    "schedule": item["schedule"],
-                                    "gcs_prefix": public_definition.get("gcs_prefix") or "",
-                                }
-                            )
+                        executor_result = executor(  # type: ignore[misc]
+                            {
+                                "report_id": item["report_id"],
+                                "name": item["name"],
+                                "customer_name": public_definition.get("customer_name") or item["name"],
+                                "local_date": item["local_date"],
+                                "timezone": item["timezone"],
+                                "schedule": item["schedule"],
+                                "gcs_prefix": public_definition.get("gcs_prefix") or "",
+                                "execute_step": execute_step,
+                                "allowed_domains": allowed_domains,
+                                "allowed_emails": allowed_emails,
+                            }
+                        )
+                        safe_result = (
+                            _safe_schedule_delivery_result(executor_result)
+                            if execute_step == "deliver"
+                            else _safe_schedule_generation_result(executor_result)
                         )
                     except Exception:
                         run_ref.update(
                             {
                                 "status": "failed",
-                                "result_code": "generation_failed",
+                                "result_code": "generation_failed" if execute_step == "generate" else "delivery_failed",
                                 "updated_at": utcnow(),
                             }
                         )
                         raise
 
+                    result_field = "generation" if execute_step == "generate" else "delivery"
+                    result_code = "generation_succeeded" if execute_step == "generate" else "delivery_succeeded"
                     run_ref.update(
                         {
                             "status": "succeeded",
-                            "result_code": "generation_succeeded",
-                            "generation": generation_result,
+                            "result_code": result_code,
+                            result_field: safe_result,
                             "updated_at": utcnow(),
                         }
                     )
-                    item["action"] = "generated"
-                    item["generation"] = generation_result
+                    item["action"] = "generated" if execute_step == "generate" else "delivery_created"
+                    item[result_field] = safe_result
 
         items.append(item)
 
@@ -1009,6 +1149,7 @@ def run_report_definition_schedule_runs(
     duplicate_items = [item for item in items if item["action"] == "duplicate"]
     validated_items = [item for item in items if item["action"] == "execute_guard_validated"]
     generated_items = [item for item in items if item["action"] == "generated"]
+    delivered_items = [item for item in items if item["action"] == "delivery_created"]
 
     return {
         "generated_at": _format_dt(utcnow()),
@@ -1025,6 +1166,7 @@ def run_report_definition_schedule_runs(
             "eligible": len(eligible_items),
             "validated": len(validated_items),
             "generated": len(generated_items),
+            "delivered": len(delivered_items),
             "duplicates": len(duplicate_items),
             "skipped": len(items) - len(eligible_items) - len(duplicate_items),
         },
