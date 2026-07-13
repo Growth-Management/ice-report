@@ -363,6 +363,13 @@ Schedule automation guarded executor validation foundation:
 - Scheduled delivery creation generates the report, creates an active delivery record, and stores only safe delivery metadata; it does not send email or post download URLs to Slack.
 - This step still does not send mail, create Cloud Scheduler jobs, edit SQL, edit template mappings, change Drive/GCS destinations, or persist per-report delivery allowlists on report definitions.
 
+Phase 9 close-out decision:
+
+- Main `report_definitions` schedule automation stops at guarded manual execution in Phase 9.
+- Automatic Cloud Scheduler attachment, notification delivery, and per-report delivery allowlist persistence are split to Phase 10.
+- Reason: production automation needs at least one explicitly eligible report definition, delivery allowlist ownership, notification destination policy, duplicate-run handling, rollback, and first-run smoke to be validated together.
+- Thermae Romae uses a separate dedicated scheduled endpoint and Cloud Scheduler job; it does not change the Phase 9 decision for the main `report_definitions` scheduler.
+
 Storage destination allowlist foundation:
 
 - Admin API/UI can show the configured report definition storage allowlist.
@@ -378,7 +385,7 @@ Thermae Romae Drive-output report:
 - The first implementation adds `POST /admin/reports/thermae-romae/generate`.
 - This report downloads an `.xlsx` template directly from Drive, writes the workbook with openpyxl, and uploads the completed `.xlsx` back to Drive.
 - It intentionally stays outside the main `report_definitions` / delivery / OTP flow.
-- Monthly automation / Cloud Scheduler attachment remains a later task.
+- Monthly automation uses a dedicated OIDC-protected endpoint and Cloud Scheduler job, documented in `docs/thermae-romae-report.md`.
 - Initial implementation and the first several months of Drive access use normal OAuth for `sinohara@impress.co.jp` when Shared Drive policy blocks service account sharing.
 - After the initial OAuth operating period, evaluate domain-wide delegation with a dedicated Workspace user. The target design is tracked in `docs/drive-domain-wide-delegation.md` and is expected to apply to broader ICE Report Generator Drive operations.
 - Responses and logs must not include secret, PIN, raw email, token fragments, Admin key fingerprint, IP, user agent, Signed URL, SQL text, Excel cell values, or provider event JSON.
