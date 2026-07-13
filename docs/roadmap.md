@@ -370,6 +370,18 @@ Phase 9 close-out decision:
 - Reason: production automation needs at least one explicitly eligible report definition, delivery allowlist ownership, notification destination policy, duplicate-run handling, rollback, and first-run smoke to be validated together.
 - Thermae Romae uses a separate dedicated scheduled endpoint and Cloud Scheduler job; it does not change the Phase 9 decision for the main `report_definitions` scheduler.
 
+Phase 10 scheduled automation productionization:
+
+- Phase 10 starts with an explicitly selected eligible report definition for the
+  first scheduled-delivery smoke.
+- First-smoke design is tracked in `docs/phase10-scheduled-delivery-smoke.md`.
+- Production inventory check on 2026-07-13 found no active eligible main
+  scheduler target: current listed definitions were archived and schedule
+  preview / schedule-runs dry-run returned zero checked items.
+- Cloud Scheduler attachment, notification/email policy, and per-report delivery
+  allowlist persistence remain separate Phase 10 tasks until the first manual
+  scheduled-delivery smoke succeeds.
+
 Storage destination allowlist foundation:
 
 - Admin API/UI can show the configured report definition storage allowlist.
