@@ -95,7 +95,7 @@ Cloud Scheduler job creation example:
 gcloud.cmd scheduler jobs create http thermae-romae-monthly-report `
   --project=ice-sh `
   --location=asia-northeast1 `
-  --schedule="0 9 10 * *" `
+  --schedule="0 9 2 * *" `
   --time-zone="Asia/Tokyo" `
   --uri="https://report-generator-635067190197.asia-northeast1.run.app/admin/reports/thermae-romae/scheduled-generate" `
   --http-method=POST `
@@ -103,7 +103,7 @@ gcloud.cmd scheduler jobs create http thermae-romae-monthly-report `
   --oidc-token-audience="https://report-generator-635067190197.asia-northeast1.run.app/admin/reports/thermae-romae/scheduled-generate"
 ```
 
-Initial recommended cadence is monthly on the 10th at 09:00 JST. Adjust only after confirming
+Initial recommended cadence is monthly on the 2nd at 09:00 JST. Adjust only after confirming
 BigQuery source data availability for the prior month.
 
 ## Manual Execution
