@@ -192,3 +192,24 @@ After this design is accepted, proceed in this order:
 4. Attach Cloud Scheduler only after the first manual scheduled-delivery smoke is
    successful and rollback conditions are recorded.
 5. Decide notification or email policy after the delivery path is proven.
+
+## Delivery Allowlist Persistence Update
+
+Phase 10 adds report-definition-level delivery allowlist metadata before Cloud
+Scheduler attachment.
+
+The persisted allowlist is intentionally limited:
+
+- allowed domains are stored normalized
+- allowed email addresses are stored only as deterministic hashes and counts
+- report definition responses return allowed domains and counts, not raw emails
+  or hashes
+
+Scheduled delivery execution may use the persisted domain allowlist when a
+request-time allowlist is omitted. Stored email hashes are for audit and
+configuration review only; they are not materialized back into raw email
+allowlists for delivery records.
+
+For the first manual smoke, an operator may still supply a request-time
+`allowed_emails` value. That value must not be copied into Notion, Slack, GitHub,
+logs, or screenshots.

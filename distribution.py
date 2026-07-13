@@ -37,6 +37,9 @@ REPORT_DEFINITION_EDITABLE_FIELDS = (
 )
 REPORT_DEFINITION_SCHEDULE_TIME_PATTERN = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 REPORT_DEFINITION_SCHEDULE_RUN_IDEMPOTENCY_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{7,127}$")
+REPORT_DEFINITION_DELIVERY_DOMAIN_PATTERN = re.compile(
+    r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
 REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION = "RUN_DUE_REPORTS"
 REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION = "GENERATE_REPORTS"
 REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION = "CREATE_DELIVERY_RECORDS"
@@ -92,6 +95,10 @@ def utcnow() -> datetime:
 
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
+
+
+def hash_normalized_email(email: str) -> str:
+    return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()
 
 
 def get_email_domain(email: str) -> str:
@@ -430,6 +437,9 @@ def _public_report_definition(
     schedule = dict(definition.get("schedule") or {})
     if "enabled" not in schedule:
         schedule["enabled"] = definition.get("schedule_enabled", False)
+    delivery_allowlist = _public_report_definition_delivery_allowlist(
+        definition.get("delivery_allowlist") or {}
+    )
 
     item = {
         "report_id": report_id,
@@ -455,6 +465,7 @@ def _public_report_definition(
         ),
         "schedule_enabled": bool(schedule.get("enabled", False)),
         "schedule": _public_report_definition_schedule(schedule),
+        "delivery_allowlist": delivery_allowlist,
         "created_at": _format_dt(definition.get("created_at")),
         "updated_at": _format_dt(definition.get("updated_at")),
         "archived_at": _format_dt(definition.get("archived_at")),
@@ -504,6 +515,70 @@ def _report_definition_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
     _validate_report_definition_storage(item)
     return item
+
+
+def _normalize_delivery_allowed_domains(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raise ValueError("allowed_domains must be a list")
+
+    domains = sorted({item.lower() for item in raw_items if item})
+    for domain in domains:
+        if not REPORT_DEFINITION_DELIVERY_DOMAIN_PATTERN.match(domain):
+            raise ValueError("allowed_domains contains invalid domain")
+    return domains
+
+
+def _normalize_delivery_allowed_email_hashes(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raise ValueError("allowed_emails must be a list")
+
+    email_hashes = []
+    for item in raw_items:
+        email = normalize_email(item)
+        if not email:
+            continue
+        if "@" not in email or not get_email_domain(email):
+            raise ValueError("allowed_emails contains invalid email")
+        email_hashes.append(hash_normalized_email(email))
+    return sorted(set(email_hashes))
+
+
+def _report_definition_delivery_allowlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed_domains = _normalize_delivery_allowed_domains(payload.get("allowed_domains"))
+    allowed_email_hashes = _normalize_delivery_allowed_email_hashes(payload.get("allowed_emails"))
+    return {
+        "allowed_domains": allowed_domains,
+        "allowed_email_hashes": allowed_email_hashes,
+        "allowed_domain_count": len(allowed_domains),
+        "allowed_email_count": len(allowed_email_hashes),
+    }
+
+
+def _public_report_definition_delivery_allowlist(allowlist: dict[str, Any]) -> dict[str, Any]:
+    allowed_domains = _normalize_delivery_allowed_domains(allowlist.get("allowed_domains"))
+    allowed_email_hashes = [
+        str(item)
+        for item in (allowlist.get("allowed_email_hashes") or [])
+        if str(item).strip()
+    ]
+    return {
+        "allowed_domains": allowed_domains,
+        "allowed_domain_count": int(allowlist.get("allowed_domain_count") or len(allowed_domains)),
+        "allowed_email_count": int(allowlist.get("allowed_email_count") or len(allowed_email_hashes)),
+        "updated_at": _format_dt(allowlist.get("updated_at")),
+    }
 
 
 def _split_allowlist(value: str | None, defaults: tuple[str, ...]) -> list[str]:
@@ -708,6 +783,31 @@ def set_report_definition_schedule(report_id: str, payload: dict[str, Any]) -> d
     update_doc = {
         "schedule": schedule_doc,
         "schedule_enabled": schedule["enabled"],
+        "updated_at": now,
+    }
+    ref.update(update_doc)
+
+    current = snap.to_dict() or {}
+    current.update(update_doc)
+    return _public_report_definition(report_id, current, include_versions=True)
+
+
+def set_report_definition_delivery_allowlist(report_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    report_id = _validate_report_id(report_id)
+    delivery_allowlist = _report_definition_delivery_allowlist_payload(payload)
+
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_REPORT_DEFINITIONS).document(report_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError("report_id not found")
+
+    now = utcnow()
+    update_doc = {
+        "delivery_allowlist": {
+            **delivery_allowlist,
+            "updated_at": now,
+        },
         "updated_at": now,
     }
     ref.update(update_doc)
@@ -933,16 +1033,7 @@ def _safe_schedule_generation_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _schedule_run_allowed_domains(payload: dict[str, Any]) -> list[str]:
-    value = payload.get("allowed_domains")
-    if value is None:
-        return []
-    if isinstance(value, str):
-        raw_items = [item.strip() for item in value.split(",")]
-    elif isinstance(value, list):
-        raw_items = [str(item).strip() for item in value]
-    else:
-        raise ValueError("allowed_domains must be a list")
-    return sorted({item.lower() for item in raw_items if item})
+    return _normalize_delivery_allowed_domains(payload.get("allowed_domains"))
 
 
 def _schedule_run_allowed_emails(payload: dict[str, Any]) -> list[str]:
@@ -956,6 +1047,16 @@ def _schedule_run_allowed_emails(payload: dict[str, Any]) -> list[str]:
     else:
         raise ValueError("allowed_emails must be a list")
     return sorted({normalize_email(item) for item in raw_items if item})
+
+
+def _schedule_run_definition_delivery_allowlist(definition: dict[str, Any]) -> dict[str, list[str]]:
+    allowlist = definition.get("delivery_allowlist") or {}
+    return {
+        "allowed_domains": _normalize_delivery_allowed_domains(allowlist.get("allowed_domains")),
+        # Raw emails are intentionally not stored on report definitions. Request-time
+        # allowed_emails may still be supplied for one-off manual smoke runs.
+        "allowed_emails": [],
+    }
 
 
 def _safe_schedule_delivery_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -1015,8 +1116,6 @@ def run_report_definition_schedule_runs(
                 raise ValueError("delivery confirmation is required")
             allowed_domains = _schedule_run_allowed_domains(payload)
             allowed_emails = _schedule_run_allowed_emails(payload)
-            if not allowed_domains and not allowed_emails:
-                raise ValueError("allowed_domains or allowed_emails is required")
         else:
             allowed_domains = []
             allowed_emails = []
@@ -1041,7 +1140,23 @@ def run_report_definition_schedule_runs(
             definition,
             now=evaluation_time,
         )
+        effective_allowed_domains = list(allowed_domains) if not dry_run and execute_step == "deliver" else []
+        effective_allowed_emails = list(allowed_emails) if not dry_run and execute_step == "deliver" else []
+        if not dry_run and execute_step == "deliver" and not effective_allowed_domains and not effective_allowed_emails:
+            definition_allowlist = _schedule_run_definition_delivery_allowlist(definition)
+            effective_allowed_domains = definition_allowlist["allowed_domains"]
+            effective_allowed_emails = definition_allowlist["allowed_emails"]
+
         eligible, reason = _schedule_run_eligibility(doc.id, definition, item)
+        if (
+            not dry_run
+            and execute_step == "deliver"
+            and eligible
+            and not effective_allowed_domains
+            and not effective_allowed_emails
+        ):
+            eligible = False
+            reason = "delivery_allowlist_required"
         item["eligible"] = eligible
         item["reason"] = reason
         item["action"] = "would_execute" if dry_run and eligible else "skip"
@@ -1091,8 +1206,8 @@ def run_report_definition_schedule_runs(
                                 "schedule": item["schedule"],
                                 "gcs_prefix": public_definition.get("gcs_prefix") or "",
                                 "execute_step": execute_step,
-                                "allowed_domains": allowed_domains,
-                                "allowed_emails": allowed_emails,
+                                "allowed_domains": effective_allowed_domains,
+                                "allowed_emails": effective_allowed_emails,
                             }
                         )
                         safe_result = (

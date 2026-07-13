@@ -156,6 +156,7 @@ def _install_import_stubs():
         "rollback_report_definition_template",
         "run_report_definition_schedule_runs",
         "set_delivery_active",
+        "set_report_definition_delivery_allowlist",
         "set_report_definition_schedule",
         "update_report_definition",
         "validate_delivery_access",

@@ -381,6 +381,10 @@ Phase 10 scheduled automation productionization:
 - Cloud Scheduler attachment, notification/email policy, and per-report delivery
   allowlist persistence remain separate Phase 10 tasks until the first manual
   scheduled-delivery smoke succeeds.
+- Per-report delivery allowlist persistence stores normalized domains and
+  hashed email identifiers on report definitions. Public responses show domains
+  and counts only, and scheduled delivery may use the persisted domains when a
+  request-time allowlist is omitted.
 
 Storage destination allowlist foundation:
 

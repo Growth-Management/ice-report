@@ -36,6 +36,7 @@ from distribution import (
     rollback_report_definition_version,
     rollback_report_definition_template,
     run_report_definition_schedule_runs,
+    set_report_definition_delivery_allowlist,
     set_report_definition_schedule,
     update_report_definition,
     render_download_form,
@@ -3158,6 +3159,28 @@ def set_report_definition_schedule_route(report_id: str):
         return jsonify({"error": "schedule update failed"}), 500
 
     _log_report_definition_action("schedule_update", "success", report_id, 200)
+    return jsonify({"item": result, "result": result})
+
+
+@app.post("/report-definitions/<report_id>/delivery-allowlist")
+def set_report_definition_delivery_allowlist_route(report_id: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = set_report_definition_delivery_allowlist(report_id, payload)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 400
+        _log_report_definition_action("delivery_allowlist_update", "failure", "", status_code)
+        return jsonify({"error": str(exc)}), status_code
+    except Exception:
+        logging.error("ICE_REPORT_DELIVERY_ALLOWLIST_UPDATE_FAILED")
+        _log_report_definition_action("delivery_allowlist_update", "failure", "", 500)
+        return jsonify({"error": "delivery allowlist update failed"}), 500
+
+    _log_report_definition_action("delivery_allowlist_update", "success", report_id, 200)
     return jsonify({"item": result, "result": result})
 
 

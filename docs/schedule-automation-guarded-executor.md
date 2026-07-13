@@ -372,3 +372,29 @@ Production inventory check on 2026-07-13 found no active eligible main
 schedule preview and schedule-runs dry-run returned zero checked items. Phase 10
 therefore starts by explicitly approving or creating one eligible target before
 any Cloud Scheduler attachment or notification automation.
+
+## Phase 10 Delivery Allowlist Persistence
+
+The next implementation adds a per-report delivery allowlist to report
+definitions.
+
+Implemented behavior:
+
+- Admin API can save delivery allowlist metadata at
+  `POST /report-definitions/<report_id>/delivery-allowlist`.
+- Report definitions store normalized allowed domains and hashed allowed email
+  identifiers only. Raw email addresses are not stored on report definitions.
+- Public report definition responses include allowed domains and allowlist
+  counts only. They do not include raw email addresses or email hashes.
+- `execute_step=deliver` can use a persisted domain allowlist when request-time
+  `allowed_domains` / `allowed_emails` are omitted.
+- If neither request-time nor persisted allowlist data is available, the
+  scheduled delivery candidate is skipped with `delivery_allowlist_required`
+  before generation or delivery creation starts.
+
+Still intentionally not implemented:
+
+- Email notification.
+- Cloud Scheduler job creation or recurring automation.
+- Materializing stored email hashes into raw delivery email allowlists.
+- Admin UI editing for the persisted delivery allowlist.
