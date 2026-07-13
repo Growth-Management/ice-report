@@ -343,3 +343,21 @@ Still intentionally not implemented:
 - SQL editing, template mapping editing, or storage destination changes.
 - Signed URL generation from schedule execution.
 - Persisting per-report delivery allowlists on report definitions.
+
+## Phase 9 Close-Out
+
+Phase 9 stops at guarded manual execution for the main `report_definitions` scheduler.
+
+The following work is intentionally split to Phase 10:
+
+- Automatic Cloud Scheduler attachment for main `report_definitions` schedules.
+- Notification or email delivery after scheduled generation.
+- Persisting per-report delivery allowlists on report definitions.
+- First production scheduled-delivery smoke with an explicitly eligible report definition.
+
+Rationale:
+
+- Main schedule automation has no current production eligible definition to run unattended.
+- Delivery notification policy and allowlist ownership must be confirmed before any recurring job can create user-visible access.
+- Rollback and duplicate-run handling must be validated with the first production target definition.
+- Thermae Romae uses a separate dedicated scheduled endpoint and Cloud Scheduler job, so it does not change the main scheduler Phase 9 boundary.
