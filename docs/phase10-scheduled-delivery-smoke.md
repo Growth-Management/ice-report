@@ -204,6 +204,8 @@ The persisted allowlist is intentionally limited:
 - allowed email addresses are stored only as deterministic hashes and counts
 - report definition responses return allowed domains and counts, not raw emails
   or hashes
+- Admin UI displays and updates only the safe response fields; email input is
+  one-way save input and is cleared after submission
 
 Scheduled delivery execution may use the persisted domain allowlist when a
 request-time allowlist is omitted. Stored email hashes are for audit and

@@ -385,6 +385,8 @@ Phase 10 scheduled automation productionization:
   hashed email identifiers on report definitions. Public responses show domains
   and counts only, and scheduled delivery may use the persisted domains when a
   request-time allowlist is omitted.
+- Admin UI can display and update persisted delivery allowlist metadata without
+  returning raw emails or email hashes.
 
 Storage destination allowlist foundation:
 
