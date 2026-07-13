@@ -361,3 +361,14 @@ Rationale:
 - Delivery notification policy and allowlist ownership must be confirmed before any recurring job can create user-visible access.
 - Rollback and duplicate-run handling must be validated with the first production target definition.
 - Thermae Romae uses a separate dedicated scheduled endpoint and Cloud Scheduler job, so it does not change the main scheduler Phase 9 boundary.
+
+## Phase 10 First Smoke Design
+
+The Phase 10 first scheduled-delivery smoke design is tracked in
+`docs/phase10-scheduled-delivery-smoke.md`.
+
+Production inventory check on 2026-07-13 found no active eligible main
+`report_definitions` target: all listed definitions were archived and both
+schedule preview and schedule-runs dry-run returned zero checked items. Phase 10
+therefore starts by explicitly approving or creating one eligible target before
+any Cloud Scheduler attachment or notification automation.
