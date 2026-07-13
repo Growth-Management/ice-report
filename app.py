@@ -943,6 +943,14 @@ def render_admin_ui() -> str:
       <button class="secondary" id="schedulePreviewButton" onclick="previewReportSchedules()">schedule dry-run</button>
     </div>
     <pre id="scheduleResult">not loaded</pre>
+    <div class="inline-fields">
+      <div class="field"><label>delivery allowed domains</label><input id="deliveryAllowlistDomains" placeholder="example.com, impress.co.jp"></div>
+      <div class="field"><label>delivery allowed emails</label><input id="deliveryAllowlistEmails" placeholder="operator@example.com"></div>
+    </div>
+    <div class="toolbar">
+      <button class="secondary" id="deliveryAllowlistSaveButton" onclick="saveDeliveryAllowlist()">delivery allowlist save</button>
+    </div>
+    <pre id="deliveryAllowlistResult">not loaded</pre>
     <div class="toolbar">
       <input id="definitionSearch" placeholder="report_id / name / owner / GCS prefixで検索" oninput="renderDefinitionsFromState()" style="min-width:260px;flex:1;">
       <select id="definitionStatusFilter" onchange="renderDefinitionsFromState()" style="width:150px;">
@@ -1277,6 +1285,13 @@ function schedulePayload() {
   };
 }
 
+function deliveryAllowlistPayload() {
+  return {
+    allowed_domains: splitList(document.getElementById("deliveryAllowlistDomains").value),
+    allowed_emails: splitList(document.getElementById("deliveryAllowlistEmails").value)
+  };
+}
+
 function setDefinitionButtons(disabled) {
   [
     "definitionCreateButton",
@@ -1289,6 +1304,7 @@ function setDefinitionButtons(disabled) {
     "queryMappingPublishButton",
     "scheduleSaveButton",
     "schedulePreviewButton",
+    "deliveryAllowlistSaveButton",
     "storageAllowlistButton"
   ].forEach(id => {
     const button = document.getElementById(id);
@@ -1311,7 +1327,9 @@ function clearDefinitionForm() {
     "definitionVersionNote",
     "templateVersionNote",
     "templateRollbackVersion",
-    "queryMappingVersionNote"
+    "queryMappingVersionNote",
+    "deliveryAllowlistDomains",
+    "deliveryAllowlistEmails"
   ].forEach(id => {
     const input = document.getElementById(id);
     if (input) {
@@ -1324,6 +1342,7 @@ function clearDefinitionForm() {
   document.getElementById("scheduleTimeOfDay").value = "09:00";
   document.getElementById("scheduleTimezone").value = "Asia/Tokyo";
   document.getElementById("scheduleResult").textContent = "not loaded";
+  document.getElementById("deliveryAllowlistResult").textContent = "not loaded";
   document.getElementById("storageAllowlistResult").textContent = "not loaded";
 }
 
@@ -1347,6 +1366,10 @@ function fillDefinitionForm(reportId) {
   document.getElementById("scheduleDayOfMonth").value = schedule.day_of_month || 1;
   document.getElementById("scheduleTimeOfDay").value = schedule.time_of_day || "09:00";
   document.getElementById("scheduleTimezone").value = schedule.timezone || "Asia/Tokyo";
+  const deliveryAllowlist = item.delivery_allowlist || {};
+  document.getElementById("deliveryAllowlistDomains").value = (deliveryAllowlist.allowed_domains || []).join(", ");
+  document.getElementById("deliveryAllowlistEmails").value = "";
+  document.getElementById("deliveryAllowlistResult").textContent = JSON.stringify(deliveryAllowlist, null, 2);
   document.getElementById("definitionResult").textContent = "編集中: " + (item.report_id || "");
 }
 
@@ -1697,6 +1720,43 @@ async function previewReportSchedules() {
   }
 }
 
+async function saveDeliveryAllowlist() {
+  if (reportDefinitionInProgress) {
+    return;
+  }
+
+  const reportId = document.getElementById("definitionId").value;
+  const resultEl = document.getElementById("deliveryAllowlistResult");
+  const button = document.getElementById("deliveryAllowlistSaveButton");
+
+  if (!reportId) {
+    resultEl.textContent = "report_id is required";
+    return;
+  }
+
+  reportDefinitionInProgress = true;
+  button.disabled = true;
+  resultEl.textContent = "saving delivery allowlist...";
+
+  try {
+    const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/delivery-allowlist", {
+      method: "POST",
+      body: JSON.stringify(deliveryAllowlistPayload())
+    });
+    const item = data.result || data.item || data;
+    resultEl.textContent = "delivery allowlist saved\n" + JSON.stringify(item.delivery_allowlist || item, null, 2);
+    document.getElementById("deliveryAllowlistEmails").value = "";
+    showToast("delivery allowlist saved");
+    delete reportDefinitionDetails[reportId];
+    await loadReportDefinitions();
+  } catch (e) {
+    resultEl.textContent = "delivery allowlist save failed\n" + e.message;
+  } finally {
+    reportDefinitionInProgress = false;
+    button.disabled = false;
+  }
+}
+
 async function loadStorageAllowlist() {
   const resultEl = document.getElementById("storageAllowlistResult");
   const button = document.getElementById("storageAllowlistButton");
@@ -1733,6 +1793,9 @@ function definitionSearchText(item) {
     item.schedule_enabled ? "schedule enabled" : "schedule disabled",
     item.schedule ? item.schedule.day_of_month : "",
     item.schedule ? item.schedule.time_of_day : "",
+    item.delivery_allowlist ? (item.delivery_allowlist.allowed_domains || []).join(" ") : "",
+    item.delivery_allowlist ? item.delivery_allowlist.allowed_domain_count : "",
+    item.delivery_allowlist ? item.delivery_allowlist.allowed_email_count : "",
     item.current_version
   ].join(" ").toLowerCase();
 }
@@ -1849,6 +1912,12 @@ function renderReportDefinitions(items) {
       schedule.time_of_day ? esc(schedule.time_of_day) : "",
       schedule.timezone ? esc(schedule.timezone) : ""
     ].filter(Boolean).join("<br>");
+    const deliveryAllowlist = item.delivery_allowlist || {};
+    const allowlistLines = [
+      (deliveryAllowlist.allowed_domains || []).length ? "domains: " + esc((deliveryAllowlist.allowed_domains || []).join(", ")) : "",
+      "domain count: " + esc(deliveryAllowlist.allowed_domain_count || 0),
+      "email count: " + esc(deliveryAllowlist.allowed_email_count || 0)
+    ].filter(Boolean).join("<br>");
 
     const reportId = item.report_id || "";
     return "<tr>" +
@@ -1859,6 +1928,7 @@ function renderReportDefinitions(items) {
       "<td class='definition-storage-cell'>" + (storageLines || "<span class='muted'>-</span>") + "</td>" +
       "<td>" + (ownerLines || "<span class='muted'>-</span>") + "</td>" +
       "<td>" + scheduleLines + "</td>" +
+      "<td>" + allowlistLines + "</td>" +
       "<td>" + esc(formatDateTime(item.updated_at || item.created_at || "")) + "<div class='row-actions' style='margin-top:8px;'><button class='small secondary' onclick=\"fillDefinitionForm('" + attr(reportId) + "')\">編集</button></div></td>" +
     "</tr>";
   }).join("");
@@ -1870,7 +1940,7 @@ function renderReportDefinitions(items) {
     "<tbody>" + rows + "</tbody></table></div>";
   const definitionHeader = el.querySelector(".definition-table thead tr");
   if (definitionHeader) {
-    definitionHeader.innerHTML = "<th>report_id</th><th>name</th><th>status</th><th>current</th><th>storage</th><th>owner</th><th>schedule</th><th>updated</th>";
+    definitionHeader.innerHTML = "<th>report_id</th><th>name</th><th>status</th><th>current</th><th>storage</th><th>owner</th><th>schedule</th><th>delivery allowlist</th><th>updated</th>";
   }
 }
 

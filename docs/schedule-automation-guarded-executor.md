@@ -386,6 +386,8 @@ Implemented behavior:
   identifiers only. Raw email addresses are not stored on report definitions.
 - Public report definition responses include allowed domains and allowlist
   counts only. They do not include raw email addresses or email hashes.
+- Admin UI can display and update the persisted delivery allowlist metadata.
+  Raw email input is accepted only when saving and is cleared after the response.
 - `execute_step=deliver` can use a persisted domain allowlist when request-time
   `allowed_domains` / `allowed_emails` are omitted.
 - If neither request-time nor persisted allowlist data is available, the
@@ -397,4 +399,3 @@ Still intentionally not implemented:
 - Email notification.
 - Cloud Scheduler job creation or recurring automation.
 - Materializing stored email hashes into raw delivery email allowlists.
-- Admin UI editing for the persisted delivery allowlist.
