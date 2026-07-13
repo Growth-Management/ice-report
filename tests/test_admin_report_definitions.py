@@ -162,6 +162,7 @@ def _install_app_import_stubs():
         "rollback_report_definition_version",
         "rollback_report_definition_template",
         "run_report_definition_schedule_runs",
+        "set_report_definition_delivery_allowlist",
         "set_delivery_active",
         "set_report_definition_schedule",
         "update_report_definition",
@@ -397,6 +398,34 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertNotIn("signed_url", str(item))
         self.assertNotIn("raw_email", str(item))
 
+    def test_public_report_definition_includes_safe_delivery_allowlist_metadata(self):
+        distribution = _load_distribution_module()
+
+        item = distribution._public_report_definition(
+            "monthly-downloads",
+            {
+                "delivery_allowlist": {
+                    "allowed_domains": ["example.com"],
+                    "allowed_email_hashes": ["a" * 64, "b" * 64],
+                    "allowed_email_count": 2,
+                    "allowed_emails": ["user@example.com"],
+                    "updated_at": datetime(2026, 7, 13, tzinfo=timezone.utc),
+                },
+            },
+        )
+
+        self.assertEqual(
+            item["delivery_allowlist"],
+            {
+                "allowed_domains": ["example.com"],
+                "allowed_domain_count": 1,
+                "allowed_email_count": 2,
+                "updated_at": "2026-07-13T00:00:00+00:00",
+            },
+        )
+        self.assertNotIn("user@example.com", str(item))
+        self.assertNotIn("a" * 64, str(item))
+
     def test_report_definition_schedule_payload_is_limited_to_safe_monthly_metadata(self):
         distribution = _load_distribution_module()
 
@@ -481,6 +510,65 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertEqual(updates[0]["schedule"]["time_of_day"], "08:15")
         self.assertTrue(updates[0]["schedule_enabled"])
         self.assertNotIn("raw_email", str(updates[0]))
+
+    def test_set_report_definition_delivery_allowlist_stores_hashes_and_safe_view(self):
+        distribution = _load_distribution_module()
+        doc_data = {
+            "name": "Monthly downloads",
+            "versions": [{"version": 1}],
+            "current_version": 1,
+        }
+        updates = []
+
+        class _Snapshot:
+            exists = True
+
+            def to_dict(self):
+                return dict(doc_data)
+
+        class _Document:
+            def get(self):
+                return _Snapshot()
+
+            def update(self, update_doc):
+                updates.append(update_doc)
+                doc_data.update(update_doc)
+
+        class _Collection:
+            def document(self, report_id):
+                self.report_id = report_id
+                return _Document()
+
+        class _Client:
+            def collection(self, name):
+                self.collection_name = name
+                return _Collection()
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        result = distribution.set_report_definition_delivery_allowlist(
+            "monthly-downloads",
+            {
+                "allowed_domains": ["Example.COM", "example.com"],
+                "allowed_emails": ["User@Example.com"],
+                "raw_email": "other@example.com",
+            },
+        )
+
+        saved_allowlist = updates[0]["delivery_allowlist"]
+        self.assertEqual(saved_allowlist["allowed_domains"], ["example.com"])
+        self.assertEqual(saved_allowlist["allowed_domain_count"], 1)
+        self.assertEqual(saved_allowlist["allowed_email_count"], 1)
+        self.assertEqual(
+            saved_allowlist["allowed_email_hashes"],
+            [distribution.hash_normalized_email("user@example.com")],
+        )
+        self.assertNotIn("User@Example.com", str(updates[0]))
+        self.assertNotIn("other@example.com", str(updates[0]))
+        self.assertEqual(result["delivery_allowlist"]["allowed_domains"], ["example.com"])
+        self.assertEqual(result["delivery_allowlist"]["allowed_email_count"], 1)
+        self.assertNotIn("allowed_email_hashes", result["delivery_allowlist"])
+        self.assertNotIn("user@example.com", str(result))
 
     def test_schedule_preview_returns_safe_due_candidates_without_generation(self):
         distribution = _load_distribution_module()
@@ -705,19 +793,6 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
                     "mode": "execute",
                     "confirm": "RUN_DUE_REPORTS",
                     "confirm_generation": "GENERATE_REPORTS",
-                    "idempotency_key": "manual-2026-07-06-0900",
-                    "execute_step": "deliver",
-                },
-                executor=lambda context: {},
-            )
-
-        with self.assertRaisesRegex(ValueError, "allowed_domains or allowed_emails is required"):
-            distribution.run_report_definition_schedule_runs(
-                {
-                    "mode": "execute",
-                    "confirm": "RUN_DUE_REPORTS",
-                    "confirm_generation": "GENERATE_REPORTS",
-                    "confirm_delivery": "CREATE_DELIVERY_RECORDS",
                     "idempotency_key": "manual-2026-07-06-0900",
                     "execute_step": "deliver",
                 },
@@ -1069,6 +1144,198 @@ class ReportDefinitionPublicViewTest(unittest.TestCase):
         self.assertNotIn("user@example.com", str(result))
         self.assertNotIn("template_gcs_uri", str(result))
         self.assertNotIn("manual-2026-07-06-0900", str(result))
+
+    def test_schedule_runs_deliver_step_uses_persisted_domain_allowlist(self):
+        distribution = _load_distribution_module()
+        docs = [
+            (
+                "due-report",
+                {
+                    "name": "Due report",
+                    "customer_name": "Customer A",
+                    "status": "active",
+                    "current_version": 2,
+                    "gcs_prefix": "reports/plus/",
+                    "delivery_allowlist": {
+                        "allowed_domains": ["example.com"],
+                        "allowed_email_hashes": [distribution.hash_normalized_email("user@example.com")],
+                    },
+                    "versions": [
+                        {"version": 1},
+                        {
+                            "version": 2,
+                            "template_gcs_uri": "gs://bucket/template.xlsx",
+                            "query_config_id": "plus-monthly-default-v1",
+                            "mapping_version_id": "plus-monthly-table-mapping-v1",
+                        },
+                    ],
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                },
+            ),
+        ]
+        run_docs = {}
+        executor_contexts = []
+
+        class _Snapshot:
+            def __init__(self, doc_id, data, exists=True):
+                self.id = doc_id
+                self._data = data
+                self.exists = exists
+
+            def to_dict(self):
+                return dict(self._data)
+
+        class _ReportQuery:
+            def limit(self, limit):
+                return self
+
+            def stream(self):
+                return [_Snapshot(doc_id, data) for doc_id, data in docs]
+
+        class _RunRef:
+            def __init__(self, doc_id):
+                self.doc_id = doc_id
+
+            def get(self):
+                return _Snapshot(self.doc_id, run_docs.get(self.doc_id, {}), self.doc_id in run_docs)
+
+            def set(self, data):
+                run_docs[self.doc_id] = dict(data)
+
+            def update(self, data):
+                run_docs[self.doc_id].update(dict(data))
+
+        class _RunCollection:
+            def document(self, doc_id):
+                return _RunRef(doc_id)
+
+        class _Client:
+            def collection(self, name):
+                if name == distribution.FIRESTORE_COLLECTION_REPORT_DEFINITIONS:
+                    return _ReportQuery()
+                if name == distribution.FIRESTORE_COLLECTION_SCHEDULED_REPORT_RUNS:
+                    return _RunCollection()
+                raise AssertionError(name)
+
+        def _executor(context):
+            executor_contexts.append(dict(context))
+            return {
+                "status": "delivery_created",
+                "report_month": "2026-06",
+                "output_file": "report.xlsx",
+                "has_gcs_object": True,
+                "allowed_domain_count": len(context["allowed_domains"]),
+                "allowed_email_count": len(context["allowed_emails"]),
+                "delivery": {
+                    "delivery_id": "delivery-1",
+                    "expires_at": "2026-07-13T00:00:00+00:00",
+                },
+            }
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        result = distribution.run_report_definition_schedule_runs(
+            {
+                "mode": "execute",
+                "execute_step": "deliver",
+                "confirm": "RUN_DUE_REPORTS",
+                "confirm_generation": "GENERATE_REPORTS",
+                "confirm_delivery": "CREATE_DELIVERY_RECORDS",
+                "idempotency_key": "manual-2026-07-06-0900",
+            },
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+            executor=_executor,
+        )
+
+        self.assertEqual(result["counts"]["delivered"], 1)
+        self.assertEqual(executor_contexts[0]["allowed_domains"], ["example.com"])
+        self.assertEqual(executor_contexts[0]["allowed_emails"], [])
+        self.assertEqual(result["items"][0]["delivery"]["allowed_domain_count"], 1)
+        self.assertNotIn("user@example.com", str(result))
+        self.assertNotIn(distribution.hash_normalized_email("user@example.com"), str(result))
+
+    def test_schedule_runs_deliver_step_skips_without_any_allowlist(self):
+        distribution = _load_distribution_module()
+        docs = [
+            (
+                "due-report",
+                {
+                    "name": "Due report",
+                    "status": "active",
+                    "current_version": 2,
+                    "gcs_prefix": "reports/plus/",
+                    "versions": [
+                        {"version": 1},
+                        {
+                            "version": 2,
+                            "template_gcs_uri": "gs://bucket/template.xlsx",
+                            "query_config_id": "plus-monthly-default-v1",
+                            "mapping_version_id": "plus-monthly-table-mapping-v1",
+                        },
+                    ],
+                    "schedule": {
+                        "enabled": True,
+                        "frequency": "monthly",
+                        "day_of_month": 6,
+                        "time_of_day": "09:00",
+                        "timezone": "Asia/Tokyo",
+                    },
+                },
+            ),
+        ]
+
+        class _Snapshot:
+            def __init__(self, doc_id, data):
+                self.id = doc_id
+                self._data = data
+
+            def to_dict(self):
+                return dict(self._data)
+
+        class _ReportQuery:
+            def limit(self, limit):
+                return self
+
+            def stream(self):
+                return [_Snapshot(doc_id, data) for doc_id, data in docs]
+
+        class _RunCollection:
+            def document(self, doc_id):
+                raise AssertionError("ineligible delivery must not create scheduled run records")
+
+        class _Client:
+            def collection(self, name):
+                if name == distribution.FIRESTORE_COLLECTION_REPORT_DEFINITIONS:
+                    return _ReportQuery()
+                if name == distribution.FIRESTORE_COLLECTION_SCHEDULED_REPORT_RUNS:
+                    return _RunCollection()
+                raise AssertionError(name)
+
+        distribution.get_firestore_client = lambda: _Client()
+
+        result = distribution.run_report_definition_schedule_runs(
+            {
+                "mode": "execute",
+                "execute_step": "deliver",
+                "confirm": "RUN_DUE_REPORTS",
+                "confirm_generation": "GENERATE_REPORTS",
+                "confirm_delivery": "CREATE_DELIVERY_RECORDS",
+                "idempotency_key": "manual-2026-07-06-0900",
+            },
+            now=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc),
+            executor=lambda context: {},
+        )
+
+        self.assertEqual(result["counts"]["delivered"], 0)
+        self.assertEqual(result["counts"]["eligible"], 0)
+        self.assertEqual(result["items"][0]["reason"], "delivery_allowlist_required")
+        self.assertEqual(result["items"][0]["action"], "skip")
 
     def test_report_definition_id_pattern_accepts_slug(self):
         distribution = _load_distribution_module()
