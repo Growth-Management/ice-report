@@ -1080,6 +1080,7 @@ published template runtime switch smoke:
 50. Confirm the uploaded Drive `.xlsx` opens in Excel and `支払通知書` print preview is not broken.
 51. Confirm the Thermae Romae report does not create delivery records, send email, create OTP/PIN download URLs, or create Cloud Scheduler jobs.
 52. During the initial OAuth operating period, confirm `DRIVE_AUTH_MODE=oauth`, OAuth secrets are injected from Secret Manager, and only the OAuth subject's Drive permissions are used for template read / output upload.
+52a. If testing Shared Drive service account access, use a no-traffic Cloud Run tag with `DRIVE_AUTH_MODE=adc`, confirm the runtime service account is a member of the Shared Drive itself, then confirm template read and output `.xlsx` creation through the Cloud Run runtime.
 53. If `DRIVE_AUTH_MODE=domain_wide_delegation` is enabled after the initial OAuth operating period, follow `docs/drive-domain-wide-delegation.md` and confirm the delegated Workspace user, not a personal operator account, owns Drive access.
 
 rollback:
