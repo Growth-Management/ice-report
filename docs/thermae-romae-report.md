@@ -63,6 +63,12 @@ Thermae Drive access with `DRIVE_AUTH_MODE=oauth` until the runtime service acco
 production Thermae Shared Drive itself and a no-traffic ADC smoke succeeds. This smoke did not write
 to the production output folder.
 
+Current operating decision: production output remains on `sinohara@impress.co.jp` OAuth. The formal
+fix is to add the runtime service account to the production Thermae Shared Drive and re-run the
+no-traffic ADC smoke. A staging Shared Drive plus separate Google Drive sync service is a possible
+fallback only if direct service account membership is not available; do not implement it until the
+extra operational surface is explicitly accepted.
+
 The Cloud Run runtime service account must be able to:
 
 - Read the target BigQuery table.

@@ -65,6 +65,11 @@ Important follow-up:
 - Do not switch production Thermae Drive access from OAuth to ADC until the runtime service account
   has been added to the production Thermae Shared Drive itself and a no-traffic smoke succeeds.
 - The 2026-07-17 smoke did not write to the production output folder.
+- Current operating decision: keep production Thermae Drive output on `sinohara@impress.co.jp`
+  OAuth. The formal fix is production Shared Drive membership for the runtime service account. If
+  that is difficult, a separate Google Drive sync service with its own Drive-authorized identity can
+  be considered, but keep it on hold because it moves the OAuth or delegated-user dependency to the
+  sync layer and adds operational complexity.
 
 ## Target State
 
