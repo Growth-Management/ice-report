@@ -56,6 +56,13 @@ as a member of the target Shared Drive itself. Folder-only sharing is not enough
 model. If the target Shared Drive can include `ice-report-runner@ice-sh.iam.gserviceaccount.com`,
 prefer an ADC no-traffic smoke before escalating to domain-wide delegation.
 
+2026-07-17 production template smoke update: a no-traffic ADC smoke using the production Thermae
+template and a test output folder failed with `drive_not_found`. The successful test folder and the
+production Thermae template/output folder are in different Shared Drives. Continue production
+Thermae Drive access with `DRIVE_AUTH_MODE=oauth` until the runtime service account is added to the
+production Thermae Shared Drive itself and a no-traffic ADC smoke succeeds. This smoke did not write
+to the production output folder.
+
 The Cloud Run runtime service account must be able to:
 
 - Read the target BigQuery table.
