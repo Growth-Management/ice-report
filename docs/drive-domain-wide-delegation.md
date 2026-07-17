@@ -56,6 +56,16 @@ Smoke result to keep as baseline:
   the target Shared Drive folder.
 - Cleanup: smoke tag removed, production traffic returned to the previous stable revision at 100%.
 
+Important follow-up:
+
+- On 2026-07-17, a no-traffic smoke using the production Thermae template and the already-validated
+  test output folder failed with `drive_not_found`.
+- The production Thermae template/output folder is in a different Shared Drive from the successful
+  2026-07-14 test folder.
+- Do not switch production Thermae Drive access from OAuth to ADC until the runtime service account
+  has been added to the production Thermae Shared Drive itself and a no-traffic smoke succeeds.
+- The 2026-07-17 smoke did not write to the production output folder.
+
 ## Target State
 
 Use a Google-managed service account with domain-wide delegation to impersonate a dedicated
