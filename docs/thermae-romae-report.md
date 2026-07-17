@@ -80,6 +80,38 @@ The Cloud Run runtime service account must be able to:
 Do not record service account credentials, Drive access tokens, Admin keys, or raw API tokens in
 Notion, Slack, GitHub, logs, or screenshots.
 
+## Production Shared Drive SA Membership Runbook
+
+Use this runbook only when moving the production Thermae Drive path from user OAuth toward ADC.
+This is a human Drive UI task followed by a Codex no-traffic smoke.
+
+Human Drive UI task:
+
+1. Open the Shared Drive that contains the production Thermae template and output folder.
+2. Add `ice-report-runner@ice-sh.iam.gserviceaccount.com` as a member of the Shared Drive itself.
+3. Do not rely on folder-only sharing.
+4. Start with the least role that can read the template and create files in the output folder. Raise
+   the role only if the no-traffic smoke fails with a permission error.
+5. Do not change production Cloud Run `DRIVE_AUTH_MODE` during this human task.
+
+Known production Drive objects:
+
+- Template file id: `1KvfIA96o17oHfTp5dWMCByL8THxU_Txp`
+- Output folder id: `12kjj_xdQ-O6QAFl5QvDWXn4dUIYGlMCa`
+- Parent folder id observed during metadata checks: `18cce3U5iJQi0nmMLN_I3OJ_dBWc2FksW`
+- Shared Drive id observed during metadata checks: `0ACOw_ATxMmLFUk9PVA`
+
+Codex follow-up after the human task:
+
+1. Create a no-traffic tagged Cloud Run revision with `DRIVE_AUTH_MODE=adc`.
+2. Use the production Thermae template and production Thermae output folder.
+3. Run `POST /admin/reports/thermae-romae/generate` with an explicit historical `target_month`.
+4. Confirm the call does not fail with `drive_not_found` or `drive_access_denied`.
+5. Confirm the output `.xlsx` is created in the production output folder.
+6. Remove the no-traffic smoke tag and confirm production traffic remains on the stable revision.
+7. Keep OAuth as the production baseline until the smoke result, rollback path, and monthly timing
+   are reviewed.
+
 ## Scheduled Execution Preparation
 
 Dedicated scheduled endpoint:
