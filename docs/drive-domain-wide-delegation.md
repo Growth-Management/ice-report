@@ -16,6 +16,46 @@ blocked direct sharing to the Cloud Run service account. Initial implementation 
 several months of operations should continue with this OAuth mode while usage, rotation cadence, and
 Drive ownership requirements are observed.
 
+On 2026-07-14, a no-traffic Cloud Run smoke confirmed that `DRIVE_AUTH_MODE=adc` can read a
+template and create a completed `.xlsx` in a Shared Drive when the Cloud Run runtime service account
+is added as a member of the Shared Drive itself. Folder-only sharing had previously failed with a
+Drive not found style error. Treat Shared Drive membership for
+`ice-report-runner@ice-sh.iam.gserviceaccount.com` as the preferred near-term alternative before
+implementing domain-wide delegation, where Workspace policy allows it.
+
+## Service Account Shared Drive Membership Alternative
+
+This option keeps Drive access under the Cloud Run runtime service account and does not require
+user OAuth or domain-wide delegation.
+
+Required shape:
+
+- `DRIVE_AUTH_MODE=adc`
+- Runtime service account: `ice-report-runner@ice-sh.iam.gserviceaccount.com`
+- The runtime service account is a member of the target Shared Drive, not only a folder-level share.
+- The template file and output folder are in that Shared Drive or otherwise readable/writable by the
+  runtime service account.
+
+Use this option when:
+
+- The Shared Drive can accept the runtime service account as a member.
+- A system-owned Drive identity is sufficient.
+- User impersonation, per-user ownership, or user-level audit identity is not required.
+
+Do not use this option as proof that Google Group based access works unless the smoke is repeated
+with the group as the Shared Drive member. Connector uploads by an operator account are only setup
+steps; the success condition is a Cloud Run runtime call creating the output file with ADC.
+
+Smoke result to keep as baseline:
+
+- Date: 2026-07-14 JST.
+- Service: `report-generator`.
+- Revision type: no-traffic tagged smoke revision.
+- Auth mode: `DRIVE_AUTH_MODE=adc`.
+- Result: `POST /admin/reports/thermae-romae/generate` succeeded and created the output `.xlsx` in
+  the target Shared Drive folder.
+- Cleanup: smoke tag removed, production traffic returned to the previous stable revision at 100%.
+
 ## Target State
 
 Use a Google-managed service account with domain-wide delegation to impersonate a dedicated
@@ -43,8 +83,8 @@ User OAuth is the approved initial operations model, but it is not the preferred
 - Client secret and refresh token rotation become operationally sensitive recurring work.
 
 Domain-wide delegation can move the operational identity to a dedicated Workspace user while keeping
-server-side execution under Cloud Run. Treat this as a formal migration candidate after the initial
-OAuth-based operating period has produced enough operational evidence.
+server-side execution under Cloud Run. Treat this as a formal migration candidate only when the
+Shared Drive membership alternative is not sufficient, or when a user-delegated identity is required.
 
 ## Google Workspace Prerequisites
 
@@ -146,3 +186,5 @@ monthly runs and rollback is no longer needed.
 - Whether this mode should become the default for all Drive backup operations or only for report
   outputs that require Shared Drive access.
 - Target timing for reconsidering OAuth after the first several months of operations.
+- Whether Shared Drive membership for the runtime service account is acceptable as the permanent
+  Drive access model for Thermae Romae and other Drive-output reports.

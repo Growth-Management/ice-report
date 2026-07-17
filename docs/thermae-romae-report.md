@@ -51,11 +51,17 @@ After several months of OAuth operation, evaluate Google Workspace domain-wide d
 service account can act on behalf of a dedicated Workspace user. This is expected to apply to broader
 ICE Report Generator Drive operations as well.
 
+2026-07-14 smoke update: `DRIVE_AUTH_MODE=adc` succeeded when the runtime service account was added
+as a member of the target Shared Drive itself. Folder-only sharing is not enough for this operating
+model. If the target Shared Drive can include `ice-report-runner@ice-sh.iam.gserviceaccount.com`,
+prefer an ADC no-traffic smoke before escalating to domain-wide delegation.
+
 The Cloud Run runtime service account must be able to:
 
 - Read the target BigQuery table.
 - Read the Drive template file, unless user OAuth is enabled.
 - Create files in the Drive output folder, unless user OAuth is enabled.
+- Be a member of the target Shared Drive when using `DRIVE_AUTH_MODE=adc` for Shared Drive paths.
 - Read OAuth Secret Manager secrets when `DRIVE_AUTH_MODE=oauth` and secret-name env vars are used.
 
 Do not record service account credentials, Drive access tokens, Admin keys, or raw API tokens in
@@ -151,6 +157,8 @@ Successful responses include:
 
 1. Confirm the Drive template file is shared with the Cloud Run runtime service account.
 2. Confirm the Drive output folder allows the runtime service account to create files.
+   - For Shared Drive + `DRIVE_AUTH_MODE=adc`, confirm the runtime service account is a Shared
+     Drive member, not only a folder-level share.
    - If `DRIVE_AUTH_MODE=oauth`, confirm the OAuth user has access instead.
 3. Run the API with an explicit historical `target_month`.
 4. Confirm the response has Drive `file_id`, `file_name`, and `webViewLink`.
@@ -170,6 +178,7 @@ Successful responses include:
 - Route Cloud Run traffic back to the previous public/admin revisions.
 - Pause or delete the `thermae-romae-monthly-report` Cloud Scheduler job if it has been created.
 - Revert the implementation PR if needed.
+- Remove no-traffic smoke tags after ADC or OAuth Drive tests.
 - Remove only test output files from Drive after explicit confirmation.
 - Do not change existing `report_definitions`, delivery records, OTP/PIN flow, or scheduled
   executor settings during rollback.

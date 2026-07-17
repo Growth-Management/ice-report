@@ -405,7 +405,8 @@ Thermae Romae Drive-output report:
 - It intentionally stays outside the main `report_definitions` / delivery / OTP flow.
 - Monthly automation uses a dedicated OIDC-protected endpoint and Cloud Scheduler job, documented in `docs/thermae-romae-report.md`.
 - Initial implementation and the first several months of Drive access use normal OAuth for `sinohara@impress.co.jp` when Shared Drive policy blocks service account sharing.
-- After the initial OAuth operating period, evaluate domain-wide delegation with a dedicated Workspace user. The target design is tracked in `docs/drive-domain-wide-delegation.md` and is expected to apply to broader ICE Report Generator Drive operations.
+- 2026-07-14 smoke confirmed `DRIVE_AUTH_MODE=adc` works when the Cloud Run runtime service account is added as a member of the target Shared Drive itself. Treat this as the preferred next candidate before domain-wide delegation where Workspace policy allows it.
+- After the initial OAuth operating period, evaluate domain-wide delegation with a dedicated Workspace user only if Shared Drive service account membership is insufficient. The target design is tracked in `docs/drive-domain-wide-delegation.md` and is expected to apply to broader ICE Report Generator Drive operations.
 - Responses and logs must not include secret, PIN, raw email, token fragments, Admin key fingerprint, IP, user agent, Signed URL, SQL text, Excel cell values, or provider event JSON.
 
 Cloud Run / smoke / rollback:
