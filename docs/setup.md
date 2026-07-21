@@ -93,6 +93,10 @@ python -m flask run --host 127.0.0.1 --port 8080
 - `BUCKET_NAME`
 - `REPORT_ALLOWED_GCS_PREFIXES`: optional comma-separated report definition GCS prefix allowlist
 - `REPORT_ALLOWED_DRIVE_FOLDERS`: optional comma-separated report definition Drive folder name/ID allowlist
+- `REPORT_DEFINITION_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS`: comma-separated service account emails allowed to call the main report definition Cloud Scheduler endpoint
+- `REPORT_DEFINITION_SCHEDULER_AUDIENCE`: optional pinned OIDC audience for `POST /admin/report-definitions/schedule-runs`
+- `REPORT_DEFINITION_SCHEDULER_EXECUTE_STEP`: optional `generate` or `deliver`; defaults to `deliver`
+- `REPORT_DEFINITION_SCHEDULER_IDEMPOTENCY_KEY`: optional stable idempotency key for recurring scheduler calls; defaults to `cloud-scheduler-report-definitions`
 
 任意設定または既定値のある主要項目:
 

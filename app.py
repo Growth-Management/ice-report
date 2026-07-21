@@ -15,6 +15,9 @@ from google.cloud import firestore, storage
 
 from create_report import DEFAULT_TEMPLATE, generate_report, preview_default_query_mapping
 from distribution import (
+    REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION,
+    REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION,
+    REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION,
     add_delivery_version,
     archive_report_definition,
     create_delivery_record,
@@ -2426,11 +2429,26 @@ def _thermae_scheduler_allowed_service_accounts() -> set[str]:
     return _csv_env_set("THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS")
 
 
+def _report_definition_scheduler_allowed_service_accounts() -> set[str]:
+    return _csv_env_set("REPORT_DEFINITION_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS")
+
+
 def _thermae_scheduler_audience() -> str:
     return os.environ.get("THERMAE_SCHEDULER_AUDIENCE", "").strip() or request.base_url
 
 
+def _report_definition_scheduler_audience() -> str:
+    return os.environ.get("REPORT_DEFINITION_SCHEDULER_AUDIENCE", "").strip() or request.base_url
+
+
 def _verify_thermae_scheduler_oidc_token(token: str, audience: str) -> dict:
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2 import id_token
+
+    return id_token.verify_oauth2_token(token, GoogleAuthRequest(), audience)
+
+
+def _verify_report_definition_scheduler_oidc_token(token: str, audience: str) -> dict:
     from google.auth.transport.requests import Request as GoogleAuthRequest
     from google.oauth2 import id_token
 
@@ -2467,6 +2485,39 @@ def _check_thermae_scheduler_auth() -> tuple[bool, str]:
     return True, ""
 
 
+def _check_report_definition_scheduler_auth() -> tuple[bool, str]:
+    allowed = _report_definition_scheduler_allowed_service_accounts()
+    if not allowed:
+        logging.error("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_NOT_CONFIGURED")
+        return False, "scheduler_auth_not_configured"
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.lower().startswith("bearer "):
+        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
+        return False, "missing_bearer_token"
+
+    token = auth.split(" ", 1)[1].strip()
+    if not token:
+        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
+        return False, "missing_bearer_token"
+
+    try:
+        claims = _verify_report_definition_scheduler_oidc_token(
+            token,
+            _report_definition_scheduler_audience(),
+        )
+    except Exception:
+        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=invalid_oidc_token")
+        return False, "invalid_oidc_token"
+
+    email = _normalize_email(str(claims.get("email") or ""))
+    if not email or email not in allowed:
+        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=service_account_not_allowed")
+        return False, "service_account_not_allowed"
+
+    return True, ""
+
+
 def _safe_thermae_scheduled_result(result: dict) -> dict:
     return {
         "status": str(result.get("status") or "ok"),
@@ -2480,6 +2531,42 @@ def _safe_thermae_scheduled_result(result: dict) -> dict:
         "tax": result.get("tax"),
         "total_with_tax": result.get("total_with_tax"),
     }
+
+
+def _report_definition_scheduler_execute_step(payload: dict) -> str:
+    execute_step = str(
+        payload.get("execute_step")
+        or os.environ.get("REPORT_DEFINITION_SCHEDULER_EXECUTE_STEP")
+        or "deliver"
+    ).strip().lower()
+    if execute_step not in {"generate", "deliver"}:
+        raise ValueError("unsupported scheduler execute_step")
+    return execute_step
+
+
+def _report_definition_scheduler_payload(payload: dict) -> dict:
+    execute_step = _report_definition_scheduler_execute_step(payload)
+    idempotency_key = str(
+        payload.get("idempotency_key")
+        or os.environ.get("REPORT_DEFINITION_SCHEDULER_IDEMPOTENCY_KEY")
+        or "cloud-scheduler-report-definitions"
+    ).strip()
+
+    scheduler_payload: dict = {
+        "mode": "execute",
+        "execute_step": execute_step,
+        "confirm": REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION,
+        "confirm_generation": REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION,
+        "idempotency_key": idempotency_key,
+    }
+    if execute_step == "deliver":
+        scheduler_payload["confirm_delivery"] = REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION
+
+    for key in ("report_ids", "limit", "evaluation_time"):
+        if key in payload:
+            scheduler_payload[key] = payload[key]
+
+    return scheduler_payload
 
 
 def _thermae_scheduled_run_id(target_month: date) -> str:
@@ -2934,6 +3021,30 @@ def report_definition_schedule_runs_route():
         return jsonify({"error": "schedule run failed"}), 500
 
     _log_report_definition_action("schedule_run", "success", "", 200)
+    return jsonify({"run": result, "result": result})
+
+
+@app.post("/admin/report-definitions/schedule-runs")
+def scheduled_report_definition_schedule_runs_route():
+    ok, reason = _check_report_definition_scheduler_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized", "reason": reason}), 401
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        scheduler_payload = _report_definition_scheduler_payload(payload)
+        execute_step = scheduler_payload["execute_step"]
+        executor = _run_scheduled_report_delivery if execute_step == "deliver" else _run_scheduled_report_generation
+        result = run_report_definition_schedule_runs(scheduler_payload, executor=executor)
+    except ValueError as exc:
+        _log_report_definition_action("scheduler_schedule_run", "failure", "", 400)
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logging.error("ICE_REPORT_DEFINITION_SCHEDULE_RUN_FAILED")
+        _log_report_definition_action("scheduler_schedule_run", "failure", "", 500)
+        return jsonify({"error": "schedule run failed"}), 500
+
+    _log_report_definition_action("scheduler_schedule_run", "success", "", 200)
     return jsonify({"run": result, "result": result})
 
 
