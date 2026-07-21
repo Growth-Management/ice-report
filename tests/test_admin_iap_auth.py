@@ -162,6 +162,9 @@ def _install_import_stubs():
         "validate_delivery_access",
     ):
         setattr(distribution_stub, name, lambda *args, **kwargs: None)
+    distribution_stub.REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION = "RUN_DUE_REPORTS"
+    distribution_stub.REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION = "GENERATE_REPORTS"
+    distribution_stub.REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION = "CREATE_DELIVERY_RECORDS"
     sys.modules.setdefault("distribution", distribution_stub)
 
     mail_provider_stub = types.ModuleType("mail_provider")
@@ -186,6 +189,10 @@ class AdminIapAuthTest(unittest.TestCase):
         "ADMIN_IAP_AUTH_ENABLED",
         "ADMIN_IAP_SERVICE_NAME",
         "K_SERVICE",
+        "REPORT_DEFINITION_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS",
+        "REPORT_DEFINITION_SCHEDULER_AUDIENCE",
+        "REPORT_DEFINITION_SCHEDULER_EXECUTE_STEP",
+        "REPORT_DEFINITION_SCHEDULER_IDEMPOTENCY_KEY",
         "THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS",
         "THERMAE_SCHEDULER_AUDIENCE",
     }
@@ -253,6 +260,56 @@ class AdminIapAuthTest(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(reason, "")
+
+    def test_report_definition_scheduler_auth_requires_allowed_service_account_config(self):
+        with app_module.app.test_request_context(
+            "/admin/report-definitions/schedule-runs",
+            headers={"Authorization": "Bearer token"},
+            method="POST",
+        ):
+            ok, reason = app_module._check_report_definition_scheduler_auth()
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "scheduler_auth_not_configured")
+
+    def test_report_definition_scheduler_auth_accepts_allowed_oidc_service_account(self):
+        with self._env(
+            REPORT_DEFINITION_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS="scheduler@ice-sh.iam.gserviceaccount.com",
+            REPORT_DEFINITION_SCHEDULER_AUDIENCE="https://example.com/admin/report-definitions/schedule-runs",
+        ):
+            with patch.object(
+                app_module,
+                "_verify_report_definition_scheduler_oidc_token",
+                return_value={"email": "scheduler@ice-sh.iam.gserviceaccount.com"},
+            ):
+                with app_module.app.test_request_context(
+                    "/admin/report-definitions/schedule-runs",
+                    headers={"Authorization": "Bearer token"},
+                    method="POST",
+                ):
+                    ok, reason = app_module._check_report_definition_scheduler_auth()
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_report_definition_scheduler_payload_uses_persisted_allowlist_path(self):
+        payload = app_module._report_definition_scheduler_payload(
+            {
+                "report_ids": ["hitotsubashi-plus-monthly"],
+                "allowed_emails": ["user@example.com"],
+                "allowed_domains": ["example.com"],
+            }
+        )
+
+        self.assertEqual(payload["mode"], "execute")
+        self.assertEqual(payload["execute_step"], "deliver")
+        self.assertEqual(payload["confirm"], "RUN_DUE_REPORTS")
+        self.assertEqual(payload["confirm_generation"], "GENERATE_REPORTS")
+        self.assertEqual(payload["confirm_delivery"], "CREATE_DELIVERY_RECORDS")
+        self.assertEqual(payload["report_ids"], ["hitotsubashi-plus-monthly"])
+        self.assertNotIn("allowed_emails", payload)
+        self.assertNotIn("allowed_domains", payload)
+        self.assertNotIn("user@example.com", str(payload))
 
     def test_thermae_scheduled_result_excludes_drive_url_and_file_id(self):
         safe = app_module._safe_thermae_scheduled_result(

@@ -397,5 +397,36 @@ Implemented behavior:
 Still intentionally not implemented:
 
 - Email notification.
-- Cloud Scheduler job creation or recurring automation.
+- Cloud Scheduler job creation.
 - Materializing stored email hashes into raw delivery email allowlists.
+
+## Phase 10 Cloud Scheduler OIDC Endpoint
+
+The runtime exposes a Cloud Scheduler-specific endpoint at:
+
+`POST /admin/report-definitions/schedule-runs`
+
+This endpoint is separate from the human/script admin API at
+`POST /report-definitions/schedule-runs`.
+
+Implemented behavior:
+
+- Authentication is fail-closed unless
+  `REPORT_DEFINITION_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS` is configured.
+- Requests must include a bearer OIDC token whose email claim matches the
+  configured service account allowlist.
+- Token audience defaults to the endpoint URL and can be pinned with
+  `REPORT_DEFINITION_SCHEDULER_AUDIENCE`.
+- The endpoint builds the guarded execute payload internally, including the
+  required confirmation strings and idempotency key.
+- The default `execute_step` is `deliver`; it can be set to `generate` with
+  `REPORT_DEFINITION_SCHEDULER_EXECUTE_STEP` or an explicit request payload.
+- Request-time `allowed_domains` and `allowed_emails` are intentionally ignored
+  by this endpoint. Recurring delivery must use the persisted per-report domain
+  allowlist.
+
+Still intentionally not implemented:
+
+- Creating or modifying Cloud Scheduler jobs.
+- Email notification.
+- Posting download URLs to Slack.
