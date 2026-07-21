@@ -11,6 +11,15 @@ Cloud Run `report-generator` のリリース手順です。運用確認や障害
 - Deploy impersonation service account: `ice-deployer@ice-sh.iam.gserviceaccount.com`
 - Image repository: `asia-northeast1-docker.pkg.dev/ice-sh/ice-report/report-generator`
 
+GitHub Actions deploy uses a deploy-specific Workload Identity Provider:
+
+- Workflow: `.github/workflows/deploy-cloud-run.yml`
+- GitHub Secret: `GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER`
+- The provider condition must allow repository `Growth-Management/ice-report`,
+  branch `main`, event `workflow_dispatch`, and workflow `Deploy Cloud Run`.
+- Do not reuse the Operations Read-Only Check provider if its condition is scoped
+  to `.github/workflows/operations-readonly-check.yml`.
+
 ## 1. 事前確認
 
 ```powershell
