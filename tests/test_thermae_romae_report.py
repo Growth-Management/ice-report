@@ -208,6 +208,7 @@ class ThermaeRomaeReportTest(unittest.TestCase):
             def __init__(self):
                 self.cells = {}
                 headers = list(report.DETAIL_HEADERS)
+                headers[headers.index("単価（税抜）")] = "単価"
                 for idx, header in enumerate(headers, start=1):
                     self.cell(row=1, column=idx).value = header
 
