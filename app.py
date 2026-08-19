@@ -13,7 +13,7 @@ from pathlib import Path
 from flask import Flask, jsonify, make_response, redirect, request
 from google.cloud import firestore, storage
 
-from create_report import DEFAULT_TEMPLATE, generate_report, preview_default_query_mapping
+from create_report import DEFAULT_TEMPLATE, generate_report, preview_default_query_mapping, previous_month_base
 from distribution import (
     REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION,
     REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION,
@@ -268,7 +268,7 @@ def _admin_iap_auth_failure_reason() -> str:
 
 
 def render_admin_ui() -> str:
-    return r"""
+    html = r"""
 <!doctype html>
 <html lang="ja">
 <head>
@@ -802,7 +802,8 @@ def render_admin_ui() -> str:
           <ul class="muted">
             <li>対象レポート定義が未選択(空欄): 既定テンプレート(report_id未指定)を使用。</li>
             <li>顧客名が空欄: <code>customer_name is required</code> エラー。</li>
-            <li>対象月が空欄: <code>report_month is required</code> エラー。</li>
+            <li>対象月が空欄: <code>report_month is required</code> エラー。既定値は生成時点の前月(実データと一致)。</li>
+            <li>対象月は配布記録のラベルであり、新規生成データの月を決めるものではない。GCS URIが空欄の新規生成では実データは常に前月分になる。</li>
             <li>許可ドメインが空欄: 既定ドメインを自動適用。</li>
             <li>生成ファイル名が空欄: 当日日付を使った標準ファイル名で生成。</li>
           </ul>
@@ -984,8 +985,9 @@ def render_admin_ui() -> str:
       <p class="help">未選択(空欄)の場合は既定テンプレート(report_id未指定)で生成します。</p>
       <div class="inline-fields">
         <div class="field"><label>顧客名</label><input id="createCustomer" placeholder="顧客名" value="一ツ橋企画"></div>
-        <div class="field"><label>対象月</label><input id="createMonth" placeholder="YYYY-MM" value="2026-04"></div>
+        <div class="field"><label>対象月</label><input id="createMonth" placeholder="YYYY-MM" value="__DEFAULT_REPORT_MONTH__"></div>
       </div>
+      <p class="help">対象月は配布記録のラベルです。GCS URIが空欄で新規生成する場合、実データは常に生成時点の前月分(BigQuery側の最新確定月)になり、既定値はそれに合わせています。手動で変更すると、ラベルと実データの月が一致しなくなります。</p>
       <div class="field"><label>許可メール カンマ区切り</label><input id="createEmails" placeholder="user@example.com, user2@example.com"></div>
       <div class="field"><label>許可ドメイン カンマ区切り</label><input id="createDomains" placeholder="空欄の場合は既定ドメインを使用"></div>
       <p class="help">空欄の場合は shueisha.co.jp, sur.co.jp, hitotsubashi.co.jp, impress.co.jp を許可します。</p>
@@ -2300,6 +2302,8 @@ loadLogs();
 </body>
 </html>
 """
+    default_report_month = previous_month_base(date.today()).strftime("%Y-%m")
+    return html.replace("__DEFAULT_REPORT_MONTH__", default_report_month)
 
 
 @app.get("/admin")

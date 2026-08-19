@@ -3,7 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -136,6 +136,9 @@ def _install_app_import_stubs():
     create_report_stub.DEFAULT_TEMPLATE = "template.xlsx"
     create_report_stub.generate_report = lambda *args, **kwargs: {}
     create_report_stub.preview_default_query_mapping = lambda *args, **kwargs: {}
+    create_report_stub.previous_month_base = (
+        lambda today=None: (today or date.today()).replace(day=1) - timedelta(days=1)
+    )
     sys.modules.setdefault("create_report", create_report_stub)
 
     distribution_stub = sys.modules.get("distribution") or types.ModuleType("distribution")
