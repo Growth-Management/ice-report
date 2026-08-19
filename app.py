@@ -997,7 +997,9 @@ def render_admin_ui() -> str:
         </div>
         <pre id="createResult">待機中</pre>
       </div>
+    </section>
 
+    <section>
       <div class="card">
         <h2>最新GCSファイル一覧</h2>
         <div class="field"><label>prefix</label><input id="gcsPrefix" value="reports/plus/"></div>
@@ -1007,31 +1009,29 @@ def render_admin_ui() -> str:
         <div id="gcsFiles" class="notice">未読み込み</div>
       </div>
     </section>
+  </div>
 
-    <section>
-      <div class="card">
-        <h2>配布一覧</h2>
-        <div class="toolbar">
-          <input id="deliverySearch" placeholder="顧客名 / delivery_id / 月 / ファイル名 / URLで検索" oninput="renderDeliveriesFromState()" style="min-width:260px;flex:1;">
-          <select id="deliveryStatusFilter" onchange="renderDeliveriesFromState()" style="width:150px;">
-            <option value="all">all</option>
-            <option value="active">active</option>
-            <option value="disabled">disabled</option>
-          </select>
-          <button class="secondary" onclick="loadDeliveries()">一覧を更新</button>
-        </div>
-        <div id="deliveries" class="notice">loading...</div>
-      </div>
+  <div class="card">
+    <h2>配布一覧</h2>
+    <div class="toolbar">
+      <input id="deliverySearch" placeholder="顧客名 / delivery_id / 月 / ファイル名 / URLで検索" oninput="renderDeliveriesFromState()" style="min-width:260px;flex:1;">
+      <select id="deliveryStatusFilter" onchange="renderDeliveriesFromState()" style="width:150px;">
+        <option value="all">all</option>
+        <option value="active">active</option>
+        <option value="disabled">disabled</option>
+      </select>
+      <button class="secondary" onclick="loadDeliveries()">一覧を更新</button>
+    </div>
+    <div id="deliveries" class="notice">loading...</div>
+  </div>
 
-      <div class="card">
-        <h2>ダウンロードログ</h2>
-        <div class="toolbar">
-          <input id="logSearch" placeholder="delivery_id / email / 顧客名 / fileで絞り込み" oninput="renderLogsFromState()" style="min-width:260px;flex:1;">
-          <button class="secondary" onclick="loadLogs()">全ログを更新</button>
-        </div>
-        <div id="logs" class="notice">loading...</div>
-      </div>
-    </section>
+  <div class="card">
+    <h2>ダウンロードログ</h2>
+    <div class="toolbar">
+      <input id="logSearch" placeholder="delivery_id / email / 顧客名 / fileで絞り込み" oninput="renderLogsFromState()" style="min-width:260px;flex:1;">
+      <button class="secondary" onclick="loadLogs()">全ログを更新</button>
+    </div>
+    <div id="logs" class="notice">loading...</div>
   </div>
   </div>
 </main>
