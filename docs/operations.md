@@ -1859,6 +1859,109 @@ Cloud Run では `SLACK_WEBHOOK_SECRET_NAME=slack-download-webhook-url` のよ�
 - delivery作成やversion追加など、最小の安全な操作で通知経路を確認する
 - 確認後、NotionへURL実値なしで結果を記録する
 
+## Drive OAuth Refresh Token失効時対応
+
+テルマエ・ロマエDrive出力(`DRIVE_AUTH_MODE=oauth`、subject `sinohara@impress.co.jp`)が使う
+OAuth client id / client secret / refresh tokenが失効・無効化された場合の切り分けとローテーション手順です。
+値そのものはこの手順中でも記録しません。
+
+対象Secret Manager secret(値は記録しない、名前のみ扱う):
+
+- `drive-oauth-client-id`
+- `drive-oauth-client-secret`
+- `drive-oauth-refresh-token`
+
+`drive_io.py` は毎回 `versions/latest` を参照するため、有効なsecret versionを追加するだけで
+次回呼び出しから反映されます。Cloud Runのredeployは不要です。
+
+### 1. 症状切り分け
+
+Thermae Romae生成系のエラーは原因ごとにコードが分かれます。ログはCloud Loggingで
+`resource.labels.service_name="report-generator"` に絞って確認し、以下のコードで切り分けます。
+
+- `drive_oauth_refresh_failed`: refresh tokenが失効・無効化されている(本手順の対象)
+- `drive_access_denied`: OAuth自体は有効だが、対象ファイル/フォルダへの権限がない
+- `drive_not_found`: Shared Drive/フォルダ/ファイルIDが解決できない(Drive共有設定の問題であり、
+  OAuth secretのローテーションでは解決しない)
+
+`drive_oauth_refresh_failed` 以外のコードでは、本手順ではなく
+[Production Shared Drive SA Membership Runbook](thermae-romae-report.md)や
+Drive共有設定の確認を先に行います。
+
+### 2. 事前確認
+
+```powershell
+gcloud secrets versions list drive-oauth-client-id --project=ice-sh
+gcloud secrets versions list drive-oauth-client-secret --project=ice-sh
+gcloud secrets versions list drive-oauth-refresh-token --project=ice-sh
+```
+
+確認観点:
+
+- 現在enabledなversionがどれか
+- 過去にdisableした不正なversion(例: BOM混入)が残っていないか
+- `DRIVE_OAUTH_CLIENT_ID_SECRET_NAME` 等のsecret名env varが正しいsecretを指しているか
+
+### 3. 新しいOAuth認証情報の発行
+
+Google Cloud Console(OAuth同意画面・認証情報)またはOAuthフローで、
+`sinohara@impress.co.jp` を主体としたDrive scope(`https://www.googleapis.com/auth/drive`)の
+client id / client secret / refresh tokenを再発行します。値はコマンド履歴やファイルに残さず、
+標準入力経由でSecret Managerへ直接登録します。
+
+```powershell
+# 値は貼り付け後に表示・保存しない。3つのsecretそれぞれで実行する
+$secure = Read-Host 'New value' -AsSecureString
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try {
+  $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  $plain | gcloud secrets versions add <drive-oauth-client-id|drive-oauth-client-secret|drive-oauth-refresh-token> `
+    --project=ice-sh `
+    --data-file=-
+} finally {
+  if ($bstr -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  }
+  $plain = $null
+}
+```
+
+新versionが有効化されたことを確認したら、失効済みの旧versionを明示的にdisableします。
+
+```powershell
+gcloud secrets versions disable <version番号> --secret=drive-oauth-refresh-token --project=ice-sh
+```
+
+保存時の注意:
+
+- ファイルへの書き出しやエディタへの貼り付けを経由しない
+- BOM付きで保存しない(過去に混入例あり。UTF-8 no-BOMで保存する)
+- 貼り付け後は端末履歴・クリップボードを速やかにクリアする
+
+### 4. 確認
+
+- redeployは不要(secretは`versions/latest`参照のため次回呼び出しから反映)
+- `POST /admin/reports/thermae-romae/generate` を明示的な過去`target_month`でno-traffic tag経由smokeし、
+  `drive_oauth_refresh_failed` が解消したことを確認する
+- 直近ログの `severity>=ERROR` が0件であることを確認する
+- 本番出力フォルダへ意図しないファイルを作成していないか確認する
+
+### 5. 記録
+
+Notionには次のみ記録します:
+
+- 実施日時、実施者
+- 失効の症状(ログのerror code、影響範囲)
+- ローテーション対象secret名(値は書かない)
+- 新versionの有効化日時、旧versionのdisable日時
+- smoke結果(成功/失敗、error codeの有無)
+
+記録しない内容:
+
+- client id / client secret / refresh token実値
+- Drive URL、Drive file id、Shared Drive id
+- OAuth認可コード、access token
+
 ## セキュリティ注意
 
 - Access Key、Secret、Admin Key、PIN、token、生メールアドレスをログやチケットに残さない
