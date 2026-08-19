@@ -34,6 +34,9 @@ DETAIL_HEADERS = (
     "売上件数",
     "支払額（税抜）",
 )
+DETAIL_HEADER_ALIASES = {
+    "単価（税抜）": ("単価（税抜）", "単価"),
+}
 DETAIL_TOTAL_LABELS = ("支払額計", "消費税額（※支払額計×0.1）", "税込計")
 DETAIL_DATA_START_ROW = 2
 DETAIL_TOTAL_START_ROW = 56
@@ -271,12 +274,25 @@ def _cell_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _header_column(values: dict[str, int], header: str) -> int | None:
+    for candidate in DETAIL_HEADER_ALIASES.get(header, (header,)):
+        if candidate in values:
+            return values[candidate]
+    return None
+
+
 def find_header_row(ws: Worksheet, required_headers: Iterable[str] = DETAIL_HEADERS) -> tuple[int, dict[str, int]]:
     required = tuple(required_headers)
     for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 30)):
         values = {_cell_text(cell.value): cell.column for cell in row if _cell_text(cell.value)}
-        if all(header in values for header in required):
-            return row[0].row, values
+        columns: dict[str, int] = {}
+        for header in required:
+            column = _header_column(values, header)
+            if column is None:
+                break
+            columns[header] = column
+        if len(columns) == len(required):
+            return row[0].row, columns
     raise ThermaeReportError("detail_header_not_found", "売上明細 header row not found")
 
 
