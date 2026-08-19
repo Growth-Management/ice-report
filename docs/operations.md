@@ -1885,7 +1885,7 @@ Thermae Romae生成系のエラーは原因ごとにコードが分かれます�
   OAuth secretのローテーションでは解決しない)
 
 `drive_oauth_refresh_failed` 以外のコードでは、本手順ではなく
-[Production Shared Drive SA Membership Runbook](thermae-romae-report.md)や
+`docs/thermae-romae-report.md` の「Production Shared Drive SA Membership Runbook」や
 Drive共有設定の確認を先に行います。
 
 ### 2. 事前確認
