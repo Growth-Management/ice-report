@@ -2194,8 +2194,15 @@ function updateSummary() {
 }
 
 async function loadLogs(deliveryId = "") {
+  const searchInput = document.getElementById("logSearch");
+
   if (deliveryId) {
     showAdminTab("logs");
+    if (searchInput) {
+      searchInput.value = deliveryId;
+    }
+  } else if (searchInput) {
+    searchInput.value = "";
   }
 
   const logsEl = document.getElementById("logs");
@@ -2236,11 +2243,26 @@ function renderLogsFromState(deliveryId = "") {
   updateSummary();
 }
 
+function clearLogsFilter() {
+  loadLogs();
+}
+
+function logsFilterNotice(deliveryId) {
+  if (!deliveryId) {
+    return "";
+  }
+  return "<div class='notice' style='margin-bottom:10px;'>" +
+    "delivery_id <code>" + esc(deliveryId) + "</code> の配布に絞り込み中" +
+    " <button class='small secondary' onclick='clearLogsFilter()'>絞り込み解除(全ログ表示)</button>" +
+    "</div>";
+}
+
 function renderLogs(items, deliveryId = "") {
   const el = document.getElementById("logs");
+  const filterNotice = logsFilterNotice(deliveryId);
 
   if (!items.length) {
-    el.innerHTML = "<p class='muted'>該当なし</p>";
+    el.innerHTML = filterNotice + "<p class='muted'>該当なし</p>";
     return;
   }
 
@@ -2256,7 +2278,8 @@ function renderLogs(items, deliveryId = "") {
   ).join("");
 
   el.innerHTML =
-    "<p class='muted'>loaded logs: " + items.length + "件 / delivery_id=" + esc(deliveryId || "all") + "</p>" +
+    filterNotice +
+    "<p class='muted'>loaded logs: " + items.length + "件</p>" +
     "<div class='table-wrap'><table>" +
     "<thead><tr><th>日時</th><th>delivery_id</th><th>顧客/月</th><th>email</th><th>version</th><th>file</th></tr></thead>" +
     "<tbody>" + rows + "</tbody></table></div>";
