@@ -2196,7 +2196,10 @@ function updateSummary() {
   document.getElementById("summaryDefinitionsLogs").textContent = String(definitions) + " / " + String(shownLogs);
 }
 
+let logsDeliveryFilter = "";
+
 async function loadLogs(deliveryId = "") {
+  logsDeliveryFilter = deliveryId;
   const searchInput = document.getElementById("logSearch");
 
   if (deliveryId) {
@@ -2218,7 +2221,7 @@ async function loadLogs(deliveryId = "") {
 
     const data = await api(path);
     logItems = data.items || data.logs || [];
-    renderLogsFromState(deliveryId);
+    renderLogsFromState();
     updateSummary();
 
   } catch (e) {
@@ -2239,10 +2242,10 @@ function logSearchText(item) {
   ].join(" ").toLowerCase();
 }
 
-function renderLogsFromState(deliveryId = "") {
+function renderLogsFromState() {
   const q = (document.getElementById("logSearch").value || "").toLowerCase().trim();
   const filtered = logItems.filter(item => !q || logSearchText(item).includes(q));
-  renderLogs(filtered, deliveryId);
+  renderLogs(filtered, logsDeliveryFilter);
   updateSummary();
 }
 
