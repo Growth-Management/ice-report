@@ -884,6 +884,12 @@ def render_admin_ui() -> str:
     </div>
   </details>
 
+  <div class="toolbar" style="margin-bottom:14px;">
+    <button id="tabBtnDelivery" onclick="showAdminTab('delivery')">配布運用</button>
+    <button class="secondary" id="tabBtnDefinitions" onclick="showAdminTab('definitions')">レポート定義管理</button>
+  </div>
+
+  <div id="tabPanelDefinitions" class="tab-panel" style="display:none;">
   <div class="card">
     <h2>レポート定義</h2>
     <div class="inline-fields">
@@ -965,13 +971,16 @@ def render_admin_ui() -> str:
     </div>
     <div id="reportDefinitions" class="notice">loading...</div>
   </div>
+  </div>
 
-
+  <div id="tabPanelDelivery" class="tab-panel">
   <div class="grid">
     <section>
       <div class="card">
         <h2>配布作成</h2>
         <p class="muted">対象レポート: ジャンプ＋デジタルコミックス月次データ</p>
+        <div class="field"><label>対象レポート定義</label><select id="createReportId"></select></div>
+        <p class="help">未選択(空欄)の場合は既定テンプレート(report_id未指定)で生成します。</p>
         <div class="inline-fields">
           <div class="field"><label>顧客名</label><input id="createCustomer" placeholder="顧客名" value="一ツ橋企画"></div>
           <div class="field"><label>対象月</label><input id="createMonth" placeholder="YYYY-MM" value="2026-04"></div>
@@ -1023,6 +1032,7 @@ def render_admin_ui() -> str:
         <div id="logs" class="notice">loading...</div>
       </div>
     </section>
+  </div>
   </div>
 </main>
 
@@ -1177,7 +1187,7 @@ async function createDelivery() {
     report_month: document.getElementById("createMonth").value,
     gcs_uri: document.getElementById("createGcs").value,
     output_filename: document.getElementById("createOutputFilename").value,
-    report_id: document.getElementById("definitionId").value,
+    report_id: document.getElementById("createReportId").value,
     allowed_emails: splitList(document.getElementById("createEmails").value),
     allowed_domains: inputDomains.length ? inputDomains : DEFAULT_ALLOWED_DOMAINS
   };
@@ -1803,6 +1813,35 @@ function definitionSearchText(item) {
   ].join(" ").toLowerCase();
 }
 
+function showAdminTab(tab) {
+  const isDelivery = tab === "delivery";
+  document.getElementById("tabPanelDelivery").style.display = isDelivery ? "" : "none";
+  document.getElementById("tabPanelDefinitions").style.display = isDelivery ? "none" : "";
+  document.getElementById("tabBtnDelivery").className = isDelivery ? "" : "secondary";
+  document.getElementById("tabBtnDefinitions").className = isDelivery ? "secondary" : "";
+}
+
+function populateCreateReportIdOptions() {
+  const select = document.getElementById("createReportId");
+  const previous = select.value;
+  const options = ["<option value=\"\">(未指定 / 既定テンプレート)</option>"];
+
+  reportDefinitionItems.forEach(item => {
+    const id = String(item.report_id || "");
+    if (!id) {
+      return;
+    }
+    const label = item.name ? (id + " - " + item.name) : id;
+    options.push("<option value=\"" + attr(id) + "\">" + esc(label) + "</option>");
+  });
+
+  select.innerHTML = options.join("");
+
+  if (previous && reportDefinitionItems.some(item => String(item.report_id || "") === previous)) {
+    select.value = previous;
+  }
+}
+
 async function loadReportDefinitions() {
   const el = document.getElementById("reportDefinitions");
   el.innerHTML = "<p class='muted'>loading report definitions...</p>";
@@ -1811,6 +1850,7 @@ async function loadReportDefinitions() {
     const data = await api("/report-definitions?limit=100");
     reportDefinitionItems = data.items || [];
     renderDefinitionsFromState();
+    populateCreateReportIdOptions();
   } catch (e) {
     el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
   }
