@@ -800,6 +800,7 @@ def render_admin_ui() -> str:
           <h3>配布URLを作成</h3>
           <p class="muted">新しい配布レコードを作成します。GCS URIが空欄の場合は、BigQueryを再実行してExcelを生成し、GCSへ保存してから配布URLを発行します。</p>
           <ul class="muted">
+            <li>対象レポート定義が未選択(空欄): 既定テンプレート(report_id未指定)を使用。</li>
             <li>顧客名が空欄: <code>customer_name is required</code> エラー。</li>
             <li>対象月が空欄: <code>report_month is required</code> エラー。</li>
             <li>許可ドメインが空欄: 既定ドメインを自動適用。</li>
@@ -860,7 +861,7 @@ def render_admin_ui() -> str:
 
         <div class="faq-item">
           <h3>ログ</h3>
-          <p class="muted">ダウンロード成功時の履歴を表示します。delivery単位のログボタンを押すと、そのdelivery_idで絞り込んだログを表示します。</p>
+          <p class="muted">ダウンロード成功時の履歴を表示します。配布一覧の行にあるログボタンを押すと、ダウンロードログタブに切り替わり、そのdelivery_idで絞り込んだログを表示します。</p>
           <ul class="muted">
             <li>記録対象: 日時、delivery_id、顧客名、対象月、email、version、file。</li>
             <li>ログ検索欄は画面内に読み込まれたログに対する絞り込みです。</li>
@@ -2193,6 +2194,10 @@ function updateSummary() {
 }
 
 async function loadLogs(deliveryId = "") {
+  if (deliveryId) {
+    showAdminTab("logs");
+  }
+
   const logsEl = document.getElementById("logs");
   logsEl.innerHTML = "<p class='muted'>loading logs...</p>";
 
