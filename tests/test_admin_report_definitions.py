@@ -158,6 +158,7 @@ def _install_app_import_stubs():
         "list_report_definitions",
         "log_download",
         "make_signed_download_url",
+        "notify_slack_error",
         "preview_report_definition_schedule_run",
         "publish_report_definition_query_mapping",
         "publish_report_definition_template",

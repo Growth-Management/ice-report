@@ -65,6 +65,11 @@ SLACK_WEBHOOK_SECRET = os.environ.get(
 )
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
+SLACK_COLOR_GOOD = "#2eb67d"
+SLACK_COLOR_INFO = "#36c5f0"
+SLACK_COLOR_WARN = "#ecb22e"
+SLACK_COLOR_DANGER = "#e01e5a"
+
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "")
 DEFAULT_EXPIRES_DAYS = int(os.environ.get("DEFAULT_EXPIRES_DAYS", "7"))
 DOWNLOAD_SIGNED_URL_SECONDS = int(os.environ.get("DOWNLOAD_SIGNED_URL_SECONDS", "300"))
@@ -156,42 +161,83 @@ def get_slack_webhook_url() -> str | None:
     return SLACK_WEBHOOK_URL or get_secret(SLACK_WEBHOOK_SECRET)
 
 
-def notify_slack(text: str) -> None:
+def notify_slack(
+    title: str,
+    fields: list[tuple[str, str]],
+    *,
+    color: str = SLACK_COLOR_INFO,
+    channel_alert: bool = False,
+) -> None:
     webhook_url = get_slack_webhook_url()
 
     if not webhook_url:
         return
 
+    text = ("<!channel> " if channel_alert else "") + title
+
+    payload = {
+        "text": text,
+        "attachments": [
+            {
+                "color": color,
+                "fields": [
+                    {"title": name, "value": value, "short": True}
+                    for name, value in fields
+                ],
+            }
+        ],
+    }
+
     try:
-        requests.post(
-            webhook_url,
-            json={"text": text},
-            timeout=5,
-        )
+        requests.post(webhook_url, json=payload, timeout=5)
     except Exception:
         return
 
 
-def notify_slack_event(title: str, payload: dict[str, Any]) -> None:
-    lines = [
-        title,
-        f"delivery_id: {payload.get('delivery_id', '-')}",
-        f"顧客: {payload.get('customer_name', '-')}",
-        f"対象月: {payload.get('report_month', '-')}",
-        f"version: v{payload.get('version', payload.get('current_version', '-'))}",
-        f"file: {payload.get('file_name', '-')}",
-        f"email: {payload.get('email', '-')}",
-        f"状態: {payload.get('active', '-')}",
-        f"日時: {payload.get('timestamp', utcnow().isoformat())}",
+def _slack_active_label(active: Any) -> str:
+    if active is True:
+        return "active"
+    if active is False:
+        return "disabled"
+    return "-"
+
+
+def notify_slack_event(
+    title: str,
+    payload: dict[str, Any],
+    *,
+    color: str = SLACK_COLOR_INFO,
+) -> None:
+    fields = [
+        ("delivery_id", str(payload.get("delivery_id", "-"))),
+        ("顧客", str(payload.get("customer_name", "-"))),
+        ("対象月", str(payload.get("report_month", "-"))),
+        ("version", f"v{payload.get('version', payload.get('current_version', '-'))}"),
+        ("file", str(payload.get("file_name", "-"))),
+        ("email", str(payload.get("email", "-"))),
+        ("状態", _slack_active_label(payload.get("active"))),
+        ("日時", str(payload.get("timestamp", utcnow().isoformat()))),
     ]
 
     if payload.get("download_url"):
-        lines.append(f"URL: {payload.get('download_url')}")
+        fields.append(("URL", str(payload.get("download_url"))))
 
     if payload.get("gcs_uri"):
-        lines.append(f"GCS: {payload.get('gcs_uri')}")
+        fields.append(("GCS", str(payload.get("gcs_uri"))))
 
-    notify_slack("\n".join(lines))
+    notify_slack(title, fields, color=color)
+
+
+def notify_slack_error(title: str, detail: dict[str, Any]) -> None:
+    fields = [
+        ("delivery_id", str(detail.get("delivery_id", "-"))),
+        ("顧客", str(detail.get("customer_name", "-"))),
+        ("対象月", str(detail.get("report_month", "-"))),
+        ("reason", str(detail.get("reason", "-"))),
+        ("日時", str(detail.get("timestamp", utcnow().isoformat()))),
+    ]
+
+    notify_slack(title, fields, color=SLACK_COLOR_DANGER, channel_alert=True)
 
 
 def create_delivery_record(
@@ -281,6 +327,7 @@ def create_delivery_record(
             "active": True,
             "timestamp": now.isoformat(),
         },
+        color=SLACK_COLOR_GOOD,
     )
 
     return result
@@ -1738,6 +1785,7 @@ def add_delivery_version(
             "active": delivery.get("active"),
             "timestamp": now.isoformat(),
         },
+        color=SLACK_COLOR_INFO,
     )
 
     return {
@@ -1780,6 +1828,7 @@ def set_delivery_active(delivery_id: str, active: bool) -> dict[str, Any]:
             "active": active,
             "timestamp": now.isoformat(),
         },
+        color=SLACK_COLOR_GOOD if active else SLACK_COLOR_WARN,
     )
 
     return {
@@ -1929,6 +1978,7 @@ def log_download(
             "download_url": delivery.get("public_download_url"),
             "timestamp": now.isoformat(),
         },
+        color=SLACK_COLOR_GOOD,
     )
 
 

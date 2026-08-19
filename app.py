@@ -33,6 +33,7 @@ from distribution import (
     list_report_definitions,
     log_download,
     make_signed_download_url,
+    notify_slack_error,
     preview_report_definition_schedule_run,
     publish_report_definition_query_mapping,
     publish_report_definition_template,
@@ -2838,6 +2839,28 @@ def create_delivery():
                 today=today,
                 output_filename=output_filename,
             )
+        except Exception as exc:
+            _log_admin_audit_event(
+                action="delivery_create",
+                result="failure",
+                target_type="delivery",
+                status_code=500,
+                reason="report_generation_failed",
+                detail={
+                    "customer_name": customer_name,
+                    "report_month": report_month,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            notify_slack_error(
+                "ICEレポート生成に失敗しました",
+                {
+                    "customer_name": customer_name,
+                    "report_month": report_month,
+                    "reason": type(exc).__name__,
+                },
+            )
+            return jsonify({"error": "report generation failed"}), 500
         finally:
             _cleanup_runtime_template(template_context.get("local_path") if template_context else None)
 
@@ -3583,14 +3606,30 @@ def add_version(delivery_id: str):
 
     today = datetime.strptime(today_text, "%Y-%m-%d").date() if today_text else None
 
-    generated = generate_report(
-        project_id=project_id,
-        bucket_name=bucket_name,
-        object_prefix=object_prefix,
-        template_path=Path(os.environ.get("TEMPLATE_PATH", str(DEFAULT_TEMPLATE))),
-        today=today,
-        output_filename=output_filename,
-    )
+    try:
+        generated = generate_report(
+            project_id=project_id,
+            bucket_name=bucket_name,
+            object_prefix=object_prefix,
+            template_path=Path(os.environ.get("TEMPLATE_PATH", str(DEFAULT_TEMPLATE))),
+            today=today,
+            output_filename=output_filename,
+        )
+    except Exception as exc:
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=500,
+            reason="report_generation_failed",
+            detail={"overwrite": overwrite, "exception_type": type(exc).__name__},
+        )
+        notify_slack_error(
+            "ICEレポート生成に失敗しました",
+            {"delivery_id": delivery_id, "reason": type(exc).__name__},
+        )
+        return jsonify({"error": "report generation failed"}), 500
 
     gcs_uri = generated.get("gcs_uri")
     if not gcs_uri:
