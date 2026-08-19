@@ -885,7 +885,9 @@ def render_admin_ui() -> str:
   </details>
 
   <div class="toolbar" style="margin-bottom:14px;">
-    <button id="tabBtnDelivery" onclick="showAdminTab('delivery')">配布運用</button>
+    <button id="tabBtnCreate" onclick="showAdminTab('create')">配布作成</button>
+    <button class="secondary" id="tabBtnDeliveries" onclick="showAdminTab('deliveries')">配布一覧</button>
+    <button class="secondary" id="tabBtnLogs" onclick="showAdminTab('logs')">ダウンロードログ</button>
     <button class="secondary" id="tabBtnDefinitions" onclick="showAdminTab('definitions')">レポート定義管理</button>
   </div>
 
@@ -973,66 +975,64 @@ def render_admin_ui() -> str:
   </div>
   </div>
 
-  <div id="tabPanelDelivery" class="tab-panel">
-  <div class="grid">
-    <section>
-      <div class="card">
-        <h2>配布作成</h2>
-        <p class="muted">対象レポート: ジャンプ＋デジタルコミックス月次データ</p>
-        <div class="field"><label>対象レポート定義</label><select id="createReportId"></select></div>
-        <p class="help">未選択(空欄)の場合は既定テンプレート(report_id未指定)で生成します。</p>
-        <div class="inline-fields">
-          <div class="field"><label>顧客名</label><input id="createCustomer" placeholder="顧客名" value="一ツ橋企画"></div>
-          <div class="field"><label>対象月</label><input id="createMonth" placeholder="YYYY-MM" value="2026-04"></div>
-        </div>
-        <div class="field"><label>許可メール カンマ区切り</label><input id="createEmails" placeholder="user@example.com, user2@example.com"></div>
-        <div class="field"><label>許可ドメイン カンマ区切り</label><input id="createDomains" placeholder="空欄の場合は既定ドメインを使用"></div>
-        <p class="help">空欄の場合は shueisha.co.jp, sur.co.jp, hitotsubashi.co.jp, impress.co.jp を許可します。</p>
-        <div class="field"><label>GCS URI。空欄ならクエリ再実行して生成</label><input id="createGcs" placeholder="gs://ice-report-files/reports/plus/...xlsx"></div>
-        <div class="field"><label>生成ファイル名 .xlsx</label><input id="createOutputFilename" placeholder="空欄の場合は当日日付で自動生成"></div>
-        <p class="help">生成ファイル名を空欄にすると、実行当日の日付を使った標準ファイル名で生成します。</p>
-        <div class="toolbar">
-          <button id="createDeliveryButton" onclick="createDelivery()">配布URLを作成</button>
-          <button class="secondary" onclick="clearCreateForm()">入力クリア</button>
-        </div>
-        <pre id="createResult">待機中</pre>
+  <div id="tabPanelCreate" class="tab-panel">
+    <div class="card">
+      <h2>配布作成</h2>
+      <p class="muted">対象レポート: ジャンプ＋デジタルコミックス月次データ</p>
+      <div class="field"><label>対象レポート定義</label><select id="createReportId"></select></div>
+      <p class="help">未選択(空欄)の場合は既定テンプレート(report_id未指定)で生成します。</p>
+      <div class="inline-fields">
+        <div class="field"><label>顧客名</label><input id="createCustomer" placeholder="顧客名" value="一ツ橋企画"></div>
+        <div class="field"><label>対象月</label><input id="createMonth" placeholder="YYYY-MM" value="2026-04"></div>
       </div>
-    </section>
-
-    <section>
-      <div class="card">
-        <h2>最新GCSファイル一覧</h2>
-        <div class="field"><label>prefix</label><input id="gcsPrefix" value="reports/plus/"></div>
-        <div class="toolbar">
-          <button onclick="loadGcsFiles()">最新ファイルを表示</button>
-        </div>
-        <div id="gcsFiles" class="notice">未読み込み</div>
+      <div class="field"><label>許可メール カンマ区切り</label><input id="createEmails" placeholder="user@example.com, user2@example.com"></div>
+      <div class="field"><label>許可ドメイン カンマ区切り</label><input id="createDomains" placeholder="空欄の場合は既定ドメインを使用"></div>
+      <p class="help">空欄の場合は shueisha.co.jp, sur.co.jp, hitotsubashi.co.jp, impress.co.jp を許可します。</p>
+      <div class="field"><label>GCS URI。空欄ならクエリ再実行して生成</label><input id="createGcs" placeholder="gs://ice-report-files/reports/plus/...xlsx"></div>
+      <div class="field"><label>生成ファイル名 .xlsx</label><input id="createOutputFilename" placeholder="空欄の場合は当日日付で自動生成"></div>
+      <p class="help">生成ファイル名を空欄にすると、実行当日の日付を使った標準ファイル名で生成します。</p>
+      <div class="toolbar">
+        <button id="createDeliveryButton" onclick="createDelivery()">配布URLを作成</button>
+        <button class="secondary" onclick="clearCreateForm()">入力クリア</button>
       </div>
-    </section>
+      <pre id="createResult">待機中</pre>
+    </div>
+
+    <div class="card">
+      <h2>最新GCSファイル一覧</h2>
+      <div class="field"><label>prefix</label><input id="gcsPrefix" value="reports/plus/"></div>
+      <div class="toolbar">
+        <button onclick="loadGcsFiles()">最新ファイルを表示</button>
+      </div>
+      <div id="gcsFiles" class="notice">未読み込み</div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>配布一覧</h2>
-    <div class="toolbar">
-      <input id="deliverySearch" placeholder="顧客名 / delivery_id / 月 / ファイル名 / URLで検索" oninput="renderDeliveriesFromState()" style="min-width:260px;flex:1;">
-      <select id="deliveryStatusFilter" onchange="renderDeliveriesFromState()" style="width:150px;">
-        <option value="all">all</option>
-        <option value="active">active</option>
-        <option value="disabled">disabled</option>
-      </select>
-      <button class="secondary" onclick="loadDeliveries()">一覧を更新</button>
+  <div id="tabPanelDeliveries" class="tab-panel" style="display:none;">
+    <div class="card">
+      <h2>配布一覧</h2>
+      <div class="toolbar">
+        <input id="deliverySearch" placeholder="顧客名 / delivery_id / 月 / ファイル名 / URLで検索" oninput="renderDeliveriesFromState()" style="min-width:260px;flex:1;">
+        <select id="deliveryStatusFilter" onchange="renderDeliveriesFromState()" style="width:150px;">
+          <option value="all">all</option>
+          <option value="active">active</option>
+          <option value="disabled">disabled</option>
+        </select>
+        <button class="secondary" onclick="loadDeliveries()">一覧を更新</button>
+      </div>
+      <div id="deliveries" class="notice">loading...</div>
     </div>
-    <div id="deliveries" class="notice">loading...</div>
   </div>
 
-  <div class="card">
-    <h2>ダウンロードログ</h2>
-    <div class="toolbar">
-      <input id="logSearch" placeholder="delivery_id / email / 顧客名 / fileで絞り込み" oninput="renderLogsFromState()" style="min-width:260px;flex:1;">
-      <button class="secondary" onclick="loadLogs()">全ログを更新</button>
+  <div id="tabPanelLogs" class="tab-panel" style="display:none;">
+    <div class="card">
+      <h2>ダウンロードログ</h2>
+      <div class="toolbar">
+        <input id="logSearch" placeholder="delivery_id / email / 顧客名 / fileで絞り込み" oninput="renderLogsFromState()" style="min-width:260px;flex:1;">
+        <button class="secondary" onclick="loadLogs()">全ログを更新</button>
+      </div>
+      <div id="logs" class="notice">loading...</div>
     </div>
-    <div id="logs" class="notice">loading...</div>
-  </div>
   </div>
 </main>
 
@@ -1813,12 +1813,20 @@ function definitionSearchText(item) {
   ].join(" ").toLowerCase();
 }
 
+const ADMIN_TAB_SUFFIXES = {
+  create: "Create",
+  deliveries: "Deliveries",
+  logs: "Logs",
+  definitions: "Definitions"
+};
+
 function showAdminTab(tab) {
-  const isDelivery = tab === "delivery";
-  document.getElementById("tabPanelDelivery").style.display = isDelivery ? "" : "none";
-  document.getElementById("tabPanelDefinitions").style.display = isDelivery ? "none" : "";
-  document.getElementById("tabBtnDelivery").className = isDelivery ? "" : "secondary";
-  document.getElementById("tabBtnDefinitions").className = isDelivery ? "secondary" : "";
+  Object.keys(ADMIN_TAB_SUFFIXES).forEach(key => {
+    const suffix = ADMIN_TAB_SUFFIXES[key];
+    const isActive = key === tab;
+    document.getElementById("tabPanel" + suffix).style.display = isActive ? "" : "none";
+    document.getElementById("tabBtn" + suffix).className = isActive ? "" : "secondary";
+  });
 }
 
 function populateCreateReportIdOptions() {
