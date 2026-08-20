@@ -23,7 +23,7 @@ Admin UIでレポート定義を追加・編集する担当者。IAP許可ユー
 - 許可されていない任意のGCS prefix / Driveフォルダの指定
 - Cloud Scheduler jobの作成(schedule保存はメタデータ保存のみ。実際の自動実行には別途Cloud Scheduler attachmentが必要で、現状は個別のPhase10対応が必要です)
 
-これらが必要な場合は、既存のレポート定義を流用するか、テルマエ・ロマエのような専用実装(`docs/thermae-romae-report.md`)を検討してください。
+これらが必要な場合は、既存のレポート定義を流用するか、テルマエ・ロマエのような専用実装を検討してください。専用実装の進め方は `docs/new-bespoke-report-playbook.md` を参照してください。
 
 ## 前提条件
 

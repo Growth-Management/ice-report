@@ -253,7 +253,7 @@ class AdminIapAuthTest(unittest.TestCase):
         ):
             with patch.object(
                 app_module,
-                "_verify_thermae_scheduler_oidc_token",
+                "_verify_scheduler_oidc_token",
                 return_value={"email": "thermae-scheduler@ice-sh.iam.gserviceaccount.com"},
             ):
                 with app_module.app.test_request_context(
@@ -284,7 +284,7 @@ class AdminIapAuthTest(unittest.TestCase):
         ):
             with patch.object(
                 app_module,
-                "_verify_report_definition_scheduler_oidc_token",
+                "_verify_scheduler_oidc_token",
                 return_value={"email": "scheduler@ice-sh.iam.gserviceaccount.com"},
             ):
                 with app_module.app.test_request_context(
@@ -403,6 +403,81 @@ class AdminIapAuthTest(unittest.TestCase):
         self.assertEqual(actor["admin_key_fingerprint"], "")
         self.assertTrue(actor["iap_email_hash"])
         self.assertNotIn("sinohara", actor["iap_email_hash"])
+
+
+class ClaimScheduledRunTest(unittest.TestCase):
+    """Covers the shared duplicate-run guard used by scheduled/bespoke reports."""
+
+    def test_first_claim_succeeds_and_records_running_status(self):
+        class FakeDocRef:
+            def __init__(self):
+                self.set_calls = []
+
+            def get(self):
+                return types.SimpleNamespace(exists=False, to_dict=lambda: {})
+
+            def set(self, data):
+                self.set_calls.append(data)
+
+        class FakeCollection:
+            def __init__(self, doc_ref):
+                self._doc_ref = doc_ref
+
+            def document(self, run_id):
+                return self._doc_ref
+
+        class FakeClient:
+            def __init__(self, doc_ref):
+                self._doc_ref = doc_ref
+
+            def collection(self, name):
+                return FakeCollection(self._doc_ref)
+
+        doc_ref = FakeDocRef()
+        fake_firestore = types.SimpleNamespace(Client=lambda: FakeClient(doc_ref))
+
+        with patch.object(app_module, "firestore", fake_firestore):
+            claimed, ref = app_module._claim_scheduled_run(
+                collection_name="thermae_scheduled_runs",
+                run_id="2026-07",
+                initial_fields={"report": "thermae-romae", "target_month": "2026-07-01"},
+            )
+
+        self.assertTrue(claimed)
+        self.assertIs(ref, doc_ref)
+        self.assertEqual(len(doc_ref.set_calls), 1)
+        self.assertEqual(doc_ref.set_calls[0]["status"], "running")
+        self.assertEqual(doc_ref.set_calls[0]["report"], "thermae-romae")
+        self.assertIn("created_at", doc_ref.set_calls[0])
+        self.assertIn("updated_at", doc_ref.set_calls[0])
+
+    def test_second_claim_for_same_run_id_is_rejected_as_duplicate(self):
+        class FakeDocRef:
+            def get(self):
+                return types.SimpleNamespace(exists=True, to_dict=lambda: {"status": "succeeded"})
+
+            def set(self, data):
+                raise AssertionError("set() must not be called when a run is already claimed")
+
+        class FakeCollection:
+            def document(self, run_id):
+                return FakeDocRef()
+
+        class FakeClient:
+            def collection(self, name):
+                return FakeCollection()
+
+        fake_firestore = types.SimpleNamespace(Client=lambda: FakeClient())
+
+        with patch.object(app_module, "firestore", fake_firestore):
+            claimed, status = app_module._claim_scheduled_run(
+                collection_name="thermae_scheduled_runs",
+                run_id="2026-07",
+                initial_fields={"report": "thermae-romae"},
+            )
+
+        self.assertFalse(claimed)
+        self.assertEqual(status, "succeeded")
 
 
 if __name__ == "__main__":
