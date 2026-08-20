@@ -2509,97 +2509,65 @@ def _csv_env_set(name: str) -> set[str]:
     }
 
 
-def _thermae_scheduler_allowed_service_accounts() -> set[str]:
-    return _csv_env_set("THERMAE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS")
-
-
-def _report_definition_scheduler_allowed_service_accounts() -> set[str]:
-    return _csv_env_set("REPORT_DEFINITION_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS")
-
-
-def _thermae_scheduler_audience() -> str:
-    return os.environ.get("THERMAE_SCHEDULER_AUDIENCE", "").strip() or request.base_url
-
-
-def _report_definition_scheduler_audience() -> str:
-    return os.environ.get("REPORT_DEFINITION_SCHEDULER_AUDIENCE", "").strip() or request.base_url
-
-
-def _verify_thermae_scheduler_oidc_token(token: str, audience: str) -> dict:
+def _verify_scheduler_oidc_token(token: str, audience: str) -> dict:
     from google.auth.transport.requests import Request as GoogleAuthRequest
     from google.oauth2 import id_token
 
     return id_token.verify_oauth2_token(token, GoogleAuthRequest(), audience)
 
 
-def _verify_report_definition_scheduler_oidc_token(token: str, audience: str) -> dict:
-    from google.auth.transport.requests import Request as GoogleAuthRequest
-    from google.oauth2 import id_token
+def _check_scheduler_oidc_auth(*, env_prefix: str, log_tag: str) -> tuple[bool, str]:
+    """Shared OIDC bearer-token check for Cloud Scheduler-invoked endpoints.
 
-    return id_token.verify_oauth2_token(token, GoogleAuthRequest(), audience)
+    env_prefix selects the `<env_prefix>_ALLOWED_SERVICE_ACCOUNTS` and
+    `<env_prefix>_AUDIENCE` env vars (e.g. "THERMAE_SCHEDULER"). log_tag is
+    the fail-closed log line prefix (e.g. "ICE_REPORT_THERMAE_SCHEDULE_AUTH").
+    Reuse this for any new scheduled/bespoke report endpoint instead of
+    writing a new per-report auth check.
+    """
+    allowed = _csv_env_set(f"{env_prefix}_ALLOWED_SERVICE_ACCOUNTS")
+    if not allowed:
+        logging.error("%s_NOT_CONFIGURED", log_tag)
+        return False, "scheduler_auth_not_configured"
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.lower().startswith("bearer "):
+        logging.warning("%s_FAILED reason=missing_bearer_token", log_tag)
+        return False, "missing_bearer_token"
+
+    token = auth.split(" ", 1)[1].strip()
+    if not token:
+        logging.warning("%s_FAILED reason=missing_bearer_token", log_tag)
+        return False, "missing_bearer_token"
+
+    audience = os.environ.get(f"{env_prefix}_AUDIENCE", "").strip() or request.base_url
+
+    try:
+        claims = _verify_scheduler_oidc_token(token, audience)
+    except Exception:
+        logging.warning("%s_FAILED reason=invalid_oidc_token", log_tag)
+        return False, "invalid_oidc_token"
+
+    email = _normalize_email(str(claims.get("email") or ""))
+    if not email or email not in allowed:
+        logging.warning("%s_FAILED reason=service_account_not_allowed", log_tag)
+        return False, "service_account_not_allowed"
+
+    return True, ""
 
 
 def _check_thermae_scheduler_auth() -> tuple[bool, str]:
-    allowed = _thermae_scheduler_allowed_service_accounts()
-    if not allowed:
-        logging.error("ICE_REPORT_THERMAE_SCHEDULE_AUTH_NOT_CONFIGURED")
-        return False, "scheduler_auth_not_configured"
-
-    auth = request.headers.get("Authorization", "")
-    if not auth.lower().startswith("bearer "):
-        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
-        return False, "missing_bearer_token"
-
-    token = auth.split(" ", 1)[1].strip()
-    if not token:
-        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
-        return False, "missing_bearer_token"
-
-    try:
-        claims = _verify_thermae_scheduler_oidc_token(token, _thermae_scheduler_audience())
-    except Exception:
-        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=invalid_oidc_token")
-        return False, "invalid_oidc_token"
-
-    email = _normalize_email(str(claims.get("email") or ""))
-    if not email or email not in allowed:
-        logging.warning("ICE_REPORT_THERMAE_SCHEDULE_AUTH_FAILED reason=service_account_not_allowed")
-        return False, "service_account_not_allowed"
-
-    return True, ""
+    return _check_scheduler_oidc_auth(
+        env_prefix="THERMAE_SCHEDULER",
+        log_tag="ICE_REPORT_THERMAE_SCHEDULE_AUTH",
+    )
 
 
 def _check_report_definition_scheduler_auth() -> tuple[bool, str]:
-    allowed = _report_definition_scheduler_allowed_service_accounts()
-    if not allowed:
-        logging.error("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_NOT_CONFIGURED")
-        return False, "scheduler_auth_not_configured"
-
-    auth = request.headers.get("Authorization", "")
-    if not auth.lower().startswith("bearer "):
-        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
-        return False, "missing_bearer_token"
-
-    token = auth.split(" ", 1)[1].strip()
-    if not token:
-        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=missing_bearer_token")
-        return False, "missing_bearer_token"
-
-    try:
-        claims = _verify_report_definition_scheduler_oidc_token(
-            token,
-            _report_definition_scheduler_audience(),
-        )
-    except Exception:
-        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=invalid_oidc_token")
-        return False, "invalid_oidc_token"
-
-    email = _normalize_email(str(claims.get("email") or ""))
-    if not email or email not in allowed:
-        logging.warning("ICE_REPORT_DEFINITION_SCHEDULE_AUTH_FAILED reason=service_account_not_allowed")
-        return False, "service_account_not_allowed"
-
-    return True, ""
+    return _check_scheduler_oidc_auth(
+        env_prefix="REPORT_DEFINITION_SCHEDULER",
+        log_tag="ICE_REPORT_DEFINITION_SCHEDULE_AUTH",
+    )
 
 
 def _safe_thermae_scheduled_result(result: dict) -> dict:
@@ -2657,6 +2625,30 @@ def _thermae_scheduled_run_id(target_month: date) -> str:
     return target_month.strftime("%Y-%m")
 
 
+def _claim_scheduled_run(
+    *, collection_name: str, run_id: str, initial_fields: dict[str, Any]
+) -> tuple[bool, Any]:
+    """Claim a Firestore-backed scheduled-run slot to prevent duplicate execution.
+
+    Returns (True, run_ref) if this call claimed the run; the caller owns
+    calling run_ref.update(...) with a final status once the work finishes
+    or fails. Returns (False, existing_status) if a run for this run_id was
+    already claimed. Reuse this for any new scheduled/bespoke report's
+    duplicate-run guard instead of writing a new per-report Firestore
+    existence check.
+    """
+    db = firestore.Client()
+    run_ref = db.collection(collection_name).document(run_id)
+    existing = run_ref.get()
+    if existing.exists:
+        existing_data = existing.to_dict() or {}
+        return False, existing_data.get("status", "")
+
+    now = _now_utc()
+    run_ref.set({**initial_fields, "status": "running", "created_at": now, "updated_at": now})
+    return True, run_ref
+
+
 @app.post("/admin/reports/thermae-romae/scheduled-generate")
 def scheduled_generate_thermae_romae():
     ok, reason = _check_thermae_scheduler_auth()
@@ -2682,30 +2674,25 @@ def scheduled_generate_thermae_romae():
         return jsonify({"error": error_code}), status_code
 
     run_id = _thermae_scheduled_run_id(target_month)
-    record_time = _now_utc()
-    db = firestore.Client()
-    run_ref = db.collection(THERMAE_SCHEDULED_RUNS_COLLECTION).document(run_id)
-    existing = run_ref.get()
-    if existing.exists:
-        existing_data = existing.to_dict() or {}
+    claimed, run_ref_or_status = _claim_scheduled_run(
+        collection_name=THERMAE_SCHEDULED_RUNS_COLLECTION,
+        run_id=run_id,
+        initial_fields={
+            "report": "thermae-romae",
+            "target_month": target_month.isoformat(),
+            "result_code": "generation_started",
+        },
+    )
+    if not claimed:
         return jsonify(
             {
                 "error": "duplicate_scheduled_run",
                 "target_month": target_month.isoformat(),
-                "status": existing_data.get("status", ""),
+                "status": run_ref_or_status,
             }
         ), 409
 
-    run_ref.set(
-        {
-            "report": "thermae-romae",
-            "target_month": target_month.isoformat(),
-            "status": "running",
-            "result_code": "generation_started",
-            "created_at": record_time,
-            "updated_at": record_time,
-        }
-    )
+    run_ref = run_ref_or_status
 
     try:
         result = generate_thermae_romae_report(
