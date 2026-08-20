@@ -145,6 +145,7 @@ def _install_import_stubs():
         "download_report_definition_template",
         "find_delivery_by_token",
         "get_current_version",
+        "get_delivery_record",
         "get_report_definition",
         "get_report_definition_storage_allowlist",
         "list_delivery_records",
