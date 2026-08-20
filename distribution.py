@@ -67,6 +67,7 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
 SLACK_COLOR_GOOD = "#2eb67d"
 SLACK_COLOR_INFO = "#36c5f0"
+SLACK_COLOR_NEUTRAL = "#8a94a6"
 SLACK_COLOR_WARN = "#ecb22e"
 SLACK_COLOR_DANGER = "#e01e5a"
 
@@ -214,16 +215,31 @@ def notify_slack_event(
         ("対象月", str(payload.get("report_month", "-"))),
         ("version", f"v{payload.get('version', payload.get('current_version', '-'))}"),
         ("file", str(payload.get("file_name", "-"))),
-        ("email", str(payload.get("email", "-"))),
         ("状態", _slack_active_label(payload.get("active"))),
         ("日時", str(payload.get("timestamp", utcnow().isoformat()))),
     ]
+
+    email = payload.get("email")
+    if email:
+        # 生メールアドレスは外部サービス(Slack)へ出さず、fingerprint用の短縮hashのみ通知する。
+        fields.insert(5, ("email_hash", hash_normalized_email(str(email))[:16]))
 
     if payload.get("download_url"):
         fields.append(("URL", str(payload.get("download_url"))))
 
     if payload.get("gcs_uri"):
         fields.append(("GCS", str(payload.get("gcs_uri"))))
+
+    allowed_domains = payload.get("allowed_domains")
+    if allowed_domains:
+        fields.append(("許可ドメイン", ", ".join(str(d) for d in allowed_domains)))
+
+    allowed_email_count = payload.get("allowed_email_count")
+    if allowed_email_count:
+        fields.append(("許可メール件数", str(allowed_email_count)))
+
+    if payload.get("expires_at"):
+        fields.append(("有効期限", str(payload.get("expires_at"))))
 
     notify_slack(title, fields, color=color)
 
@@ -325,6 +341,9 @@ def create_delivery_record(
             "gcs_uri": gcs_uri,
             "download_url": url,
             "active": True,
+            "allowed_domains": doc["allowed_domains"],
+            "allowed_email_count": len(normalized_allowed_emails),
+            "expires_at": expires_at.isoformat(),
             "timestamp": now.isoformat(),
         },
         color=SLACK_COLOR_GOOD,
@@ -1727,6 +1746,14 @@ def list_delivery_records(
     ]
 
 
+def get_delivery_record(delivery_id: str) -> dict[str, Any] | None:
+    db = get_firestore_client()
+    snap = db.collection(FIRESTORE_COLLECTION_DELIVERIES).document(delivery_id).get()
+    if not snap.exists:
+        return None
+    return _public_delivery(delivery_id, snap.to_dict() or {})
+
+
 def add_delivery_version(
     *,
     delivery_id: str,
@@ -1828,7 +1855,7 @@ def set_delivery_active(delivery_id: str, active: bool) -> dict[str, Any]:
             "active": active,
             "timestamp": now.isoformat(),
         },
-        color=SLACK_COLOR_GOOD if active else SLACK_COLOR_WARN,
+        color=SLACK_COLOR_GOOD if active else SLACK_COLOR_NEUTRAL,
     )
 
     return {
@@ -1978,7 +2005,7 @@ def log_download(
             "download_url": delivery.get("public_download_url"),
             "timestamp": now.isoformat(),
         },
-        color=SLACK_COLOR_GOOD,
+        color=SLACK_COLOR_INFO,
     )
 
 

@@ -96,6 +96,68 @@ class SlackNotificationTest(unittest.TestCase):
         fields = {f["title"]: f["value"] for f in attachment["fields"]}
         self.assertEqual(fields["状態"], "disabled")
 
+    def test_notify_slack_event_hashes_email_instead_of_raw_value(self):
+        with patch.object(
+            self.distribution, "get_slack_webhook_url", return_value="https://example.invalid/webhook"
+        ), patch.object(self.distribution.requests, "post") as mock_post:
+            self.distribution.notify_slack_event(
+                "ICEレポートがダウンロードされました",
+                {"delivery_id": "abc123", "email": "user@example.com", "active": True},
+                color=self.distribution.SLACK_COLOR_INFO,
+            )
+
+        payload = self._post_payload(mock_post)
+        attachment = payload["attachments"][0]
+        fields = {f["title"]: f["value"] for f in attachment["fields"]}
+        self.assertNotIn("email", fields)
+        self.assertIn("email_hash", fields)
+        self.assertNotIn("user@example.com", fields["email_hash"])
+        expected_hash = self.distribution.hash_normalized_email("user@example.com")[:16]
+        self.assertEqual(fields["email_hash"], expected_hash)
+
+    def test_notify_slack_event_omits_optional_fields_when_absent(self):
+        with patch.object(
+            self.distribution, "get_slack_webhook_url", return_value="https://example.invalid/webhook"
+        ), patch.object(self.distribution.requests, "post") as mock_post:
+            self.distribution.notify_slack_event(
+                "ICEレポート配布URLが作成されました",
+                {"delivery_id": "abc123", "active": True},
+                color=self.distribution.SLACK_COLOR_GOOD,
+            )
+
+        payload = self._post_payload(mock_post)
+        attachment = payload["attachments"][0]
+        fields = {f["title"]: f["value"] for f in attachment["fields"]}
+        self.assertNotIn("email_hash", fields)
+        self.assertNotIn("URL", fields)
+        self.assertNotIn("GCS", fields)
+        self.assertNotIn("許可ドメイン", fields)
+        self.assertNotIn("許可メール件数", fields)
+        self.assertNotIn("有効期限", fields)
+
+    def test_notify_slack_event_includes_allowlist_and_expiry_when_present(self):
+        with patch.object(
+            self.distribution, "get_slack_webhook_url", return_value="https://example.invalid/webhook"
+        ), patch.object(self.distribution.requests, "post") as mock_post:
+            self.distribution.notify_slack_event(
+                "ICEレポート配布URLが作成されました",
+                {
+                    "delivery_id": "abc123",
+                    "active": True,
+                    "allowed_domains": ["example.co.jp"],
+                    "allowed_email_count": 2,
+                    "expires_at": "2026-08-27T00:00:00Z",
+                },
+                color=self.distribution.SLACK_COLOR_GOOD,
+            )
+
+        payload = self._post_payload(mock_post)
+        attachment = payload["attachments"][0]
+        fields = {f["title"]: f["value"] for f in attachment["fields"]}
+        self.assertEqual(fields["許可ドメイン"], "example.co.jp")
+        self.assertEqual(fields["許可メール件数"], "2")
+        self.assertEqual(fields["有効期限"], "2026-08-27T00:00:00Z")
+
     def test_notify_slack_error_uses_danger_color_and_channel_alert(self):
         with patch.object(
             self.distribution, "get_slack_webhook_url", return_value="https://example.invalid/webhook"

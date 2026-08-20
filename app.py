@@ -26,6 +26,7 @@ from distribution import (
     download_report_definition_template,
     find_delivery_by_token,
     get_current_version,
+    get_delivery_record,
     get_report_definition,
     get_report_definition_storage_allowlist,
     list_delivery_records,
@@ -384,13 +385,6 @@ def render_admin_ui() -> str:
       padding: 24px;
     }
 
-    .grid {
-      display: grid;
-      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
-      gap: 20px;
-      align-items: start;
-    }
-
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -504,6 +498,15 @@ def render_admin_ui() -> str:
       background: var(--warning-bg);
       border-color: color-mix(in srgb, var(--warning) 35%, transparent);
     }
+
+    .status-neutral {
+      color: var(--muted);
+      background: color-mix(in srgb, var(--muted) 12%, transparent);
+      border-color: color-mix(in srgb, var(--muted) 35%, transparent);
+    }
+
+    .result-error { color: var(--danger); }
+    .result-success { color: var(--success); }
 
     .table-wrap {
       width: 100%;
@@ -761,7 +764,6 @@ def render_admin_ui() -> str:
 
 
     @media (max-width: 980px) {
-      .grid { grid-template-columns: 1fr; }
       .summary-cards { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .faq-grid { grid-template-columns: 1fr; }
       .header-inner { align-items: flex-start; flex-direction: column; }
@@ -788,7 +790,7 @@ def render_admin_ui() -> str:
     <div class="summary-card"><div class="label">配布総数</div><div class="value" id="summaryTotal">-</div></div>
     <div class="summary-card"><div class="label">active</div><div class="value" id="summaryActive">-</div></div>
     <div class="summary-card"><div class="label">disabled</div><div class="value" id="summaryDisabled">-</div></div>
-    <div class="summary-card"><div class="label">定義 / 表示ログ</div><div class="value" id="summaryDefinitionsLogs">- / -</div></div>
+    <div class="summary-card" title="定義数は最大100件までの取得件数。表示中ログ件数は現在の絞り込み・検索条件を反映した件数で、ログ全件数ではありません。"><div class="label">定義数(最大100件) / 表示中ログ件数</div><div class="value" id="summaryDefinitionsLogs">- / -</div></div>
   </div>
 
 
@@ -871,6 +873,19 @@ def render_admin_ui() -> str:
         </div>
 
         <div class="faq-item">
+          <h3>レポート定義管理</h3>
+          <p class="muted">配布作成で使う「対象レポート定義」を管理します。定義ごとにExcelテンプレート、query/mapping、月次schedule、delivery allowlistを個別に持てます。</p>
+          <ul class="muted">
+            <li>storage allowlist: GCS prefix / Drive folder nameに設定できる値の一覧を表示します。ここに無い値は定義の追加・更新時に拒否されます。</li>
+            <li>template preview / publish / version rollback: Excelテンプレートの確認・公開・巻き戻しです。publishで新しいversionが増え、rollbackはcurrent_versionだけを戻します。</li>
+            <li>query / mapping dry-run / publish: 現状は既定の1種類の組み合わせのみ選択可能です(SQL本文やセルマッピングの自由編集はできません)。</li>
+            <li>schedule save / dry-run: 月次自動実行の設定を保存します。保存だけではCloud Scheduler jobは作成されません。</li>
+            <li>archive: 対象定義を停止します。元に戻す操作はないため、新しいreport_idで作り直します。</li>
+            <li>詳しい手順は <code>docs/report-definitions-guide.md</code> を参照してください。</li>
+          </ul>
+        </div>
+
+        <div class="faq-item">
           <h3>管理キー・エラー時</h3>
           <p class="muted">初回アクセス時に管理キーを入力します。キーはブラウザのlocalStorageに保存され、API呼び出し時に <code>X-Admin-Key</code> として送信されます。</p>
           <ul class="muted">
@@ -916,7 +931,7 @@ def render_admin_ui() -> str:
     <div class="toolbar">
       <button class="secondary" id="storageAllowlistButton" onclick="loadStorageAllowlist()">storage allowlist</button>
     </div>
-    <pre id="storageAllowlistResult">not loaded</pre>
+    <pre id="storageAllowlistResult">待機中</pre>
     <div class="field"><label>initial version note</label><input id="definitionVersionNote" placeholder="initial definition"></div>
     <div class="toolbar">
       <button id="definitionCreateButton" onclick="createReportDefinition()">定義を追加</button>
@@ -935,7 +950,7 @@ def render_admin_ui() -> str:
       <button class="secondary" id="templatePublishButton" onclick="publishReportTemplate()">template publish</button>
       <button class="secondary" id="templateRollbackButton" onclick="rollbackReportTemplate()">version rollback</button>
     </div>
-    <pre id="templatePreviewResult">not loaded</pre>
+    <pre id="templatePreviewResult">待機中</pre>
     <div class="toolbar">
       <button class="secondary" id="queryMappingPreviewButton" onclick="previewQueryMapping()">query / mapping dry-run</button>
     </div>
@@ -943,7 +958,7 @@ def render_admin_ui() -> str:
     <div class="toolbar">
       <button class="secondary" id="queryMappingPublishButton" onclick="publishQueryMapping()">query / mapping publish</button>
     </div>
-    <pre id="queryMappingPreviewResult">not loaded</pre>
+    <pre id="queryMappingPreviewResult">待機中</pre>
     <div class="inline-fields">
       <div class="field"><label><input id="scheduleEnabled" type="checkbox"> schedule enabled</label></div>
       <div class="field"><label>monthly day</label><input id="scheduleDayOfMonth" type="number" min="1" max="28" value="1"></div>
@@ -956,7 +971,7 @@ def render_admin_ui() -> str:
       <button class="secondary" id="scheduleSaveButton" onclick="saveReportSchedule()">schedule save</button>
       <button class="secondary" id="schedulePreviewButton" onclick="previewReportSchedules()">schedule dry-run</button>
     </div>
-    <pre id="scheduleResult">not loaded</pre>
+    <pre id="scheduleResult">待機中</pre>
     <div class="inline-fields">
       <div class="field"><label>delivery allowed domains</label><input id="deliveryAllowlistDomains" placeholder="example.com, impress.co.jp"></div>
       <div class="field"><label>delivery allowed emails</label><input id="deliveryAllowlistEmails" placeholder="operator@example.com"></div>
@@ -964,7 +979,7 @@ def render_admin_ui() -> str:
     <div class="toolbar">
       <button class="secondary" id="deliveryAllowlistSaveButton" onclick="saveDeliveryAllowlist()">delivery allowlist save</button>
     </div>
-    <pre id="deliveryAllowlistResult">not loaded</pre>
+    <pre id="deliveryAllowlistResult">待機中</pre>
     <div class="toolbar">
       <input id="definitionSearch" placeholder="report_id / name / owner / GCS prefixで検索" oninput="renderDefinitionsFromState()" style="min-width:260px;flex:1;">
       <select id="definitionStatusFilter" onchange="renderDefinitionsFromState()" style="width:150px;">
@@ -982,8 +997,8 @@ def render_admin_ui() -> str:
     <div class="card">
       <h2>配布作成</h2>
       <p class="muted">対象レポート: ジャンプ＋デジタルコミックス月次データ</p>
-      <div class="field"><label>対象レポート定義</label><select id="createReportId"></select></div>
-      <p class="help">未選択(空欄)の場合は既定テンプレート(report_id未指定)で生成します。</p>
+      <div class="field"><label>対象レポート定義</label><select id="createReportId" onchange="onCreateReportIdChange()"></select></div>
+      <p class="help">未選択(空欄)の場合は既定テンプレート(report_id未指定)で生成します。選択すると顧客名・対象月・許可ドメインをその定義の設定で上書きします(許可メールはハッシュ保存のため復元できず、上書きしません)。</p>
       <div class="inline-fields">
         <div class="field"><label>顧客名</label><input id="createCustomer" placeholder="顧客名" value="一ツ橋企画"></div>
         <div class="field"><label>対象月</label><input id="createMonth" placeholder="YYYY-MM" value="__DEFAULT_REPORT_MONTH__"></div>
@@ -1127,6 +1142,12 @@ function attr(s) {
   return esc(s).replace(/`/g, "&#96;");
 }
 
+function setResultText(el, text, status = "neutral") {
+  el.textContent = text;
+  el.classList.toggle("result-error", status === "error");
+  el.classList.toggle("result-success", status === "success");
+}
+
 function formatSize(size) {
   const n = Number(size || 0);
   if (n >= 1024 * 1024) {
@@ -1182,7 +1203,7 @@ async function createDelivery() {
 
   button.disabled = true;
   button.textContent = "作成中...";
-  resultEl.textContent = "配布URLを作成中です。クエリ実行・Excel生成・GCS保存中...";
+  setResultText(resultEl, "配布URLを作成中です。クエリ実行・Excel生成・GCS保存中...", "neutral");
 
   const inputDomains = splitList(document.getElementById("createDomains").value);
 
@@ -1206,14 +1227,14 @@ async function createDelivery() {
       ? data.download_url
       : baseUrl + (data.download_url || "");
 
-    resultEl.textContent = "配布URLが作成されました\nURL: " + url;
+    setResultText(resultEl, "配布URLが作成されました\nURL: " + url, "success");
     showToast("配布URLを作成しました");
 
     await loadDeliveries();
     await loadGcsFiles();
 
   } catch (e) {
-    resultEl.textContent = "配布URL作成に失敗しました\n" + e.message;
+    setResultText(resultEl, "配布URL作成に失敗しました\n" + e.message, "error");
   } finally {
     createDeliveryInProgress = false;
     button.disabled = false;
@@ -1231,7 +1252,7 @@ async function loadGcsFiles(targetInputId = "") {
     const data = await api("/gcs-files?prefix=" + encodeURIComponent(prefix) + "&limit=50");
     renderGcsFiles(data.items || [], targetInputId);
   } catch (e) {
-    el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+    el.innerHTML = "<p class='result-error'>" + esc(e.message) + "</p>";
   }
 }
 
@@ -1358,9 +1379,9 @@ function clearDefinitionForm() {
   document.getElementById("scheduleDayOfMonth").value = "1";
   document.getElementById("scheduleTimeOfDay").value = "09:00";
   document.getElementById("scheduleTimezone").value = "Asia/Tokyo";
-  document.getElementById("scheduleResult").textContent = "not loaded";
-  document.getElementById("deliveryAllowlistResult").textContent = "not loaded";
-  document.getElementById("storageAllowlistResult").textContent = "not loaded";
+  document.getElementById("scheduleResult").textContent = "待機中";
+  document.getElementById("deliveryAllowlistResult").textContent = "待機中";
+  document.getElementById("storageAllowlistResult").textContent = "待機中";
 }
 
 function fillDefinitionForm(reportId) {
@@ -1398,18 +1419,18 @@ async function createReportDefinition() {
   reportDefinitionInProgress = true;
   setDefinitionButtons(true);
   const resultEl = document.getElementById("definitionResult");
-  resultEl.textContent = "定義を追加中...";
+  setResultText(resultEl, "定義を追加中...", "neutral");
 
   try {
     const data = await api("/report-definitions", {
       method: "POST",
       body: JSON.stringify(definitionPayload())
     });
-    resultEl.textContent = "定義を追加しました\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    setResultText(resultEl, "定義を追加しました\n" + JSON.stringify(data.result || data.item || data, null, 2), "success");
     showToast("定義を追加しました");
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "定義追加に失敗しました\n" + e.message;
+    setResultText(resultEl, "定義追加に失敗しました\n" + e.message, "error");
   } finally {
     reportDefinitionInProgress = false;
     setDefinitionButtons(false);
@@ -1425,19 +1446,19 @@ async function updateReportDefinition() {
   reportDefinitionInProgress = true;
   setDefinitionButtons(true);
   const resultEl = document.getElementById("definitionResult");
-  resultEl.textContent = "定義を更新中...";
+  setResultText(resultEl, "定義を更新中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId), {
       method: "PATCH",
       body: JSON.stringify(definitionPayload())
     });
-    resultEl.textContent = "定義を更新しました\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    setResultText(resultEl, "定義を更新しました\n" + JSON.stringify(data.result || data.item || data, null, 2), "success");
     showToast("定義を更新しました");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "定義更新に失敗しました\n" + e.message;
+    setResultText(resultEl, "定義更新に失敗しました\n" + e.message, "error");
   } finally {
     reportDefinitionInProgress = false;
     setDefinitionButtons(false);
@@ -1450,25 +1471,25 @@ async function archiveReportDefinition() {
   }
 
   const reportId = document.getElementById("definitionId").value;
-  if (!reportId || !confirm("archiveします: " + reportId)) {
+  if (!reportId || !confirm(reportId + " をarchiveします。よろしいですか?")) {
     return;
   }
 
   reportDefinitionInProgress = true;
   setDefinitionButtons(true);
   const resultEl = document.getElementById("definitionResult");
-  resultEl.textContent = "archive中...";
+  setResultText(resultEl, "archive中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/archive", {
       method: "POST"
     });
-    resultEl.textContent = "archiveしました\n" + JSON.stringify(data.result || data.item || data, null, 2);
+    setResultText(resultEl, "archiveしました\n" + JSON.stringify(data.result || data.item || data, null, 2), "success");
     showToast("archiveしました");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "archiveに失敗しました\n" + e.message;
+    setResultText(resultEl, "archiveに失敗しました\n" + e.message, "error");
   } finally {
     reportDefinitionInProgress = false;
     setDefinitionButtons(false);
@@ -1486,11 +1507,11 @@ async function previewReportTemplate() {
   const button = document.getElementById("templatePreviewButton");
 
   if (!reportId) {
-    resultEl.textContent = "report_id is required";
+    setResultText(resultEl, "report_idを入力してください", "error");
     return;
   }
   if (!fileInput.files || !fileInput.files.length) {
-    resultEl.textContent = "template .xlsx file is required";
+    setResultText(resultEl, "テンプレートファイル(.xlsx)を選択してください", "error");
     return;
   }
 
@@ -1498,17 +1519,17 @@ async function previewReportTemplate() {
   form.append("template_file", fileInput.files[0]);
   templatePreviewInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "previewing template...";
+  setResultText(resultEl, "テンプレートを確認中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/template-preview", {
       method: "POST",
       body: form
     });
-    resultEl.textContent = JSON.stringify(data.preview || data, null, 2);
-    showToast("template preview completed");
+    setResultText(resultEl, JSON.stringify(data.preview || data, null, 2), "success");
+    showToast("テンプレートを確認しました");
   } catch (e) {
-    resultEl.textContent = "template preview failed\n" + e.message;
+    setResultText(resultEl, "テンプレート確認に失敗しました\n" + e.message, "error");
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -1526,14 +1547,14 @@ async function publishReportTemplate() {
   const button = document.getElementById("templatePublishButton");
 
   if (!reportId) {
-    resultEl.textContent = "report_id is required";
+    setResultText(resultEl, "report_idを入力してください", "error");
     return;
   }
   if (!fileInput.files || !fileInput.files.length) {
-    resultEl.textContent = "template .xlsx file is required";
+    setResultText(resultEl, "テンプレートファイル(.xlsx)を選択してください", "error");
     return;
   }
-  if (!confirm("publish template for " + reportId + "?")) {
+  if (!confirm(reportId + " のテンプレートを公開します。よろしいですか?")) {
     return;
   }
 
@@ -1542,19 +1563,19 @@ async function publishReportTemplate() {
   form.append("note", document.getElementById("templateVersionNote").value || "");
   templatePreviewInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "publishing template...";
+  setResultText(resultEl, "テンプレートを公開中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/template-publish", {
       method: "POST",
       body: form
     });
-    resultEl.textContent = "template published\n" + JSON.stringify(data.template || data.result || data, null, 2);
-    showToast("template published");
+    setResultText(resultEl, "テンプレートを公開しました\n" + JSON.stringify(data.template || data.result || data, null, 2), "success");
+    showToast("テンプレートを公開しました");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "template publish failed\n" + e.message;
+    setResultText(resultEl, "テンプレート公開に失敗しました\n" + e.message, "error");
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -1572,32 +1593,32 @@ async function rollbackReportTemplate() {
   const button = document.getElementById("templateRollbackButton");
 
   if (!reportId) {
-    resultEl.textContent = "report_id is required";
+    setResultText(resultEl, "report_idを入力してください", "error");
     return;
   }
   if (!version) {
-    resultEl.textContent = "rollback version is required";
+    setResultText(resultEl, "rollback対象のversion番号を入力してください", "error");
     return;
   }
-  if (!confirm("rollback report definition current_version to v" + version + " for " + reportId + "?")) {
+  if (!confirm(reportId + " のcurrent_versionをv" + version + " へ巻き戻します。よろしいですか?")) {
     return;
   }
 
   templatePreviewInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "rolling back report definition version...";
+  setResultText(resultEl, "versionを巻き戻し中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/version-rollback", {
       method: "POST",
       body: JSON.stringify({version: Number(version)})
     });
-    resultEl.textContent = "version rolled back\n" + JSON.stringify(data.result || data.item || data, null, 2);
-    showToast("version rolled back");
+    setResultText(resultEl, "versionを巻き戻しました\n" + JSON.stringify(data.result || data.item || data, null, 2), "success");
+    showToast("versionを巻き戻しました");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "version rollback failed\n" + e.message;
+    setResultText(resultEl, "version巻き戻しに失敗しました\n" + e.message, "error");
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -1614,23 +1635,23 @@ async function previewQueryMapping() {
   const button = document.getElementById("queryMappingPreviewButton");
 
   if (!reportId) {
-    resultEl.textContent = "report_id is required";
+    setResultText(resultEl, "report_idを入力してください", "error");
     return;
   }
 
   templatePreviewInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "running query dry-run...";
+  setResultText(resultEl, "query dry-runを実行中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/query-mapping-preview", {
       method: "POST",
       body: JSON.stringify({})
     });
-    resultEl.textContent = JSON.stringify(data.preview || data.result || data, null, 2);
-    showToast("query / mapping preview completed");
+    setResultText(resultEl, JSON.stringify(data.preview || data.result || data, null, 2), "success");
+    showToast("query / mappingの確認が完了しました");
   } catch (e) {
-    resultEl.textContent = "query / mapping preview failed\n" + e.message;
+    setResultText(resultEl, "query / mapping dry-runに失敗しました\n" + e.message, "error");
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -1647,16 +1668,16 @@ async function publishQueryMapping() {
   const button = document.getElementById("queryMappingPublishButton");
 
   if (!reportId) {
-    resultEl.textContent = "report_id is required";
+    setResultText(resultEl, "report_idを入力してください", "error");
     return;
   }
-  if (!confirm("publish query / mapping for " + reportId + "?")) {
+  if (!confirm(reportId + " のquery / mappingを公開します。よろしいですか?")) {
     return;
   }
 
   templatePreviewInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "publishing query / mapping metadata...";
+  setResultText(resultEl, "query / mappingを公開中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/query-mapping-publish", {
@@ -1665,12 +1686,12 @@ async function publishQueryMapping() {
         note: document.getElementById("queryMappingVersionNote").value || ""
       })
     });
-    resultEl.textContent = "query / mapping published\n" + JSON.stringify(data.query_mapping || data.result || data, null, 2);
-    showToast("query / mapping published");
+    setResultText(resultEl, "query / mappingを公開しました\n" + JSON.stringify(data.query_mapping || data.result || data, null, 2), "success");
+    showToast("query / mappingを公開しました");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "query / mapping publish failed\n" + e.message;
+    setResultText(resultEl, "query / mapping公開に失敗しました\n" + e.message, "error");
   } finally {
     templatePreviewInProgress = false;
     button.disabled = false;
@@ -1687,13 +1708,13 @@ async function saveReportSchedule() {
   const button = document.getElementById("scheduleSaveButton");
 
   if (!reportId) {
-    resultEl.textContent = "report_id is required";
+    setResultText(resultEl, "report_idを入力してください", "error");
     return;
   }
 
   reportDefinitionInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "saving schedule...";
+  setResultText(resultEl, "scheduleを保存中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/schedule", {
@@ -1701,12 +1722,12 @@ async function saveReportSchedule() {
       body: JSON.stringify(schedulePayload())
     });
     const item = data.result || data.item || data;
-    resultEl.textContent = "schedule saved\n" + JSON.stringify(item.schedule || item, null, 2);
-    showToast("schedule saved");
+    setResultText(resultEl, "scheduleを保存しました\n" + JSON.stringify(item.schedule || item, null, 2), "success");
+    showToast("scheduleを保存しました");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "schedule save failed\n" + e.message;
+    setResultText(resultEl, "schedule保存に失敗しました\n" + e.message, "error");
   } finally {
     reportDefinitionInProgress = false;
     button.disabled = false;
@@ -1723,14 +1744,14 @@ async function previewReportSchedules() {
 
   reportDefinitionInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "loading schedule dry-run...";
+  setResultText(resultEl, "schedule dry-runを実行中...", "neutral");
 
   try {
     const data = await api("/report-definitions/schedule-preview?limit=100");
-    resultEl.textContent = "schedule dry-run\n" + JSON.stringify(data.preview || data.result || data, null, 2);
-    showToast("schedule dry-run completed");
+    setResultText(resultEl, "schedule dry-run結果\n" + JSON.stringify(data.preview || data.result || data, null, 2), "success");
+    showToast("schedule dry-runが完了しました");
   } catch (e) {
-    resultEl.textContent = "schedule dry-run failed\n" + e.message;
+    setResultText(resultEl, "schedule dry-runに失敗しました\n" + e.message, "error");
   } finally {
     reportDefinitionInProgress = false;
     button.disabled = false;
@@ -1747,13 +1768,13 @@ async function saveDeliveryAllowlist() {
   const button = document.getElementById("deliveryAllowlistSaveButton");
 
   if (!reportId) {
-    resultEl.textContent = "report_id is required";
+    setResultText(resultEl, "report_idを入力してください", "error");
     return;
   }
 
   reportDefinitionInProgress = true;
   button.disabled = true;
-  resultEl.textContent = "saving delivery allowlist...";
+  setResultText(resultEl, "delivery allowlistを保存中...", "neutral");
 
   try {
     const data = await api("/report-definitions/" + encodeURIComponent(reportId) + "/delivery-allowlist", {
@@ -1761,13 +1782,13 @@ async function saveDeliveryAllowlist() {
       body: JSON.stringify(deliveryAllowlistPayload())
     });
     const item = data.result || data.item || data;
-    resultEl.textContent = "delivery allowlist saved\n" + JSON.stringify(item.delivery_allowlist || item, null, 2);
+    setResultText(resultEl, "delivery allowlistを保存しました\n" + JSON.stringify(item.delivery_allowlist || item, null, 2), "success");
     document.getElementById("deliveryAllowlistEmails").value = "";
-    showToast("delivery allowlist saved");
+    showToast("delivery allowlistを保存しました");
     delete reportDefinitionDetails[reportId];
     await loadReportDefinitions();
   } catch (e) {
-    resultEl.textContent = "delivery allowlist save failed\n" + e.message;
+    setResultText(resultEl, "delivery allowlist保存に失敗しました\n" + e.message, "error");
   } finally {
     reportDefinitionInProgress = false;
     button.disabled = false;
@@ -1779,14 +1800,14 @@ async function loadStorageAllowlist() {
   const button = document.getElementById("storageAllowlistButton");
 
   button.disabled = true;
-  resultEl.textContent = "loading storage allowlist...";
+  setResultText(resultEl, "storage allowlistを読み込み中...", "neutral");
 
   try {
     const data = await api("/report-definitions/storage-allowlist");
-    resultEl.textContent = JSON.stringify(data.allowlist || data.result || data, null, 2);
-    showToast("storage allowlist loaded");
+    setResultText(resultEl, JSON.stringify(data.allowlist || data.result || data, null, 2), "success");
+    showToast("storage allowlistを読み込みました");
   } catch (e) {
-    resultEl.textContent = "storage allowlist load failed\n" + e.message;
+    setResultText(resultEl, "storage allowlist読み込みに失敗しました\n" + e.message, "error");
   } finally {
     button.disabled = false;
   }
@@ -1843,7 +1864,10 @@ function populateCreateReportIdOptions() {
     if (!id) {
       return;
     }
-    const label = item.name ? (id + " - " + item.name) : id;
+    let label = item.name ? (id + " - " + item.name) : id;
+    if (definitionStatus(item) === "archived") {
+      label += " (archived)";
+    }
     options.push("<option value=\"" + attr(id) + "\">" + esc(label) + "</option>");
   });
 
@@ -1851,6 +1875,29 @@ function populateCreateReportIdOptions() {
 
   if (previous && reportDefinitionItems.some(item => String(item.report_id || "") === previous)) {
     select.value = previous;
+  }
+}
+
+function onCreateReportIdChange() {
+  const reportId = document.getElementById("createReportId").value;
+  if (!reportId) {
+    return;
+  }
+
+  const item = reportDefinitionItems.find(v => String(v.report_id || "") === reportId);
+  if (!item) {
+    return;
+  }
+
+  if (item.customer_name) {
+    document.getElementById("createCustomer").value = item.customer_name;
+  }
+  if (item.default_report_month) {
+    document.getElementById("createMonth").value = item.default_report_month;
+  }
+  const allowedDomains = (item.delivery_allowlist && item.delivery_allowlist.allowed_domains) || [];
+  if (allowedDomains.length) {
+    document.getElementById("createDomains").value = allowedDomains.join(", ");
   }
 }
 
@@ -1864,7 +1911,7 @@ async function loadReportDefinitions() {
     renderDefinitionsFromState();
     populateCreateReportIdOptions();
   } catch (e) {
-    el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+    el.innerHTML = "<p class='result-error'>" + esc(e.message) + "</p>";
   }
 }
 
@@ -1883,7 +1930,7 @@ async function loadReportDefinitionDetail(reportId) {
     renderDefinitionsFromState();
   } catch (e) {
     if (el) {
-      el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+      el.innerHTML = "<p class='result-error'>" + esc(e.message) + "</p>";
     }
   }
 }
@@ -1989,14 +2036,10 @@ function renderReportDefinitions(items) {
   }).join("");
 
   el.innerHTML =
-    "<p class='muted'>loaded definitions: " + items.length + "件</p>" +
+    "<p class='muted'>表示中の定義: " + items.length + "件</p>" +
     "<div class='table-wrap'><table class='definition-table'>" +
-    "<thead><tr><th>report_id</th><th>name</th><th>status</th><th>current</th><th>保存先</th><th>担当</th><th>更新日時</th></tr></thead>" +
+    "<thead><tr><th>report_id</th><th>name</th><th>状態</th><th>current</th><th>保存先</th><th>担当</th><th>schedule</th><th>許可リスト</th><th>更新日時</th></tr></thead>" +
     "<tbody>" + rows + "</tbody></table></div>";
-  const definitionHeader = el.querySelector(".definition-table thead tr");
-  if (definitionHeader) {
-    definitionHeader.innerHTML = "<th>report_id</th><th>name</th><th>status</th><th>current</th><th>storage</th><th>owner</th><th>schedule</th><th>delivery allowlist</th><th>updated</th>";
-  }
 }
 
 function deliveryStatus(item) {
@@ -2067,7 +2110,7 @@ async function loadDeliveries() {
     deliveryItems = data.items || [];
     renderDeliveriesFromState();
   } catch (e) {
-    el.innerHTML = "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+    el.innerHTML = "<p class='result-error'>" + esc(e.message) + "</p>";
   }
 }
 
@@ -2150,7 +2193,7 @@ async function addVersion(deliveryId) {
   }
 
   if (output) {
-    output.textContent = "version追加中...";
+    setResultText(output, "version追加中...", "neutral");
   }
 
   try {
@@ -2165,14 +2208,14 @@ async function addVersion(deliveryId) {
     });
 
     if (output) {
-      output.textContent = "version追加完了\n" + JSON.stringify(data.result || data, null, 2);
+      setResultText(output, "version追加完了\n" + JSON.stringify(data.result || data, null, 2), "success");
     }
     showToast("versionを追加しました");
     await loadDeliveries();
     await loadGcsFiles();
   } catch (e) {
     if (output) {
-      output.textContent = "version追加に失敗しました\n" + e.message;
+      setResultText(output, "version追加に失敗しました\n" + e.message, "error");
     }
   } finally {
     versionInProgress[deliveryId] = false;
@@ -2226,7 +2269,7 @@ async function loadLogs(deliveryId = "") {
 
   } catch (e) {
     logsEl.innerHTML =
-      "<p style='color:#c73535'>" + esc(e.message) + "</p>";
+      "<p class='result-error'>" + esc(e.message) + "</p>";
   }
 }
 
@@ -2278,14 +2321,14 @@ function renderLogs(items, deliveryId = "") {
       "<td><code>" + esc(item.delivery_id || "") + "</code></td>" +
       "<td>" + esc(item.customer_name || "") + "<br><span class='muted'>" + esc(item.report_month || "") + "</span></td>" +
       "<td>" + esc(item.email || "") + "</td>" +
-      "<td><span class='status-pill status-warning'>v" + esc(item.version || "") + "</span></td>" +
+      "<td><span class='status-pill status-neutral'>v" + esc(item.version || "") + "</span></td>" +
       "<td><code>" + esc(item.file_name || "") + "</code></td>" +
     "</tr>"
   ).join("");
 
   el.innerHTML =
     filterNotice +
-    "<p class='muted'>loaded logs: " + items.length + "件</p>" +
+    "<p class='muted'>表示中ログ: " + items.length + "件</p>" +
     "<div class='table-wrap'><table>" +
     "<thead><tr><th>日時</th><th>delivery_id</th><th>顧客/月</th><th>email</th><th>version</th><th>file</th></tr></thead>" +
     "<tbody>" + rows + "</tbody></table></div>";
@@ -3615,10 +3658,12 @@ def add_version(delivery_id: str):
             reason="report_generation_failed",
             detail={"overwrite": overwrite, "exception_type": type(exc).__name__},
         )
-        notify_slack_error(
-            "ICEレポート生成に失敗しました",
-            {"delivery_id": delivery_id, "reason": type(exc).__name__},
-        )
+        alert_detail = {"delivery_id": delivery_id, "reason": type(exc).__name__}
+        existing_delivery = get_delivery_record(delivery_id)
+        if existing_delivery:
+            alert_detail["customer_name"] = existing_delivery.get("customer_name")
+            alert_detail["report_month"] = existing_delivery.get("report_month")
+        notify_slack_error("ICEレポート生成に失敗しました", alert_detail)
         return jsonify({"error": "report generation failed"}), 500
 
     gcs_uri = generated.get("gcs_uri")
