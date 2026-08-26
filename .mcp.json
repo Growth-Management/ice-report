@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "notion": {
+      "type": "http",
+      "url": "https://mcp.notion.com/mcp"
+    },
+    "bigquery": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-v",
+        "C:\\Users\\sinohara\\report_excel_cloudrun\\tools.yaml:/app/tools.yaml",
+        "-v",
+        "C:\\Users\\sinohara\\AppData\\Roaming\\gcloud\\application_default_credentials.json:/tmp/adc.json",
+        "-e",
+        "GOOGLE_APPLICATION_CREDENTIALS=/tmp/adc.json",
+        "-e",
+        "GOOGLE_CLOUD_PROJECT=jumpplus-4a5f4",
+        "us-central1-docker.pkg.dev/database-toolbox/toolbox/toolbox:latest",
+        "--stdio",
+        "--config",
+        "/app/tools.yaml"
+      ]
+    }
+  }
+}
