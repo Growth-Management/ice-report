@@ -158,6 +158,52 @@ class SlackNotificationTest(unittest.TestCase):
         self.assertEqual(fields["許可メール件数"], "2")
         self.assertEqual(fields["有効期限"], "2026-08-27T00:00:00Z")
 
+    def test_create_scheduled_delivery_record_notifies_slack_internally(self):
+        expected_collection = self.distribution.FIRESTORE_COLLECTION_DELIVERIES
+
+        class _DocRef:
+            def __init__(self):
+                self.id = "scheduled-delivery-1"
+                self.set_calls = []
+
+            def set(self, data):
+                self.set_calls.append(data)
+
+        class _Collection:
+            def document(self):
+                return _DocRef()
+
+        class _Client:
+            def collection(self, name):
+                assert name == expected_collection
+                return _Collection()
+
+        with patch.object(
+            self.distribution, "get_firestore_client", return_value=_Client()
+        ), patch.object(
+            self.distribution, "get_slack_webhook_url", return_value="https://example.invalid/webhook"
+        ), patch.object(self.distribution.requests, "post") as mock_post:
+            self.distribution.create_scheduled_delivery_record(
+                customer_name="一ツ橋企画",
+                report_month="2026-08",
+                gcs_uri="gs://bucket/reports/plus/report.xlsx",
+                allowed_domains=["example.co.jp"],
+                allowed_emails=["user@example.com"],
+            )
+
+        mock_post.assert_called_once()
+        payload = self._post_payload(mock_post)
+        self.assertNotIn("<!channel>", payload["text"])
+        self.assertIn("スケジュール配信", payload["text"])
+        attachment = payload["attachments"][0]
+        self.assertEqual(attachment["color"], self.distribution.SLACK_COLOR_GOOD)
+        fields = {f["title"]: f["value"] for f in attachment["fields"]}
+        self.assertEqual(fields["顧客"], "一ツ橋企画")
+        self.assertEqual(fields["対象月"], "2026-08")
+        self.assertEqual(fields["許可ドメイン"], "example.co.jp")
+        self.assertEqual(fields["許可メール件数"], "1")
+        self.assertNotIn("user@example.com", str(payload))
+
     def test_notify_slack_error_uses_danger_color_and_channel_alert(self):
         with patch.object(
             self.distribution, "get_slack_webhook_url", return_value="https://example.invalid/webhook"
