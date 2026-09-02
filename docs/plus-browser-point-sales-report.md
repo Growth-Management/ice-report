@@ -126,9 +126,13 @@ caught the first month it appears rather than silently mapped to the wrong colum
   reference the whole table column rather than a fixed cell range, they keep summing correctly once
   the table's row count grows.
 - The per-row `TOTAL` column (`L`) in `合計_決済-商品別` was blank in the template (no formula). This
-  implementation writes a live formula per row,
-  `=SUM(合計_決済_商品別[@[100pt]:[10800pt]])`, rather than a static number, for consistency with the
-  column-level `SUBTOTAL` formulas.
+  implementation writes a live per-row formula, `=SUM(B{row}:K{row})` (a plain A1-range reference,
+  e.g. `=SUM(B2:K2)`), rather than a static number. An earlier version used a table structured
+  reference here (`=SUM(合計_決済_商品別[@[100pt]:[10800pt]])`); that formula shape triggers Excel's
+  file-repair-on-open behavior for a per-row (non-totals) table cell -- confirmed on real Windows
+  Excel, which drops the formula from `sheet2.xml` and leaves the `TOTAL` column blank after repair.
+  The table's own totals row keeps its structured `SUBTOTAL` reference (below) unchanged, which Excel
+  accepts without repair; only the per-row formula needed to move to a plain range.
 - New `payment_class` values are handled by `_extend_table_rows`: it inserts rows directly above the
   existing totals row, copies cell style/number-format from the row that used to be just above the
   totals row, and updates the table's `ref` (and `autoFilter.ref`) to cover the new range. This only
@@ -275,17 +279,28 @@ Once a deployed (or locally-run-against-real-credentials) instance has produced 
 3. If Cloud Scheduler has been configured, confirm a duplicate scheduled call for the same month
    returns `409` and that the OIDC auth check accepts the configured scheduler SA.
 
-## Open items
+## Status / open items
 
-The product-column-label question that previously blocked this report is resolved (see "Product price
--> template column label" above). Remaining work, none of which blocks opening a PR:
+This report is deployed to production (`report-generator` / `report-generator-admin`, same runtime SA
+and Drive folder as documented above). The `plus-browser-point-sales-monthly-report` Cloud Scheduler
+job exists (schedule `0 7 1 * *` Asia/Tokyo, OIDC SA `thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com`)
+and its OIDC auth and `409` duplicate-run behavior have both been verified end-to-end against production.
+`ice-report-runner@ice-sh.iam.gserviceaccount.com` has the dataset-level BigQuery `READER` ACL it needs
+on `dataset_process_tables` and `dataset_exdata_tables` (added directly on those two datasets; no
+project-wide `dataViewer` grant).
 
-1. Open a real generated `.xlsx` in Excel and confirm no repair warning (see "Post-deploy smoke test").
-2. ~~Confirm the existing runtime SA can write to the output Drive folder~~ -- done, see "Drive
-   authentication" above (verified via impersonation, no new SA/IAM needed).
-3. Create the Cloud Scheduler job against a reused existing scheduler SA (e.g.
-   `thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com`) and confirm the OIDC auth check accepts
-   it end-to-end, plus the `409` duplicate-run behavior.
-4. Local `.venv` setup fails on this machine's Python 3.14 because `pandas==2.2.2` has no prebuilt
-   wheel for 3.14 and its source build fails (`vswhere.exe` / meson error). This is a pre-existing
-   environment issue unrelated to this report; noted for reference only, not addressed here.
+A real Windows Excel open of an earlier production file surfaced the per-row `TOTAL` structured-reference
+repair issue described above; the fix (plain `=SUM(Bn:Kn)` per row) is covered by
+`tests/test_plus_browser_point_sales_report.py`, which specifically asserts no `[@[` structured-reference
+syntax survives in the saved worksheet XML.
+
+Remaining item:
+
+1. Re-confirm in real Windows Excel that a freshly regenerated `.xlsx` (with the `=SUM(Bn:Kn)` fix) opens
+   without a repair warning and that the `TOTAL` column displays correctly. This repo's automated checks
+   (openpyxl reload, OOXML XML parsing, absence of `[@[` in the saved XML) cannot themselves exercise
+   Excel's own repair logic.
+
+Unrelated, noted for reference only: local `.venv` setup fails on this machine's Python 3.14 because
+`pandas==2.2.2` has no prebuilt wheel for 3.14 and its source build fails (`vswhere.exe` / meson error).
+The Docker build (Python 3.12 base image) is unaffected.
