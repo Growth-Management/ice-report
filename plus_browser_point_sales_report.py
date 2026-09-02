@@ -232,6 +232,12 @@ def build_report_data(records: list[dict[str, Any]]) -> dict[str, Any]:
                 )
             continue
 
+        if price_raw is None:
+            raise PlusPointSalesReportError(
+                "unexpected_product_price",
+                "sales row has a mapped payment_class but a null price",
+                payment_class=payment_class,
+            )
         price = int(price_raw)
         if price not in PRICE_TO_POINT_LABEL:
             # Fails closed unconditionally (even for a sum_price == 0 zero-fill
@@ -342,7 +348,9 @@ def write_by_payment_product_sheet(ws: Worksheet, data: dict[str, Any]) -> None:
     _extend_table_rows(ws, BY_PAYMENT_PRODUCT_TABLE, len(payment_classes))
     header_row = 1
     total_col = len(prices) + 2  # column A = label, B..K = products, L = TOTAL
-    total_col_letter = get_column_letter(total_col)
+    row_total_formula = (
+        f"=SUM({BY_PAYMENT_PRODUCT_TABLE}[@[{PRICE_TO_POINT_LABEL[prices[0]]}]:[{PRICE_TO_POINT_LABEL[prices[-1]]}]])"
+    )
 
     for offset, payment_class in enumerate(payment_classes):
         row = header_row + 1 + offset
@@ -350,11 +358,7 @@ def write_by_payment_product_sheet(ws: Worksheet, data: dict[str, Any]) -> None:
         product_values = data["by_payment_product"].get(payment_class, {})
         for col_offset, price in enumerate(prices):
             ws.cell(row=row, column=2 + col_offset).value = int(product_values.get(price, 0))
-        first_col_letter = get_column_letter(2)
-        last_col_letter = get_column_letter(len(prices) + 1)
-        ws.cell(row=row, column=total_col).value = (
-            f"=SUM({BY_PAYMENT_PRODUCT_TABLE}[@[{PRICE_TO_POINT_LABEL[prices[0]]}]:[{PRICE_TO_POINT_LABEL[prices[-1]]}]])"
-        )
+        ws.cell(row=row, column=total_col).value = row_total_formula
 
 
 def create_plus_point_sales_workbook(
