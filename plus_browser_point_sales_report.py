@@ -28,13 +28,20 @@ BY_PAYMENT_TABLE = "合計_決済別"
 BY_PAYMENT_PRODUCT_SHEET = "合計_決済-商品別"
 BY_PAYMENT_PRODUCT_TABLE = "合計_決済_商品別"
 
-# ASSUMPTION (flagged in the implementation report; not backed by a BigQuery
-# mapping table): the template's product columns are bonus-inclusive "granted
-# points" labels for the same 10 price tiers `sbps_product` records as plain
-# yen price / "<price>pt" product_name. The correspondence below is inferred
-# from the fact that both lists have exactly 10 entries in the same ascending
-# order. If `sbps_product` ever reports a price outside this map, report
-# generation fails closed instead of guessing a label.
+# Official price -> Excel point-label mapping (confirmed business spec, not a
+# heuristic). `price` is the purchase amount in yen and the aggregation key
+# throughout this module; BigQuery's `product_name` (e.g. "300pt") is a
+# separate, purely informational label local to `daily_sbps_order_combined` /
+# `sbps_product` and is never used for the Excel mapping. The Excel template's
+# `合計_決済-商品別` columns use the bonus-inclusive "granted points" label for
+# each price tier (e.g. buying the 300-yen tier grants 310pt, i.e. a 10pt
+# bonus) -- that is the value on the right below, and it is the only source of
+# truth for the column header text.
+#
+# This map is intentionally static. When a new price tier is introduced, it
+# must be added here (and to the Excel template) explicitly by an engineer --
+# `build_report_data` fails closed with `unexpected_product_price` for any
+# `price` it does not recognize, rather than inferring a new label.
 PRICE_TO_POINT_LABEL: dict[int, str] = {
     100: "100pt",
     300: "310pt",
@@ -227,6 +234,12 @@ def build_report_data(records: list[dict[str, Any]]) -> dict[str, Any]:
 
         price = int(price_raw)
         if price not in PRICE_TO_POINT_LABEL:
+            # Fails closed unconditionally (even for a sum_price == 0 zero-fill
+            # row) so a newly introduced sbps_product price tier is caught the
+            # first month it appears in the master table, before it could ever
+            # be silently mapped to the wrong Excel column. The fix is to add
+            # the new price -> point-label pair to PRICE_TO_POINT_LABEL (and
+            # the Excel template's column) explicitly, never to guess it here.
             raise PlusPointSalesReportError(
                 "unexpected_product_price",
                 "sbps_product price has no known point-label mapping in PRICE_TO_POINT_LABEL",
