@@ -347,10 +347,9 @@ def write_by_payment_product_sheet(ws: Worksheet, data: dict[str, Any]) -> None:
     prices = data["prices"]
     _extend_table_rows(ws, BY_PAYMENT_PRODUCT_TABLE, len(payment_classes))
     header_row = 1
-    total_col = len(prices) + 2  # column A = label, B..K = products, L = TOTAL
-    row_total_formula = (
-        f"=SUM({BY_PAYMENT_PRODUCT_TABLE}[@[{PRICE_TO_POINT_LABEL[prices[0]]}]:[{PRICE_TO_POINT_LABEL[prices[-1]]}]])"
-    )
+    first_product_col = 2
+    last_product_col = 1 + len(prices)
+    total_col = last_product_col + 1  # column A = label, B..K = products, L = TOTAL
 
     for offset, payment_class in enumerate(payment_classes):
         row = header_row + 1 + offset
@@ -358,7 +357,15 @@ def write_by_payment_product_sheet(ws: Worksheet, data: dict[str, Any]) -> None:
         product_values = data["by_payment_product"].get(payment_class, {})
         for col_offset, price in enumerate(prices):
             ws.cell(row=row, column=2 + col_offset).value = int(product_values.get(price, 0))
-        ws.cell(row=row, column=total_col).value = row_total_formula
+        # Plain A1-range SUM, not a table structured reference ("...[@[..]:[..]]").
+        # openpyxl-written structured-reference formulas in a per-row (non-totals)
+        # table cell trip Excel's file-repair check on open (confirmed on real
+        # Windows Excel: the formula is dropped from sheet2.xml and the TOTAL
+        # column comes back blank). The totals row below keeps its structured
+        # SUBTOTAL reference, which Excel accepts without repair.
+        first_cell = f"{get_column_letter(first_product_col)}{row}"
+        last_cell = f"{get_column_letter(last_product_col)}{row}"
+        ws.cell(row=row, column=total_col).value = f"=SUM({first_cell}:{last_cell})"
 
 
 def create_plus_point_sales_workbook(
