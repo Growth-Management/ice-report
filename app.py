@@ -59,6 +59,10 @@ THERMAE_SCHEDULED_RUNS_COLLECTION = os.environ.get(
     "THERMAE_SCHEDULED_RUNS_COLLECTION",
     "thermae_scheduled_runs",
 )
+PLUS_POINT_SALES_SCHEDULED_RUNS_COLLECTION = os.environ.get(
+    "PLUS_POINT_SALES_SCHEDULED_RUNS_COLLECTION",
+    "plus_point_sales_scheduled_runs",
+)
 
 
 class RuntimeTemplateError(Exception):
@@ -2613,6 +2617,30 @@ def _check_report_definition_scheduler_auth() -> tuple[bool, str]:
     )
 
 
+def _check_plus_point_sales_scheduler_auth() -> tuple[bool, str]:
+    return _check_scheduler_oidc_auth(
+        env_prefix="PLUS_POINT_SALES_SCHEDULER",
+        log_tag="ICE_REPORT_PLUS_POINT_SALES_SCHEDULE_AUTH",
+    )
+
+
+def _safe_plus_point_sales_scheduled_result(result: dict) -> dict:
+    return {
+        "status": str(result.get("status") or "ok"),
+        "report": "plus-browser-point-sales",
+        "target_month": str(result.get("target_month") or ""),
+        "generated_date": str(result.get("generated_date") or ""),
+        "file_name": str(result.get("file_name") or ""),
+        "has_drive_file": bool(result.get("file_id")),
+        "payment_class_count": result.get("payment_class_count"),
+        "grand_total": result.get("grand_total"),
+    }
+
+
+def _plus_point_sales_scheduled_run_id(target_month: date) -> str:
+    return target_month.strftime("%Y-%m")
+
+
 def _safe_thermae_scheduled_result(result: dict) -> dict:
     return {
         "status": str(result.get("status") or "ok"),
@@ -2776,6 +2804,165 @@ def scheduled_generate_thermae_romae():
     )
     logging.warning(
         "ICE_REPORT_THERMAE_SCHEDULE_COMPLETED target_month=%s has_drive_file=%s",
+        safe_result["target_month"],
+        safe_result["has_drive_file"],
+    )
+    return jsonify({"result": safe_result, **safe_result})
+
+
+@app.post("/admin/reports/plus-browser-point-sales/generate")
+def generate_plus_point_sales():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    target_month = str(payload.get("target_month") or "").strip() or None
+
+    try:
+        from plus_browser_point_sales_report import (
+            PlusPointSalesReportError,
+            generate_plus_point_sales_report,
+        )
+
+        result = generate_plus_point_sales_report(
+            project_id=project_id,
+            target_month_text=target_month,
+        )
+    except ImportError:
+        logging.error("ICE_REPORT_PLUS_POINT_SALES_DEPENDENCY_MISSING")
+        _log_admin_audit_event(
+            action="plus_point_sales_generate",
+            result="failure",
+            target_type="report",
+            target_id="plus-browser-point-sales",
+            status_code=500,
+            reason="dependency_missing",
+        )
+        return jsonify({"error": "dependency_missing"}), 500
+    except Exception as exc:
+        error_code = getattr(exc, "code", "plus_point_sales_generate_failed")
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        log_level = logging.warning if status_code < 500 else logging.error
+        log_level("ICE_REPORT_PLUS_POINT_SALES_FAILED reason=%s", error_code)
+        _log_admin_audit_event(
+            action="plus_point_sales_generate",
+            result="failure",
+            target_type="report",
+            target_id="plus-browser-point-sales",
+            status_code=status_code,
+            reason=error_code,
+            detail={"target_month": target_month or ""},
+        )
+        return jsonify({"error": error_code}), status_code
+
+    _log_admin_audit_event(
+        action="plus_point_sales_generate",
+        result="success",
+        target_type="report",
+        target_id="plus-browser-point-sales",
+        status_code=200,
+        detail={
+            "target_month": result.get("target_month"),
+            "payment_class_count": result.get("payment_class_count"),
+            "grand_total": result.get("grand_total"),
+        },
+    )
+    return jsonify({"result": result, **result})
+
+
+@app.post("/admin/reports/plus-browser-point-sales/scheduled-generate")
+def scheduled_generate_plus_point_sales():
+    ok, reason = _check_plus_point_sales_scheduler_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized", "reason": reason}), 401
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    target_month_text = str(payload.get("target_month") or "").strip() or None
+
+    try:
+        from plus_browser_point_sales_report import (
+            PlusPointSalesReportError,
+            generate_plus_point_sales_report,
+            parse_target_month,
+            tokyo_today,
+        )
+
+        generated_date = tokyo_today()
+        target_month = parse_target_month(target_month_text, today=generated_date)
+    except ImportError:
+        logging.error("ICE_REPORT_PLUS_POINT_SALES_SCHEDULE_DEPENDENCY_MISSING")
+        return jsonify({"error": "dependency_missing"}), 500
+    except Exception as exc:
+        error_code = getattr(exc, "code", "plus_point_sales_schedule_invalid_target_month")
+        status_code = int(getattr(exc, "status_code", 400) or 400)
+        logging.warning("ICE_REPORT_PLUS_POINT_SALES_SCHEDULE_REJECTED reason=%s", error_code)
+        return jsonify({"error": error_code}), status_code
+
+    run_id = _plus_point_sales_scheduled_run_id(target_month)
+    claimed, run_ref_or_status = _claim_scheduled_run(
+        collection_name=PLUS_POINT_SALES_SCHEDULED_RUNS_COLLECTION,
+        run_id=run_id,
+        initial_fields={
+            "report": "plus-browser-point-sales",
+            "target_month": target_month.isoformat(),
+            "result_code": "generation_started",
+        },
+    )
+    if not claimed:
+        return jsonify(
+            {
+                "error": "duplicate_scheduled_run",
+                "target_month": target_month.isoformat(),
+                "status": run_ref_or_status,
+            }
+        ), 409
+
+    run_ref = run_ref_or_status
+
+    try:
+        result = generate_plus_point_sales_report(
+            project_id=project_id,
+            target_month_text=target_month.isoformat(),
+            today=generated_date,
+        )
+        safe_result = _safe_plus_point_sales_scheduled_result(result)
+    except PlusPointSalesReportError as exc:
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        run_ref.update(
+            {
+                "status": "failed",
+                "result_code": getattr(exc, "code", "plus_point_sales_schedule_failed"),
+                "updated_at": _now_utc(),
+            }
+        )
+        logging.warning(
+            "ICE_REPORT_PLUS_POINT_SALES_SCHEDULE_FAILED reason=%s", getattr(exc, "code", "failed")
+        )
+        return jsonify({"error": getattr(exc, "code", "plus_point_sales_schedule_failed")}), status_code
+    except Exception:
+        run_ref.update(
+            {
+                "status": "failed",
+                "result_code": "plus_point_sales_schedule_failed",
+                "updated_at": _now_utc(),
+            }
+        )
+        logging.error("ICE_REPORT_PLUS_POINT_SALES_SCHEDULE_FAILED")
+        return jsonify({"error": "plus_point_sales_schedule_failed"}), 500
+
+    run_ref.update(
+        {
+            "status": "succeeded",
+            "result_code": "generation_succeeded",
+            "result": safe_result,
+            "updated_at": _now_utc(),
+        }
+    )
+    logging.warning(
+        "ICE_REPORT_PLUS_POINT_SALES_SCHEDULE_COMPLETED target_month=%s has_drive_file=%s",
         safe_result["target_month"],
         safe_result["has_drive_file"],
     )
