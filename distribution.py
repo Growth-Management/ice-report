@@ -417,6 +417,25 @@ def create_scheduled_delivery_record(
     ref = db.collection(FIRESTORE_COLLECTION_DELIVERIES).document()
     ref.set(doc)
 
+    notify_slack_event(
+        "ICEレポート配布URLが自動生成されました(スケジュール配信)",
+        {
+            "delivery_id": ref.id,
+            "customer_name": customer_name,
+            "report_month": report_month,
+            "version": 1,
+            "file_name": file_name,
+            "gcs_uri": gcs_uri,
+            "download_url": url,
+            "active": True,
+            "allowed_domains": normalized_allowed_domains,
+            "allowed_email_count": len(normalized_allowed_emails),
+            "expires_at": expires_at.isoformat(),
+            "timestamp": now.isoformat(),
+        },
+        color=SLACK_COLOR_GOOD,
+    )
+
     return {
         "delivery_id": ref.id,
         "expires_at": expires_at.isoformat(),
