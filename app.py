@@ -461,6 +461,21 @@ def render_admin_ui() -> str:
       border-radius: 8px;
     }
 
+    .button-link {
+      display: inline-block;
+      margin-top: 8px;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-weight: 700;
+      text-decoration: none;
+      color: #fff;
+      background: var(--primary);
+      transition: 0.12s ease;
+    }
+
+    .button-link:hover { background: var(--primary-dark); }
+
     .row-actions {
       display: flex;
       flex-wrap: wrap;
@@ -911,6 +926,7 @@ def render_admin_ui() -> str:
     <button class="secondary" id="tabBtnDeliveries" onclick="showAdminTab('deliveries')">配布一覧</button>
     <button class="secondary" id="tabBtnLogs" onclick="showAdminTab('logs')">ダウンロードログ</button>
     <button class="secondary" id="tabBtnDefinitions" onclick="showAdminTab('definitions')">レポート定義管理</button>
+    <button class="secondary" id="tabBtnPlusPointSales" onclick="showAdminTab('plusPointSales')">ポイント売上</button>
   </div>
 
   <div id="tabPanelDefinitions" class="tab-panel" style="display:none;">
@@ -1055,6 +1071,29 @@ def render_admin_ui() -> str:
         <button class="secondary" onclick="loadLogs()">全ログを更新</button>
       </div>
       <div id="logs" class="notice">loading...</div>
+    </div>
+  </div>
+
+  <div id="tabPanelPlusPointSales" class="tab-panel" style="display:none;">
+    <div class="card">
+      <h2>PLUSブラウザ版ポイント売上</h2>
+      <p class="muted">指定した月の確定値をBigQueryから集計し、Excelを生成してDriveへ保存します。</p>
+      <div class="field">
+        <label>対象月</label>
+        <input id="plusPointSalesMonth" type="month" value="__DEFAULT_PLUS_POINT_SALES_MONTH__">
+      </div>
+      <div class="toolbar">
+        <button id="plusPointSalesGenerateButton" onclick="generatePlusPointSales()">レポート生成</button>
+      </div>
+      <pre id="plusPointSalesResult">待機中</pre>
+    </div>
+
+    <div class="card">
+      <h2>Drive生成ファイル</h2>
+      <div class="toolbar">
+        <button class="secondary" onclick="loadPlusPointSalesFiles()">一覧更新</button>
+      </div>
+      <div id="plusPointSalesFiles" class="notice">loading...</div>
     </div>
   </div>
 </main>
@@ -1846,7 +1885,8 @@ const ADMIN_TAB_SUFFIXES = {
   create: "Create",
   deliveries: "Deliveries",
   logs: "Logs",
-  definitions: "Definitions"
+  definitions: "Definitions",
+  plusPointSales: "PlusPointSales"
 };
 
 function showAdminTab(tab) {
@@ -2338,23 +2378,162 @@ function renderLogs(items, deliveryId = "") {
     "<tbody>" + rows + "</tbody></table></div>";
 }
 
+let plusPointSalesGenerateInProgress = false;
+
+function monthInputToTargetMonth(value) {
+  // "YYYY-MM" (native <input type="month"> value) -> "YYYY-MM-01"
+  return /^\d{4}-\d{2}$/.test(value || "") ? value + "-01" : "";
+}
+
+function formatMonthLabel(monthValue) {
+  const m = /^(\d{4})-(\d{2})$/.exec(monthValue || "");
+  return m ? (m[1] + "年" + m[2] + "月") : (monthValue || "");
+}
+
+function formatYen(value) {
+  return "¥" + Number(value || 0).toLocaleString("ja-JP");
+}
+
+async function generatePlusPointSales() {
+  if (plusPointSalesGenerateInProgress) {
+    return;
+  }
+
+  const monthValue = document.getElementById("plusPointSalesMonth").value;
+  const targetMonth = monthInputToTargetMonth(monthValue);
+  const resultEl = document.getElementById("plusPointSalesResult");
+
+  if (!targetMonth) {
+    setResultText(resultEl, "対象月を選択してください。", "error");
+    return;
+  }
+
+  const monthLabel = formatMonthLabel(monthValue);
+  const confirmed = confirm(
+    monthLabel + "分のポイント売上レポートを生成します。\n\n" +
+    "同じ対象月を再生成すると、Drive上に同名ファイルが増える場合があります。\n\n" +
+    "実行しますか？"
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  plusPointSalesGenerateInProgress = true;
+  const button = document.getElementById("plusPointSalesGenerateButton");
+  button.disabled = true;
+  button.textContent = "生成中...";
+  setResultText(resultEl, "レポートを生成中です。BigQuery集計・Excel生成・Drive保存中...", "neutral");
+
+  try {
+    const data = await api("/admin/reports/plus-browser-point-sales/generate", {
+      method: "POST",
+      body: JSON.stringify({target_month: targetMonth})
+    });
+
+    const lines = [
+      "生成完了",
+      "",
+      "対象月       " + formatMonthLabel((data.target_month || "").slice(0, 7)),
+      "総売上       " + formatYen(data.grand_total),
+      "決済分類     " + (data.payment_class_count ?? "-"),
+      "ファイル     " + (data.file_name || "-")
+    ];
+    resultEl.textContent = lines.join("\n");
+    resultEl.classList.remove("result-error");
+    resultEl.classList.add("result-success");
+
+    if (data.webViewLink) {
+      const existingLink = document.getElementById("plusPointSalesResultLink");
+      if (existingLink) {
+        existingLink.remove();
+      }
+      const link = document.createElement("a");
+      link.id = "plusPointSalesResultLink";
+      link.href = data.webViewLink;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Driveで開く";
+      link.className = "button-link";
+      resultEl.insertAdjacentElement("afterend", link);
+    }
+
+    showToast("レポートを生成しました");
+    loadPlusPointSalesFiles();
+  } catch (e) {
+    setResultText(resultEl, "エラー: " + e.message, "error");
+  } finally {
+    plusPointSalesGenerateInProgress = false;
+    button.disabled = false;
+    button.textContent = "レポート生成";
+  }
+}
+
+async function loadPlusPointSalesFiles() {
+  const el = document.getElementById("plusPointSalesFiles");
+  el.innerHTML = "<p class='muted'>loading...</p>";
+
+  try {
+    const data = await api("/admin/reports/plus-browser-point-sales/files?limit=20");
+    renderPlusPointSalesFiles(data.items || []);
+  } catch (e) {
+    el.innerHTML = "<p class='result-error'>" + esc(e.message) + "</p>";
+  }
+}
+
+function renderPlusPointSalesFiles(items) {
+  const el = document.getElementById("plusPointSalesFiles");
+
+  if (!items.length) {
+    el.innerHTML = "<p class='muted'>該当ファイルなし</p>";
+    return;
+  }
+
+  const rows = items.map(item => {
+    const openLink = item.webViewLink
+      ? "<a href=\"" + attr(item.webViewLink) + "\" target=\"_blank\" rel=\"noopener noreferrer\">開く</a>"
+      : "-";
+    return "<tr>" +
+      "<td>" + esc(item.name || "") + "<br><span class='muted' style='font-size:11px;'>" + esc(item.id || "") + "</span></td>" +
+      "<td>" + esc(formatDateTime(item.createdTime || "")) + "</td>" +
+      "<td>" + esc(formatDateTime(item.modifiedTime || "")) + "</td>" +
+      "<td>" + openLink + "</td>" +
+    "</tr>";
+  }).join("");
+
+  el.innerHTML =
+    "<p class='muted'>" + items.length + "件</p>" +
+    "<div class='table-wrap'><table>" +
+    "<thead><tr><th>ファイル</th><th>作成日時</th><th>更新日時</th><th>Drive</th></tr></thead>" +
+    "<tbody>" + rows + "</tbody></table></div>";
+}
+
 async function loadAll() {
   await loadReportDefinitions();
   await loadDeliveries();
   await loadLogs();
   await loadGcsFiles();
+  await loadPlusPointSalesFiles();
 }
 
 loadReportDefinitions();
 loadDeliveries();
 loadLogs();
+loadPlusPointSalesFiles();
 
 </script>
 </body>
 </html>
 """
     default_report_month = previous_month_base(date.today()).strftime("%Y-%m")
-    return html.replace("__DEFAULT_REPORT_MONTH__", default_report_month)
+    html = html.replace("__DEFAULT_REPORT_MONTH__", default_report_month)
+
+    try:
+        from plus_browser_point_sales_report import previous_month_first, tokyo_today
+
+        default_plus_point_sales_month = previous_month_first(tokyo_today()).strftime("%Y-%m")
+    except ImportError:
+        default_plus_point_sales_month = default_report_month
+    return html.replace("__DEFAULT_PLUS_POINT_SALES_MONTH__", default_plus_point_sales_month)
 
 
 @app.get("/admin")
@@ -2870,6 +3049,51 @@ def generate_plus_point_sales():
         },
     )
     return jsonify({"result": result, **result})
+
+
+@app.get("/admin/reports/plus-browser-point-sales/files")
+def list_plus_point_sales_files():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    try:
+        limit = int(request.args.get("limit", "20"))
+    except ValueError:
+        limit = 20
+
+    try:
+        from drive_io import DRIVE_XLSX_MIME_TYPE, DriveOperationError, list_drive_files
+        from plus_browser_point_sales_report import OUTPUT_FILE_NAME_PREFIX, default_output_folder_id
+
+        files = list_drive_files(
+            folder_id=default_output_folder_id(),
+            name_contains=OUTPUT_FILE_NAME_PREFIX,
+            mime_type=DRIVE_XLSX_MIME_TYPE,
+            limit=limit,
+        )
+    except ImportError:
+        logging.error("ICE_REPORT_PLUS_POINT_SALES_FILES_DEPENDENCY_MISSING")
+        return jsonify({"error": "dependency_missing"}), 500
+    except DriveOperationError as exc:
+        logging.warning("ICE_REPORT_PLUS_POINT_SALES_FILES_FAILED reason=%s", exc.code)
+        return jsonify({"error": exc.code}), exc.status_code
+    except Exception:
+        logging.error("ICE_REPORT_PLUS_POINT_SALES_FILES_FAILED")
+        return jsonify({"error": "plus_point_sales_files_failed"}), 500
+
+    items = [
+        {
+            "id": f.get("id", ""),
+            "name": f.get("name", ""),
+            "webViewLink": f.get("webViewLink", ""),
+            "createdTime": f.get("createdTime", ""),
+            "modifiedTime": f.get("modifiedTime", ""),
+            "size": f.get("size", ""),
+        }
+        for f in files
+    ]
+    return jsonify({"items": items})
 
 
 @app.post("/admin/reports/plus-browser-point-sales/scheduled-generate")
