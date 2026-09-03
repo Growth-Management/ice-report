@@ -3064,7 +3064,11 @@ def list_plus_point_sales_files():
 
     try:
         from drive_io import DRIVE_XLSX_MIME_TYPE, DriveOperationError, list_drive_files
-        from plus_browser_point_sales_report import OUTPUT_FILE_NAME_PREFIX, default_output_folder_id
+        from plus_browser_point_sales_report import (
+            OUTPUT_FILE_NAME_PREFIX,
+            default_output_folder_id,
+            default_template_file_id,
+        )
 
         files = list_drive_files(
             folder_id=default_output_folder_id(),
@@ -3072,6 +3076,14 @@ def list_plus_point_sales_files():
             mime_type=DRIVE_XLSX_MIME_TYPE,
             limit=limit,
         )
+        # The template's own placeholder file name ("..._yy年mm月分.xlsx") also
+        # contains OUTPUT_FILE_NAME_PREFIX as a substring, so a plain `name
+        # contains` Drive query matches it too. It lives in the same folder as
+        # every generated report but is not itself a generated report, so it
+        # is excluded by id rather than trying to pattern-match "not a real
+        # date" in the file name.
+        template_id = default_template_file_id()
+        files = [f for f in files if f.get("id") != template_id]
     except ImportError:
         logging.error("ICE_REPORT_PLUS_POINT_SALES_FILES_DEPENDENCY_MISSING")
         return jsonify({"error": "dependency_missing"}), 500
