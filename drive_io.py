@@ -126,6 +126,49 @@ def get_drive_service():
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 
+def _escape_drive_query_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def list_drive_files(
+    *,
+    folder_id: str,
+    name_contains: str | None = None,
+    mime_type: str | None = None,
+    limit: int = 20,
+    service=None,
+) -> list[dict]:
+    """List non-trashed files directly inside a Drive folder, newest first.
+
+    Read-only helper shared by any admin UI that needs to show what a report
+    has produced (Shared Drive aware via supportsAllDrives/includeItemsFromAllDrives).
+    """
+    service = service or get_drive_service()
+    query_parts = [f"'{_escape_drive_query_value(folder_id)}' in parents", "trashed = false"]
+    if name_contains:
+        query_parts.append(f"name contains '{_escape_drive_query_value(name_contains)}'")
+    if mime_type:
+        query_parts.append(f"mimeType = '{_escape_drive_query_value(mime_type)}'")
+
+    try:
+        response = (
+            service.files()
+            .list(
+                q=" and ".join(query_parts),
+                fields="files(id,name,webViewLink,createdTime,modifiedTime,size)",
+                orderBy="createdTime desc",
+                pageSize=max(1, min(int(limit), 100)),
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+    except Exception as exc:
+        _raise_drive_error(exc)
+
+    return response.get("files", [])
+
+
 def download_drive_file(file_id: str, destination_path: str | Path, *, service=None) -> Path:
     service = service or get_drive_service()
     destination = Path(destination_path)

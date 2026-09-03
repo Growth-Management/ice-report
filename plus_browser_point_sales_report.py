@@ -145,8 +145,11 @@ def parse_target_month(value: str | None = None, *, today: date | None = None) -
     return parsed
 
 
+OUTPUT_FILE_NAME_PREFIX = "J+ブラウザ版_ポイント売上_"
+
+
 def output_file_name(target_month: date) -> str:
-    return f"J+ブラウザ版_ポイント売上_{target_month:%y年%m月}分.xlsx"
+    return f"{OUTPUT_FILE_NAME_PREFIX}{target_month:%y年%m月}分.xlsx"
 
 
 def source_table() -> str:
@@ -159,6 +162,14 @@ def product_table() -> str:
 
 def payment_class_table() -> str:
     return os.environ.get("PLUS_POINT_SALES_PAYMENT_CLASS_TABLE", DEFAULT_PLUS_PAYMENT_CLASS_TABLE)
+
+
+def default_template_file_id() -> str:
+    return os.environ.get("PLUS_POINT_SALES_TEMPLATE_FILE_ID", DEFAULT_PLUS_TEMPLATE_FILE_ID)
+
+
+def default_output_folder_id() -> str:
+    return os.environ.get("PLUS_POINT_SALES_OUTPUT_FOLDER_ID", DEFAULT_PLUS_OUTPUT_FOLDER_ID)
 
 
 def _payment_class_sort_key(payment_class: str) -> tuple[int, str]:
@@ -403,12 +414,8 @@ def generate_plus_point_sales_report(
 
     today = today or tokyo_today()
     target_month = parse_target_month(target_month_text, today=today)
-    template_id = template_file_id or os.environ.get(
-        "PLUS_POINT_SALES_TEMPLATE_FILE_ID", DEFAULT_PLUS_TEMPLATE_FILE_ID
-    )
-    folder_id = output_folder_id or os.environ.get(
-        "PLUS_POINT_SALES_OUTPUT_FOLDER_ID", DEFAULT_PLUS_OUTPUT_FOLDER_ID
-    )
+    template_id = template_file_id or default_template_file_id()
+    folder_id = output_folder_id or default_output_folder_id()
     file_name = output_file_name(target_month)
 
     records = run_plus_point_sales_query(project_id=project_id, target_month=target_month)
