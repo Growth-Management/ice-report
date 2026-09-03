@@ -152,6 +152,33 @@ class ListPlusPointSalesFilesEndpointTests(unittest.TestCase):
         self.assertEqual(kwargs["folder_id"], report.default_output_folder_id())
         self.assertNotEqual(kwargs["folder_id"], "attacker-controlled")
 
+    def test_template_file_is_excluded_from_the_listing(self):
+        # Regression: the template's placeholder name ("..._yy年mm月分.xlsx")
+        # also contains OUTPUT_FILE_NAME_PREFIX, so Drive's `name contains`
+        # query matches the template file itself. It lives in the same
+        # output folder as every generated report but must never be listed
+        # as one (confirmed against real Drive data during production
+        # smoke testing).
+        import plus_browser_point_sales_report as report
+
+        template_id = report.default_template_file_id()
+        fake_files = [
+            {"id": "generated-1", "name": "J+ブラウザ版_ポイント売上_26年08月分.xlsx"},
+            {"id": template_id, "name": "J+ブラウザ版_ポイント売上_yy年mm月分.xlsx"},
+        ]
+        with mock.patch.dict(os.environ, {"ADMIN_API_KEY": "secret"}), mock.patch(
+            "drive_io.list_drive_files", return_value=fake_files
+        ):
+            resp = self.client.get(
+                "/admin/reports/plus-browser-point-sales/files",
+                headers={"X-Admin-Key": "secret"},
+            )
+
+        body = resp.get_json()
+        ids = [item["id"] for item in body["items"]]
+        self.assertEqual(ids, ["generated-1"])
+        self.assertNotIn(template_id, ids)
+
 
 class ListDriveFilesTests(unittest.TestCase):
     def test_query_and_request_shape(self):
