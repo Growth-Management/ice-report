@@ -63,6 +63,10 @@ PLUS_POINT_SALES_SCHEDULED_RUNS_COLLECTION = os.environ.get(
     "PLUS_POINT_SALES_SCHEDULED_RUNS_COLLECTION",
     "plus_point_sales_scheduled_runs",
 )
+AD_REVENUE_SCHEDULED_RUNS_COLLECTION = os.environ.get(
+    "AD_REVENUE_SCHEDULED_RUNS_COLLECTION",
+    "ad_revenue_scheduled_runs",
+)
 
 
 class RuntimeTemplateError(Exception):
@@ -3203,6 +3207,314 @@ def scheduled_generate_plus_point_sales():
         safe_result["has_drive_file"],
     )
     return jsonify({"result": safe_result, **safe_result})
+
+
+def _check_ad_revenue_scheduler_auth() -> tuple[bool, str]:
+    return _check_scheduler_oidc_auth(
+        env_prefix="AD_REVENUE_SCHEDULER",
+        log_tag="ICE_REPORT_AD_REVENUE_SCHEDULE_AUTH",
+    )
+
+
+def _safe_ad_revenue_scheduled_result(report_type: str, result: dict) -> dict:
+    return {
+        "status": str(result.get("status") or "generated"),
+        "report": report_type,
+        "target_month": str(result.get("target_month") or ""),
+        "generated_date": str(result.get("generated_date") or ""),
+        "file_name": str(result.get("file_name") or ""),
+        "has_drive_file": bool(result.get("file_id")),
+        "detail_row_count": result.get("detail_row_count"),
+    }
+
+
+def _ad_revenue_scheduled_run_id(report_type: str, target_month: date) -> str:
+    return f"{report_type}-{target_month:%Y-%m}"
+
+
+@app.post("/admin/reports/jumpplus-ad-revenue/<report_type>/generate")
+def generate_jumpplus_ad_revenue(report_type: str):
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    target_month = str(payload.get("target_month") or "").strip() or None
+
+    try:
+        from jumpplus_ad_revenue_report import AdRevenueReportError, generate_ad_revenue_report
+
+        result = generate_ad_revenue_report(
+            project_id=project_id,
+            report_type=report_type,
+            target_month_text=target_month,
+        )
+    except ImportError:
+        logging.error("ICE_REPORT_AD_REVENUE_DEPENDENCY_MISSING")
+        _log_admin_audit_event(
+            action="ad_revenue_generate",
+            result="failure",
+            target_type="report",
+            target_id=report_type,
+            status_code=500,
+            reason="dependency_missing",
+        )
+        return jsonify({"error": "dependency_missing"}), 500
+    except Exception as exc:
+        error_code = getattr(exc, "code", "ad_revenue_generate_failed")
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        log_level = logging.warning if status_code < 500 else logging.error
+        log_level("ICE_REPORT_AD_REVENUE_FAILED report_type=%s reason=%s", report_type, error_code)
+        _log_admin_audit_event(
+            action="ad_revenue_generate",
+            result="failure",
+            target_type="report",
+            target_id=report_type,
+            status_code=status_code,
+            reason=error_code,
+            detail={"target_month": target_month or ""},
+        )
+        return jsonify({"error": error_code}), status_code
+
+    _log_admin_audit_event(
+        action="ad_revenue_generate",
+        result="success",
+        target_type="report",
+        target_id=report_type,
+        status_code=200,
+        detail={
+            "target_month": result.get("target_month"),
+            "revenue_yen": result.get("revenue_yen"),
+            "detail_row_count": result.get("detail_row_count"),
+        },
+    )
+    return jsonify({"result": result, **result})
+
+
+@app.post("/admin/reports/jumpplus-ad-revenue/<report_type>/scheduled-generate")
+def scheduled_generate_jumpplus_ad_revenue(report_type: str):
+    ok, reason = _check_ad_revenue_scheduler_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized", "reason": reason}), 401
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    target_month_text = str(payload.get("target_month") or "").strip() or None
+
+    try:
+        from jumpplus_ad_revenue_report import (
+            AdRevenueReportError,
+            REPORT_SPECS,
+            check_readiness,
+            generate_ad_revenue_report,
+            parse_target_month,
+            tokyo_today,
+        )
+    except ImportError:
+        logging.error("ICE_REPORT_AD_REVENUE_SCHEDULE_DEPENDENCY_MISSING")
+        return jsonify({"error": "dependency_missing"}), 500
+
+    if report_type not in REPORT_SPECS:
+        return jsonify({"error": "unknown_report_type"}), 404
+
+    generated_date = tokyo_today()
+    try:
+        target_month = parse_target_month(target_month_text, today=generated_date)
+    except Exception as exc:
+        error_code = getattr(exc, "code", "ad_revenue_schedule_invalid_target_month")
+        status_code = int(getattr(exc, "status_code", 400) or 400)
+        logging.warning("ICE_REPORT_AD_REVENUE_SCHEDULE_REJECTED reason=%s", error_code)
+        return jsonify({"error": error_code}), status_code
+
+    run_id = _ad_revenue_scheduled_run_id(report_type, target_month)
+
+    # Peek at any existing run record without claiming: the condition check
+    # (this whole request, up to the point a claim is actually taken below)
+    # must be safe to call repeatedly and must not itself create a Firestore
+    # record, so a scheduler poll that finds the report not-yet-ready never
+    # shows up as a "duplicate" on a later, real attempt.
+    db = firestore.Client()
+    run_ref = db.collection(AD_REVENUE_SCHEDULED_RUNS_COLLECTION).document(run_id)
+    existing = run_ref.get()
+    if existing.exists:
+        existing_status = (existing.to_dict() or {}).get("status", "")
+        if existing_status == "succeeded":
+            logging.info(
+                "ICE_REPORT_AD_REVENUE_SCHEDULE_SKIPPED report_type=%s target_month=%s reason=already_generated",
+                report_type,
+                target_month.isoformat(),
+            )
+            return jsonify({"status": "skipped", "reason": "already_generated", "target_month": target_month.isoformat()})
+        return jsonify(
+            {"error": "duplicate_scheduled_run", "target_month": target_month.isoformat(), "status": existing_status}
+        ), 409
+
+    readiness = check_readiness(project_id=project_id, report_type=report_type, target_month=target_month)
+    logging.info(
+        "ICE_REPORT_AD_REVENUE_READINESS report_type=%s target_month=%s status=%s",
+        report_type,
+        target_month.isoformat(),
+        readiness.status,
+    )
+    if readiness.status != "ready":
+        # Not an error: the ad revenue confirmation email/PDF pipeline (an
+        # entirely separate, existing system) simply hasn't landed for this
+        # month yet, or this month's detail data isn't loaded yet. A
+        # scheduler poll is expected to see this repeatedly until the day it
+        # finally is ready -- no Firestore record is written, no alert.
+        return jsonify(
+            {"status": "waiting", "reason": readiness.status, "target_month": target_month.isoformat()}
+        )
+
+    claimed, run_ref_or_status = _claim_scheduled_run(
+        collection_name=AD_REVENUE_SCHEDULED_RUNS_COLLECTION,
+        run_id=run_id,
+        initial_fields={
+            "report": report_type,
+            "target_month": target_month.isoformat(),
+            "result_code": "generation_started",
+        },
+    )
+    if not claimed:
+        # Lost a race against a concurrent scheduler invocation between the
+        # peek above and this claim.
+        return jsonify(
+            {"error": "duplicate_scheduled_run", "target_month": target_month.isoformat(), "status": run_ref_or_status}
+        ), 409
+
+    run_ref = run_ref_or_status
+
+    try:
+        result = generate_ad_revenue_report(
+            project_id=project_id,
+            report_type=report_type,
+            target_month_text=target_month.isoformat(),
+            today=generated_date,
+        )
+        safe_result = _safe_ad_revenue_scheduled_result(report_type, result)
+    except AdRevenueReportError as exc:
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        run_ref.update(
+            {
+                "status": "failed",
+                "result_code": getattr(exc, "code", "ad_revenue_schedule_failed"),
+                "updated_at": _now_utc(),
+            }
+        )
+        logging.warning("ICE_REPORT_AD_REVENUE_SCHEDULE_FAILED reason=%s", getattr(exc, "code", "failed"))
+        return jsonify({"error": getattr(exc, "code", "ad_revenue_schedule_failed")}), status_code
+    except Exception:
+        run_ref.update(
+            {
+                "status": "failed",
+                "result_code": "ad_revenue_schedule_failed",
+                "updated_at": _now_utc(),
+            }
+        )
+        logging.error("ICE_REPORT_AD_REVENUE_SCHEDULE_FAILED")
+        return jsonify({"error": "ad_revenue_schedule_failed"}), 500
+
+    run_ref.update(
+        {
+            "status": "succeeded",
+            "result_code": "generation_succeeded",
+            "result": safe_result,
+            "updated_at": _now_utc(),
+        }
+    )
+    logging.warning(
+        "ICE_REPORT_AD_REVENUE_SCHEDULE_COMPLETED report_type=%s target_month=%s has_drive_file=%s",
+        report_type,
+        safe_result["target_month"],
+        safe_result["has_drive_file"],
+    )
+    return jsonify({"result": safe_result, **safe_result})
+
+
+@app.post("/admin/ad-revenue/sync")
+def sync_jumpplus_ad_revenue():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+
+    try:
+        from jumpplus_ad_revenue_report import AdRevenueReportError, sync_ad_revenue_confirmed_values
+
+        result = sync_ad_revenue_confirmed_values(project_id=project_id)
+    except ImportError:
+        logging.error("ICE_REPORT_AD_REVENUE_SYNC_DEPENDENCY_MISSING")
+        _log_admin_audit_event(
+            action="ad_revenue_sync",
+            result="failure",
+            target_type="report",
+            target_id="jumpplus-ad-revenue",
+            status_code=500,
+            reason="dependency_missing",
+        )
+        return jsonify({"error": "dependency_missing"}), 500
+    except Exception as exc:
+        error_code = getattr(exc, "code", "ad_revenue_sync_failed")
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        logging.error("ICE_REPORT_AD_REVENUE_SYNC_FAILED reason=%s", error_code)
+        _log_admin_audit_event(
+            action="ad_revenue_sync",
+            result="failure",
+            target_type="report",
+            target_id="jumpplus-ad-revenue",
+            status_code=status_code,
+            reason=error_code,
+        )
+        return jsonify({"error": error_code}), status_code
+
+    _log_admin_audit_event(
+        action="ad_revenue_sync",
+        result="success",
+        target_type="report",
+        target_id="jumpplus-ad-revenue",
+        status_code=200,
+        detail={"row_count": result.get("row_count")},
+    )
+    return jsonify(result)
+
+
+def _check_ad_revenue_sync_scheduler_auth() -> tuple[bool, str]:
+    return _check_scheduler_oidc_auth(
+        env_prefix="AD_REVENUE_SYNC_SCHEDULER",
+        log_tag="ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_AUTH",
+    )
+
+
+@app.post("/admin/ad-revenue/scheduled-sync")
+def scheduled_sync_jumpplus_ad_revenue():
+    ok, reason = _check_ad_revenue_sync_scheduler_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized", "reason": reason}), 401
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+
+    try:
+        from jumpplus_ad_revenue_report import AdRevenueReportError, sync_ad_revenue_confirmed_values
+
+        # Safe to run repeatedly/on any cadence: this is a MERGE (upsert) that
+        # simply refreshes every month's row to the Sheet's current value, so
+        # unlike report generation it needs no Firestore claim/duplicate guard.
+        result = sync_ad_revenue_confirmed_values(project_id=project_id)
+    except ImportError:
+        logging.error("ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_DEPENDENCY_MISSING")
+        return jsonify({"error": "dependency_missing"}), 500
+    except Exception as exc:
+        error_code = getattr(exc, "code", "ad_revenue_sync_schedule_failed")
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        logging.error("ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_FAILED reason=%s", error_code)
+        return jsonify({"error": error_code}), status_code
+
+    logging.info("ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_COMPLETED row_count=%s", result.get("row_count"))
+    return jsonify(result)
 
 
 @app.post("/deliveries")
