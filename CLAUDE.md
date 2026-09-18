@@ -126,6 +126,7 @@ docsのみの変更ならCloud Run再deployは不要。`app.py`/runtime設定/Do
 | `docs/drive-domain-wide-delegation.md` | Google Drive連携の権限設定 |
 | `docs/thermae-romae-report.md` | テルマエ・ロマエ帳票の個別仕様 |
 | `docs/plus-browser-point-sales-report.md` | PLUS ブラウザ版ポイント売上帳票の個別仕様 |
+| `docs/jumpplus-ad-revenue-report.md` | ジャンプ＋広告売上レポート(動画リワード/APP_2/WEB)の個別仕様 |
 | `docs/report-definitions-guide.md` | Admin UIでのレポート定義の追加・使い方ガイド |
 | `docs/new-bespoke-report-playbook.md` | 別SQL・別テンプレートが必要な専用レポートの追加手順 |
 
