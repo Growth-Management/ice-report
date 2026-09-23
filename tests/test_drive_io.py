@@ -193,6 +193,7 @@ class UploadXlsxToDriveTests(unittest.TestCase):
 
         self.assertTrue(captured["kwargs"]["resumable"])
         self.assertEqual(captured["kwargs"]["mimetype"], drive_io.DRIVE_XLSX_MIME_TYPE)
+        self.assertEqual(captured["kwargs"]["chunksize"], drive_io.DRIVE_UPLOAD_CHUNK_SIZE)
 
     def test_resumable_upload_progresses_through_multiple_chunks_to_completion(self):
         request = _FakeResumableRequest(chunk_count=3, final_response={"id": "f1", "name": "n.xlsx"})

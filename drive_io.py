@@ -22,6 +22,12 @@ DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
 # double-retry the same transient failure.
 DRIVE_UPLOAD_NUM_RETRIES = 3
 
+# Must be a multiple of 256 KiB (Drive API resumable upload requirement).
+# 4 MiB keeps even a small report (e.g. WEB, ~0.5 MiB) uploading in a single
+# chunk while still bounding how much of a large report (e.g. video-reward,
+# ~9 MiB) any one HTTP request has to carry.
+DRIVE_UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+
 
 class DriveOperationError(Exception):
     def __init__(self, code: str, *, status_code: int = 500) -> None:
@@ -227,7 +233,12 @@ def upload_xlsx_to_drive(
         "name": file_name,
         "parents": [folder_id],
     }
-    media = MediaFileUpload(str(path), mimetype=DRIVE_XLSX_MIME_TYPE, resumable=True)
+    media = MediaFileUpload(
+        str(path),
+        mimetype=DRIVE_XLSX_MIME_TYPE,
+        resumable=True,
+        chunksize=DRIVE_UPLOAD_CHUNK_SIZE,
+    )
     request = service.files().create(
         body=metadata,
         media_body=media,
