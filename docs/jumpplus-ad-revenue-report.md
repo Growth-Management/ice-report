@@ -382,19 +382,32 @@ iOS/Android各シートの`広告表示数`合計(SUBTOTAL)。つまり:
 `build_web_work_summary`/`build_video_reward_work_summary`)にBigQuery/Excel I/Oから完全に分離した
 pure functionとして置く。並び順(広告売上/コイン消費数の降順)はM言語自体が保証しないため、このモジュール
 独自の仕様として「値の降順、同値時はキー(作品名等)の昇順」で決定的にした -- 実Golden Masterファイルの
-行順そのものとのbyte/row単位の突き合わせは本セッションでは実施していない(下記「未解決の食い違い」参照)。
+行順そのものとのbyte/row単位の突き合わせは本セッションでは実施していない。
 
-#### 未解決の食い違い: video-rewardの作品別グループ数(798 vs 804)
+#### 解決済み: video-rewardの作品別グループ数(804 -> 798、原因は`ex_work_name`)
 
-タスクで提示された「video-reward 作品別 798グループ」は、本セッションで実データ・実M言語コードの両方から
-再現した結果と一致しない: 2026-08の実BigQueryデータ(`話データ_広告売上`=全体シートの61,699行、Golden
-Masterの合計値と完全一致するデータセット)を実際のM言語コード通り(`話データ_広告売上`をソースに
-`作品名`のみでgroup by)で集計すると **804グループ** になる。作品名の重複排除(前後空白除去、大文字小文字、
-Unicode NFKC正規化)を試しても804のまま変わらず、`Contents_master`という名前付き範囲(由来不明の残骸の
-一つと思われていたもの)も`#REF!`で実際には無効なため、隠れた「作品マスタ」による798への集約は確認できな
-かった。一方app2の138/78、webの140はいずれも実データと完全一致したため、video-rewardの798だけが今回の
-セッションで再現できていない既知の未解決差分として明記する。**Excel Desktop本番受入時に、実際の804
-グループとの整合を確認すること。**
+当初、実データ・実M言語コード通り(`話データ_広告売上`をソースに`work_title`のみでgroup by)で集計すると
+804グループとなり、タスクで提示されたGolden Masterの798グループと一致しなかった。原因は「作品名」の
+ソース列が誤っていたこと: `report_plus_monthly_coin_content_report`には`work_title`(804種)と
+`ex_work_name`(798種)の2つの作品名相当列があり、**実Golden Masterファイル
+(`J+_動画リワード広告売上_2026年08月期_260901.xlsx`)の作品別シートの作品名は`ex_work_name`と一致する**。
+`work_title`は巻・部単位の細かい表記揺れを含み(例: `ONE PIECE　第1部`/`第2部`/`第3部` → `ex_work_name`は
+すべて`ONE PIECE`)、`ex_work_name`はそれらを正しい単位の「作品」へ集約したもの。
+
+実データで最終確認済み(`ex_work_name`でgroup by):
+
+- グループ数: **798**(Golden Master一致)
+- コイン消費数合計: **365,253,010**(Golden Master一致)
+- 個別作品の実測値もGolden Masterと完全一致: ONE PIECE=12,722,390 / チェンソーマン=4,956,500 /
+  キン肉マン=1,361,255 / 終末のハーレム=208,920 / 奴隷遊戯=57,640 / 天神―TENJIN―=23,690 /
+  声優ましまし倶楽部=840
+
+`run_coin_content_query`は`ex_work_name`を`any_value(ex_work_name) as ex_work_name`として取得し、
+`_coin_content_row_to_detail`の「作品名」列は`ex_work_name`から構築する(`work_title`はデバッグ用途にのみ
+残し、帳票の「作品名」には使用しない)。iOS/Android/全体はすべて同じ`_coin_content_row_to_detail`を通す
+ため、この修正は3シートすべてに一貫して適用される。回帰テスト
+(`tests/test_jumpplus_ad_revenue_report.py::CoinContentRowToDetailTests`)で上記7作品の金額とグループ数を
+ロック。
 
 #### Power Queryテンプレート除去(`xlsx_package_writer.remove_power_query_dependency`)
 
@@ -430,7 +443,7 @@ Drive登録は行っていない -- item 20の「切替」はレビュー後の�
       `AD_REVENUE_WEB_TEMPLATE_FILE_ID` を新file IDへ切替
 - [ ] 3帳票ともExcel Desktopで実際に開き、修復ダイアログ・外部接続警告が出ないこと、Power Query再計算が
       不要であることを確認
-- [ ] video-rewardの作品別グループ数(798 vs 804)の食い違いを実ファイルで解消してから最終確認とする
+- [ ] video-rewardの作品別(798グループ、`ex_work_name`集計)をExcel Desktop実受入でも再確認
 
 ## Target month calculation
 

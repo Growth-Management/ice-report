@@ -445,6 +445,87 @@ class RunCoinContentQueryGoldenMasterTests(_RestoringTestCase):
         array_param = next(p for p in job_config.query_parameters if p.name == "app_pfs")
         self.assertEqual(array_param.values, ["iOS"])
 
+    def test_query_text_fetches_ex_work_name_alongside_work_title(self):
+        """作品別 sheet's Golden Master grouping (798 works) matches
+        ex_work_name, not work_title (804 distinct values) -- confirmed
+        against the real 2026-08 production file. work_title is still
+        fetched for debugging only; _coin_content_row_to_detail must build
+        the report's own 作品名 from ex_work_name."""
+        query_text, _ = self._run_and_capture_query(["iOS", "And"])
+        self.assertIn("any_value(ex_work_name) as ex_work_name", query_text)
+        self.assertIn("any_value(work_title) as work_title", query_text)
+
+
+class CoinContentRowToDetailTests(_RestoringTestCase):
+    def test_work_name_column_comes_from_ex_work_name_not_work_title(self):
+        record = {
+            "prefixed_id": "ec1",
+            "content_id": 1,
+            "name": "content-1",
+            "jdcn": "j1",
+            "reward_video_ad_coin_count": 100,
+            "work_title": "ONE PIECE　第1部",
+            "ex_work_name": "ONE PIECE",
+            "ex_comics_jdcn": None,
+            "ex_episode_package_no": None,
+        }
+        detail = report._coin_content_row_to_detail(record)
+        self.assertEqual(detail["作品名"], "ONE PIECE")
+
+    def test_golden_master_ex_work_name_rollups_2026_08(self):
+        """Locks in the real 2026-08 production file's per-work totals for
+        works whose work_title variants collapse under ex_work_name (e.g.
+        ONE PIECE's 第1部/第2部/第3部 all roll up to "ONE PIECE") --
+        confirmed directly against the real Golden Master file, independent
+        of the 798-vs-804 group-count investigation itself."""
+        # (work_title, ex_work_name, coin_count) -- content-level rows that
+        # collapse into one 作品別 group once grouped by ex_work_name.
+        rows = [
+            ("ONE PIECE　第1部", "ONE PIECE", 5_000_000),
+            ("ONE PIECE　第2部", "ONE PIECE", 4_722_390),
+            ("ONE PIECE　第3部", "ONE PIECE", 3_000_000),
+            ("チェンソーマン 第一部", "チェンソーマン", 3_000_000),
+            ("チェンソーマン 第二部", "チェンソーマン", 1_956_500),
+            ("キン肉マン (38巻以降～、週プレ連載シリーズ)", "キン肉マン", 1_361_255),
+            ("After World", "終末のハーレム", 208_920),
+            ("奴隷遵戲　GUREN", "奴隷遵戲", 57_640),
+            ("天神-TENJIN- イーグルネスト", "天神―TENJIN―", 23_690),
+            ("放課後ましまし俱楽部", "声優ましまし俱楽部", 840),
+        ]
+        detail_rows = [
+            report._coin_content_row_to_detail(
+                {
+                    "prefixed_id": f"ec{i}",
+                    "content_id": i,
+                    "name": f"content-{i}",
+                    "jdcn": f"j{i}",
+                    "reward_video_ad_coin_count": coin,
+                    "work_title": work_title,
+                    "ex_work_name": ex_work_name,
+                    "ex_comics_jdcn": None,
+                    "ex_episode_package_no": None,
+                }
+            )
+            for i, (work_title, ex_work_name, coin) in enumerate(rows, start=1)
+        ]
+
+        summary = report.work_summaries.build_video_reward_work_summary(detail_rows, revenue_yen=14017945)
+        by_name = {r["作品名"]: r["コイン消費数"] for r in summary}
+
+        expected = {
+            "ONE PIECE": 12_722_390,
+            "チェンソーマン": 4_956_500,
+            "キン肉マン": 1_361_255,
+            "終末のハーレム": 208_920,
+            "奴隷遵戲": 57_640,
+            "天神―TENJIN―": 23_690,
+            "声優ましまし俱楽部": 840,
+        }
+        for name, coin in expected.items():
+            self.assertEqual(by_name[name], coin, f"{name} mismatch")
+        # every work_title variant collapsed -- 10 content rows -> 7 works
+        self.assertEqual(len(summary), 7)
+
 
 class FetchDetailRowsDispatchTests(_RestoringTestCase):
     """Locks in each report type's mapping to BigQuery queries and detail

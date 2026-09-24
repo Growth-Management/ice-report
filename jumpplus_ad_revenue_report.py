@@ -364,6 +364,15 @@ def run_coin_content_query(
     365,253,010) and all three row counts were reproduced exactly against
     live BigQuery data before this query was written this way -- see
     docs/jumpplus-ad-revenue-report.md's "Golden Master" section.
+
+    Also fetches `ex_work_name` alongside `work_title`: the 作品別 sheet's
+    Golden Master grouping (798 works, confirmed against the real
+    2026-08 production file) matches `ex_work_name`, not `work_title`
+    (804 distinct values) -- multiple `work_title` variants roll up to one
+    `ex_work_name` (e.g. "ONE PIECE　第1部"/"第2部"/"第3部" -> "ONE PIECE").
+    `work_title` is kept only for debugging; the report's own "作品名"
+    column must be built from `ex_work_name` (see
+    _coin_content_row_to_detail and docs/jumpplus-ad-revenue-report.md).
     """
     client = bigquery.Client(project=project_id)
     query = f"""
@@ -374,6 +383,7 @@ def run_coin_content_query(
             , any_value(jdcn) as jdcn
             , sum(reward_video_ad_coin_count) as reward_video_ad_coin_count
             , any_value(work_title) as work_title
+            , any_value(ex_work_name) as ex_work_name
             , any_value(ex_comics_jdcn) as ex_comics_jdcn
             , any_value(ex_episode_package_no) as ex_episode_package_no
         from `{table or coin_content_table()}`
@@ -455,7 +465,13 @@ def _coin_content_row_to_detail(record: dict[str, Any]) -> dict[str, Any]:
         "コンテンツ名": record.get("name"),
         "JDCN": record.get("jdcn"),
         "コイン消費数": int(record.get("reward_video_ad_coin_count") or 0),
-        "作品名": record.get("work_title"),
+        # 作品名 must come from ex_work_name, not work_title: the 作品別
+        # sheet's Golden Master grouping (798 works) only matches
+        # ex_work_name -- work_title has 804 distinct values because
+        # several work_title variants (e.g. "ONE PIECE　第1部"/"第2部"/
+        # "第3部") map to a single ex_work_name ("ONE PIECE"). Confirmed
+        # against the real 2026-08 production file's per-work totals.
+        "作品名": record.get("ex_work_name"),
         "コミックスJDCN": record.get("ex_comics_jdcn"),
         "コミックス巻数": record.get("ex_episode_package_no"),
     }
