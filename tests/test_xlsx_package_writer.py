@@ -322,6 +322,42 @@ class PowerQueryPreservationTests(unittest.TestCase):
         self.assertTrue(preserved[sakuhin_part])
         self.assertTrue(preserved[sakuhin2_part])
 
+    def test_read_only_parsed_parts_are_byte_for_byte_preserved(self):
+        """Dirty-tracking regression: xml() is called (for lookup only) on
+        workbook.xml, workbook.xml.rels, sharedStrings.xml and the iOS
+        sheet's own _rels part while resolving sheet names and table
+        relationships -- none of those may be re-serialized on save() just
+        because they were read, only the sheet/table parts actually passed
+        to set_xml() should be."""
+        self._generate()
+        template_pkg = pkg_writer.XlsxPackage.load(self.template_path)
+        ios_part = pkg_writer._sheet_name_to_part(template_pkg, "iOS")
+        ios_rels_part = pkg_writer._part_rels_path(ios_part)
+
+        parts_to_check = [
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "xl/sharedStrings.xml",
+            ios_rels_part,
+            *POWER_QUERY_PARTS,
+        ]
+        preserved = pkg_writer.validate_preserved_parts(self.template_path, self.output_path, parts_to_check)
+        for part, ok in preserved.items():
+            self.assertTrue(ok, f"{part} was not preserved byte-for-byte")
+
+    def test_app2_full_scale_table_refs_match_corrected_golden_master(self):
+        """2026-08 real row counts (9,548 per sheet): iOS/Android are 10
+        columns (A3:J...), but 全体 is 13 columns (A3:M...) in the real
+        official template -- F/G (広告売上/広告売上_原資50) and H (作品ID)
+        are untouched placeholder columns this module never writes to."""
+        result = self._generate(ios=9548, android=9548, zentai=9548)
+        self.assertEqual(result["detail_row_count"], 9548 * 3)
+
+        wb = load_workbook(self.output_path)
+        self.assertEqual(wb["iOS"].tables["table_iOS"].ref, "A3:J9551")
+        self.assertEqual(wb["Android"].tables["table_Android"].ref, "A3:J9551")
+        self.assertEqual(wb["全体"].tables["table_全体"].ref, "A3:M9551")
+
     def test_golden_master_values_and_row_counts(self):
         result = self._generate(ios=3, android=3, zentai=3)
         self.assertEqual(result["detail_row_count"], 9)

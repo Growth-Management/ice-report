@@ -97,6 +97,7 @@ class XlsxPackage:
     def __init__(self, parts: dict[str, bytes]) -> None:
         self._parts = parts
         self._trees: dict[str, etree._Element] = {}
+        self._dirty_parts: set[str] = set()
 
     @classmethod
     def load(cls, source: Any) -> "XlsxPackage":
@@ -111,6 +112,10 @@ class XlsxPackage:
         return self._parts[name]
 
     def xml(self, name: str) -> etree._Element:
+        """Parses and caches `name` for reading. Does NOT mark it dirty --
+        looking up a sheet's part via workbook.xml, resolving a relationship,
+        or reading sharedStrings for header text must never cause that part
+        to be re-serialized on save(). Only set_xml() does that."""
         if name not in self._trees:
             if name not in self._parts:
                 raise XlsxPackageError("part_not_found", part=name)
@@ -119,13 +124,14 @@ class XlsxPackage:
 
     def set_xml(self, name: str, root: etree._Element) -> None:
         self._trees[name] = root
+        self._dirty_parts.add(name)
 
     def save(self, destination: Any) -> None:
         if isinstance(destination, (str, Path)):
             Path(destination).parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
             for name, data in self._parts.items():
-                if name in self._trees:
+                if name in self._dirty_parts:
                     data = etree.tostring(
                         self._trees[name], xml_declaration=True, encoding="UTF-8", standalone=True
                     )

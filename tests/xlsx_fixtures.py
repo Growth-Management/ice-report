@@ -53,6 +53,17 @@ CUSTOM_XML_ITEM_RELS = (
     "</Relationships>\n"
 ).encode("utf-8")
 
+# The openpyxl version this repo pins (3.1.5) writes string cells as
+# inlineStr and never produces xl/sharedStrings.xml at all -- unlike real
+# Excel-authored templates, which normally do. Inject one so tests can
+# verify it survives generation byte-for-byte (xlsx_package_writer reads it
+# read-only via _read_shared_strings(), which must never mark it dirty).
+SHARED_STRINGS_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1">
+  <si><t>template-origin-shared-string</t></si>
+</sst>
+""".encode("utf-8")
+
 
 def _add_detail_sheet(wb: Workbook, name: str, headers: tuple[str, ...], *, freeze: str | None = None):
     ws = wb.create_sheet(name)
@@ -100,10 +111,15 @@ def build_app2_like_template(output_path: str | Path) -> Path:
     )
     _add_detail_sheet(wb, "iOS", headers_10, freeze="D4")
     _add_detail_sheet(wb, "Android", headers_10, freeze="D4")
-    zentai_headers = headers_10[:5] + ("広告売上", "広告売上_原資50") + headers_10[5:]
+    # Real APP_2 template's 全体 sheet is 13 columns (A-M): our first 5
+    # written headers, then F/G (広告売上/広告売上_原資50 formula
+    # placeholders) and H (作品ID) -- neither written by this module -- then
+    # our remaining 5 written headers at I-M.
+    zentai_headers = headers_10[:5] + ("広告売上", "広告売上_原資50", "作品ID") + headers_10[5:]
     _add_detail_sheet(wb, "全体", zentai_headers, freeze="I4")  # 全体
 
-    sakuhin = _add_detail_sheet(wb, "作品別", ("A", "B"))  # 作品別
+    # 作品別=A3:D4 (4 cols) / 作品別_2=A3:C4 (3 cols) in the real template.
+    sakuhin = _add_detail_sheet(wb, "作品別", ("A", "B", "C", "D"))  # 作品別
     sakuhin2 = _add_detail_sheet(wb, "作品別_2", ("A", "B", "C"))  # 作品別_2
 
     out_path = Path(output_path)
@@ -150,6 +166,16 @@ def _inject_power_query_parts(path: Path, *, sakuhin_display: str, sakuhin2_disp
     entries["customXml/item1.xml"] = CUSTOM_XML_ITEM
     entries["customXml/itemProps1.xml"] = CUSTOM_XML_ITEM_PROPS
     entries["customXml/_rels/item1.xml.rels"] = CUSTOM_XML_ITEM_RELS
+    entries["xl/sharedStrings.xml"] = SHARED_STRINGS_XML
+
+    workbook_rels = entries["xl/_rels/workbook.xml.rels"].decode("utf-8")
+    shared_strings_rel = (
+        '<Relationship Id="rIdSharedStringsFixture" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" '
+        'Target="sharedStrings.xml"/>'
+    )
+    workbook_rels = workbook_rels.replace("</Relationships>", shared_strings_rel + "</Relationships>")
+    entries["xl/_rels/workbook.xml.rels"] = workbook_rels.encode("utf-8")
 
     content_types = entries["[Content_Types].xml"].decode("utf-8")
     extra_overrides = (
@@ -162,6 +188,8 @@ def _inject_power_query_parts(path: Path, *, sakuhin_display: str, sakuhin2_disp
         '<Override PartName="/customXml/item1.xml" ContentType="application/xml"/>'
         '<Override PartName="/customXml/itemProps1.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>'
+        '<Override PartName="/xl/sharedStrings.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
     )
     content_types = content_types.replace("</Types>", extra_overrides + "</Types>")
     entries["[Content_Types].xml"] = content_types.encode("utf-8")
