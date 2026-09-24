@@ -252,6 +252,48 @@ reward_video_ad_coin_count > 0`)しないと明細行数が実帳票と一致し
   このモジュールは `wb.defined_names` に一切触れないため、`load_workbook`→`save` で無害にそのまま
   保持される(実際に生成テストで保持されることを確認済み)。
 
+### openpyxl round-trip root cause(Excel Desktop「修復が必要」問題)と package-preserving writer
+
+上記の `write_summary_total`/`write_detail_sheet`/`_resize_table_rows` はopenpyxlの `Worksheet` オブジェクトを
+直接操作する関数として今も存在するが、**Production成果物の最終writerとしては使われていない**(以下の理由により
+使用禁止)。これらはテンプレート構造解析・validation・テスト・Golden Master確認の用途に限定して残している。
+
+**症状**: video-reward/app2/webのいずれも、Drive生成後のファイルをExcel Desktopで開くと「修復が必要」ダイアログが
+表示された(`create_ad_revenue_workbook` 経由でopenpyxlの `load_workbook()`→`save()` を最終writerとして
+使っていた時点)。APP_2のExcel repair logには「削除されたパーツ: 外部データの範囲.」が2件記録されていた。
+
+**Root cause(実測で確定)**: openpyxlの `load_workbook()`→`save()` は、**何も値を変更せずそのまま再保存するだけでも**、
+openpyxlが理解しないOOXMLパートを黙って落とす。実際に公式APP_2テンプレートを対象に検証したところ、以下が
+消失/再生成された:
+
+- `xl/connections.xml`、`xl/queryTables/queryTable1.xml`・`queryTable2.xml`(Power Query接続定義そのもの)
+- `xl/tables/_rels/table7.xml.rels`・`table8.xml.rels`(TableからqueryTableへのrelationship)
+- `customXml/*`
+- `calcChain.xml`・`metadata`・`printerSettings`・その他openpyxl未対応パート
+
+APP_2の「作品別」「作品別_2」シートのTableは `tableType="queryTable"` 属性で「これはPower Query由来のTableである」
+ことを宣言しているが、上記のroute round-tripによって「どの接続/クエリに繋がっているか」という実体(connections.xml/
+queryTables/relationship)だけが消える。Excel repair logの「外部データの範囲」削除2件は、まさにこの2つの
+queryTableに対応する。
+
+**結論**: 明細行追加・table resize・summary C4書込・BigQuery・Drive upload(resumable化、PR #135)は原因ではない。
+**openpyxlをProduction成果物の最終XLSX writerとして使用していること自体が原因**であり、Power Queryを持たない
+web/video-rewardでも(calcChain/printerSettings等、程度の差はあれ同種のパート消失が起きるため)同じ設計を
+維持する限りリスクが残る。
+
+**対応**: `create_ad_revenue_workbook` の内部実装を `xlsx_package_writer.py`(package-preserving OOXML writer)へ
+差し替えた。テンプレートXLSXをzipパッケージとしてそのまま読み、実際に書き込みが必要な特定のworksheet XML
+パート(summaryシートの総計セル、明細シートの `sheetData`)と、対応するTable XMLパートの `ref`/`autoFilter.ref`
+だけをlxmlで直接編集し、**それ以外の全パートは元テンプレートからbyte-for-byteでそのままコピー**する。
+`connections.xml`/`queryTables/*`/`customXml/*`/`calcChain.xml`/`styles.xml`/`sharedStrings.xml` などは
+一切parseすらしないため、Power Queryを含むテンプレートでも安全。文字列セルは `sharedStrings.xml` を汚さないよう
+`inlineStr` で書き込む。openpyxlは `create_ad_revenue_workbook` の出力writerとしては使わず、テンプレート構造解析・
+テスト・Golden Master確認(実ファイルを開いての目視/自動検証)にのみ引き続き使用する。
+
+詳細は `xlsx_package_writer.py` のモジュールdocstringと `tests/test_xlsx_package_writer.py`
+(`PowerQueryPreservationTests` がPower Query関連パートのbyte-for-byte保持・relationship保持・connection ID
+整合性を検証)を参照。
+
 ## Target month calculation
 
 `tokyo_today()` で `Asia/Tokyo` の現在時刻から日付を求め、その前月1日を既定の対象月とする
@@ -461,18 +503,22 @@ IAM・Sheets OAuth整備・deployが完了した後、Cloud Scheduler有効化�
 このセッションでローカル生成テスト済みだが、それでも本番相当環境での最終確認として同様に実施する):
 
 - [ ] `video-reward`: `target_month=2026-08-01` で手動生成し、Driveに出力ファイルが作成されることを確認
-- [ ] `video-reward`: 生成物をExcelで開き、サマリC4=14,017,945円、iOS/Android/全体シートのコイン消費数、
-      数式(`=SUM(話データ_iOS[コイン消費数])` 等)が壊れていないことを確認
-- [ ] `app2`: `target_month=2026-08-01` で手動生成し、サマリC4=9,789,547円、iOS/Android/全体シートの
-      広告表示数を確認
-- [ ] `web`: `target_month=2026-08-01` で手動生成し、Driveに出力ファイルが作成されることを確認
-      (**必須**: このレポートタイプは公式テンプレートでのend-to-end生成が本セッションで未実施)
-- [ ] `web`: 生成物をExcelで開き、サマリの総計セル=734,139円、全体シートの広告表示数・書式・数式列
-      (`広告売上`)が壊れていないこと、repair-on-open警告が出ないことを確認
+- [ ] `video-reward`: 生成物を**Excel Desktopで実際に開き**、修復ダイアログが一切表示されないことを確認
+      (最終PASS条件はこれのみ -- openpyxl reopen成功/ZIP testzip成功/XML parse成功は補助確認に過ぎない)。
+      サマリC4=14,017,945円、iOS/Android/全体シートのコイン消費数、数式(`=SUM(話データ_iOS[コイン消費数])`
+      等)が壊れていないことも確認
+- [ ] `app2`: `target_month=2026-08-01` で手動生成し、**Excel Desktopで修復ダイアログが出ないこと**、
+      サマリC4=9,789,547円、iOS/Android/全体シートの広告表示数、`connections.xml`/`queryTables/*`が
+      Power Query機能ごと正常に開けること(作品別/作品別_2シート)を確認
+- [ ] `web`: `target_month=2026-08-01` で手動生成し、**Excel Desktopで修復ダイアログが出ないこと**、
+      サマリの総計セル=734,139円、全体シートの広告表示数・書式・数式列(`広告売上`)が壊れていないことを確認
 - [ ] 3帳票とも、生成物のシート名・結合セルなし・印刷設定・列幅が元テンプレートと変わっていないことを
       目視確認
 - [ ] スケジュール実行エンドポイントへ実際にOIDCトークン付きでリクエストし、`waiting`(未確定時)と
       `duplicate_scheduled_run`(重複時)の両方の応答を確認してから、Cloud Schedulerを有効化する
+
+**Scheduler有効化は、上記3帳票すべてがExcel Desktopで「修復なし」で開けることを確認するまでBLOCKED**
+(package-preserving writer導入PRの受け入れ条件、詳細はPR本文参照)。
 
 ## Status / open items(未解決事項)
 

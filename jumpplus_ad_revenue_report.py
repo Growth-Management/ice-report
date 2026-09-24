@@ -570,23 +570,60 @@ def create_ad_revenue_workbook(
     revenue_yen: int,
     detail_rows: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
+    """Builds the production XLSX via the package-preserving OOXML writer
+    (xlsx_package_writer), NOT openpyxl's load_workbook()->save(). These
+    templates carry Power Query (queryTable-backed) Excel Tables, and an
+    openpyxl round trip -- even with zero edits -- silently drops the OOXML
+    parts (xl/connections.xml, xl/queryTables/*, customXml/*, table
+    relationship files) that say which connection a table is bound to,
+    which is exactly what makes Excel Desktop flag the file for repair. See
+    docs/jumpplus-ad-revenue-report.md ("openpyxl root cause"). openpyxl
+    itself is still used elsewhere in this module (and in tests) for
+    template structure analysis and validation -- just never as the writer
+    for this function's output.
+    """
+    import xlsx_package_writer as pkg_writer
+
     spec = REPORT_SPECS[report_type]
-    workbook = load_workbook(template_path)
-    if SUMMARY_SHEET not in workbook.sheetnames:
-        raise AdRevenueReportError("summary_sheet_not_found", report_type=report_type)
-    write_summary_total(workbook[SUMMARY_SHEET], revenue_yen)
+    package = pkg_writer.XlsxPackage.load(template_path)
+
+    try:
+        pkg_writer.update_summary_value(package, SUMMARY_SHEET, revenue_yen)
+    except pkg_writer.XlsxPackageError as exc:
+        if exc.code == "sheet_not_found":
+            raise AdRevenueReportError("summary_sheet_not_found", report_type=report_type) from exc
+        if exc.code == "total_label_not_found":
+            raise AdRevenueReportError("summary_total_cell_not_found", report_type=report_type) from exc
+        raise
 
     total_rows = 0
     for sheet_name in spec.detail_sheets:
-        if sheet_name not in workbook.sheetnames:
-            raise AdRevenueReportError("detail_sheet_not_found", report_type=report_type, sheet=sheet_name)
         rows = detail_rows.get(sheet_name, [])
-        write_detail_sheet(workbook[sheet_name], spec.detail_headers, rows)
+        try:
+            pkg_writer.replace_detail_rows(
+                package,
+                sheet_name,
+                spec.detail_headers,
+                rows,
+                required_headers=_REQUIRED_DETAIL_HEADERS,
+            )
+        except pkg_writer.XlsxPackageError as exc:
+            if exc.code == "sheet_not_found":
+                raise AdRevenueReportError(
+                    "detail_sheet_not_found", report_type=report_type, sheet=sheet_name
+                ) from exc
+            if exc.code == "table_not_found":
+                raise AdRevenueReportError(
+                    "sheet_table_not_found", report_type=report_type, sheet=sheet_name
+                ) from exc
+            if exc.code == "missing_required_headers":
+                raise AdRevenueReportError(
+                    "missing_detail_headers", sheet=sheet_name, missing=exc.details.get("missing")
+                ) from exc
+            raise
         total_rows += len(rows)
 
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(output)
+    package.save(output_path)
 
     return {"detail_row_count": total_rows}
 
