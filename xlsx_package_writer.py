@@ -27,6 +27,7 @@ from __future__ import annotations
 import copy
 import re
 import zipfile
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -264,7 +265,27 @@ def _find_cell(row_el: etree._Element, ref: str) -> etree._Element | None:
     return None
 
 
-def _format_number(value: float) -> str:
+def _is_non_finite_number(value: Any) -> bool:
+    """True for float NaN/Infinity or a non-finite Decimal (NaN/Infinity).
+    Neither is valid OOXML numeric content -- pandas represents a missing/
+    nullable BigQuery numeric column as float NaN, not None, and
+    ad_revenue_work_summaries' Decimal arithmetic could in principle produce
+    a non-finite Decimal (e.g. division intermediate) -- both are treated
+    the same as a missing value: an empty cell."""
+    if isinstance(value, float):
+        return value != value or value in (float("inf"), float("-inf"))
+    if isinstance(value, Decimal):
+        return not value.is_finite()
+    return False
+
+
+def _format_number(value: int | float | Decimal) -> str:
+    """Formats a numeric value as OOXML-safe <v> text: never scientific
+    notation (Decimal's/float's own str()/repr() can produce "1E+2"-style
+    output for some magnitudes, which is not valid numeric content for a
+    spreadsheet cell)."""
+    if isinstance(value, Decimal):
+        return format(value, "f")
     if isinstance(value, int) or (isinstance(value, float) and value.is_integer()):
         return str(int(value))
     return repr(value)
@@ -290,16 +311,13 @@ def _set_cell_value(row_el: etree._Element, col_idx: int, row_num: int, value: A
 
     if value is None:
         return
-    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
-        # NaN/inf are not valid OOXML numeric content (pandas represents a
-        # missing/nullable BigQuery numeric column as float NaN, not None);
-        # treat the same as a missing value -> empty cell.
+    if _is_non_finite_number(value):
         return
     if isinstance(value, bool):
         cell_el.set("t", "b")
         v_el = etree.SubElement(cell_el, _qn("main", "v"))
         v_el.text = "1" if value else "0"
-    elif isinstance(value, (int, float)):
+    elif isinstance(value, (int, float, Decimal)):
         v_el = etree.SubElement(cell_el, _qn("main", "v"))
         v_el.text = _format_number(value)
     else:

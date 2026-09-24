@@ -72,21 +72,35 @@ _REQUIRED_DETAIL_HEADERS = (
     "作品名",
 )
 
-# Extra columns written only to the "全体" sheet (never iOS/Android), feeding
-# the Python-side 作品別/作品別_2 aggregations that replace what used to be
-# Power Query. See ad_revenue_work_summaries.py and
-# docs/jumpplus-ad-revenue-report.md ("Power Query廃止").
-APP2_ZENTAI_EXTRA_HEADERS = ("広告売上", "広告売上_原資50", "作品ID")
-WEB_ZENTAI_EXTRA_HEADERS = ("広告売上",)
+# Extra columns written only to the "全体" sheet (never iOS/Android). Only
+# 作品ID (a plain value, not a formula) is written here. 広告売上/
+# 広告売上_原資50 are deliberately NOT in this list: the real Golden Master
+# file computes those via a native Excel formula this module must not
+# clobber with a hardcoded value (see write_video_reward_work_summary_headers
+# below and docs/jumpplus-ad-revenue-report.md "Power Query廃止" /
+# "既存Excel数式の維持"). This module still computes 広告売上/広告売上_原資50
+# in Python (ad_revenue_work_summaries.py) -- just only to build the
+# 作品別/作品別_2 aggregates, never to overwrite 全体's own formula cells.
+APP2_ZENTAI_EXTRA_HEADERS = ("作品ID",)
+WEB_ZENTAI_EXTRA_HEADERS = ()
 
 # 作品別/作品別_2 sheet headers -- confirmed by direct inspection of the real
 # official templates' Excel Tables (not guessed): APP_2's 話データ_広告売上_作品別
 # (A3:D4), 話データ_広告売上_作品別_2 (A3:C4), video-reward's
 # 話データ_コイン消費数_作品別 (A3:D4).
+#
+# video-reward's 作品別 table has 4 columns (作品名/コイン消費数/
+# コイン消費割合/広告還元額), but only the first two are written by Python
+# (VIDEO_REWARD_WORK_SUMMARY_HEADERS below) -- コイン消費割合/広告還元額 are
+# Excel-native formulas in the real Golden Master (not part of the decoded
+# Power Query M code, which only computes 作品名/コイン消費数), so this
+# module must leave them untouched rather than overwrite them with the
+# Decimal values ad_revenue_work_summaries still computes internally (used
+# for Golden Master comparison/tests, not for writing to the sheet).
 APP2_WORK_SUMMARY_HEADERS = ("作品名", "タイトルID", "デジタルタイトル名", "広告売上")
 APP2_WORK_SUMMARY_50_HEADERS = ("作品ID", "作品名", "広告売上_原資50")
 WEB_WORK_SUMMARY_HEADERS = ("作品名", "タイトルID", "デジタルタイトル名", "広告売上")
-VIDEO_REWARD_WORK_SUMMARY_HEADERS = ("作品名", "コイン消費数", "コイン消費割合", "広告還元額")
+VIDEO_REWARD_WORK_SUMMARY_HEADERS = ("作品名", "コイン消費数")
 
 
 @dataclass(frozen=True)
