@@ -294,6 +294,144 @@ web/video-rewardでも(calcChain/printerSettings等、程度の差はあれ同�
 (`PowerQueryPreservationTests` がPower Query関連パートのbyte-for-byte保持・relationship保持・connection ID
 整合性を検証)を参照。
 
+### Power Query廃止(作品別/作品別_2のPython直接生成)
+
+上記のpackage-preserving writer導入後も、実際にPower Queryの中身(M言語コード)を確認したところ、
+「作品別」「作品別_2」の集計自体はBigQuery/Pythonで完全に再現可能であることが判明した。今後はPower Query
+自体を依存関係から外し、これらのシートもPythonで直接Excel Tableとして生成する。
+
+#### 実際のPower Query M言語コード(customXml内のDataMashupを実際にdecodeして確認)
+
+Power Queryの実体は各テンプレートの `customXml/item1.xml`(UTF-16の`DataMashup`要素、base64で
+mini-OPC packageを内包、その中の `Formulas/Section1.m` が実際のM言語コード)に格納されている。推測ではなく
+実際にdecodeして確認した。
+
+video-reward(`話データ_コイン消費数_作品別`、1個のqueryTableのみ):
+
+```
+shared 話データ_コイン消費数_作品別 = let
+    ソース = Excel.CurrentWorkbook(){[Name="話データ_広告売上"]}[Content],
+    変更された型 = Table.TransformColumnTypes(ソース,{{"コイン消費数", type number}}),
+    グループ化された行 = Table.Group(変更された型, {"作品名"}, {{"コイン消費数", each List.Sum([コイン消費数]), type number}})
+in
+    グループ化された行;
+```
+
+app2(`話データ_広告売上_作品別`/`_2`、2個のqueryTable、+パススルー専用の`広告単価`クエリ):
+
+```
+shared 話データ_広告売上_作品別 = let
+    ソース = Excel.CurrentWorkbook(){[Name="話データ_広告売上"]}[Content],
+    ...
+    グループ化された行 = Table.Group(変更された型, {"作品名", "タイトルID", "デジタルタイトル名"}, {{"広告売上", each List.Sum([広告売上]), type number}})
+in
+    グループ化された行;
+
+shared 話データ_広告売上_作品別_2 = let
+    ...
+    グループ化された行 = Table.Group(変更された型, {"作品ID", "作品名"}, {{"広告売上_原資50", each List.Sum([広告売上_原資50]), type nullable number}})
+in
+    グループ化された行;
+```
+
+いずれも `Table.Group` は明示的な `Table.Sort` を伴わない(並び順はPower Query自体が保証しない)。**両クエリとも
+ソースは「話データ_広告売上」(=全体シートのExcel Table)であり、全体シートのF列(広告売上)/G列(広告売上_原資50、
+app2のみ)/H列(作品ID、app2のみ)に実際の値が入っている前提**(現行の「情シスが将来埋める想定の空プレースホルダー」
+という設計は、Power Query運用では実際に情シス側が埋めていたことを意味する)。
+
+app2の`connections.xml`には上記2クエリの接続に加え、**どのqueryTableにも紐付かない3つ目の接続
+(`クエリ - 広告単価`、`Provider=Microsoft.Mashup.OleDb.1`)** が存在した。これは「広告単価」テーブル
+(サマリ B16:D18)を単に型変換するだけの接続専用(connection-only)クエリで、どの表にもロードされていない
+残骸。`xlsx_package_writer.remove_power_query_dependency` はqueryTable経由で辿れる接続だけでなく、
+`Microsoft.Mashup` プロバイダ署名を持つ接続もすべて対象にすることで、この孤立した接続も正しく除去する
+(実データで確認済み)。
+
+#### 単価計算式(サマリの既存Excel数式を実際に確認して導出、推測ではない)
+
+app2サマリの「広告単価」ブロック(区分/係数/割合、B16:D18)の`全体広告単価`/`広告単価(50%原資)`セルは、
+以下の生きたExcel配列数式を持つ(このモジュールは一切触れない、既存のまま):
+
+```
+=IFERROR(SUM(ROUND(広告売上[広告売上]*広告単価[[#This Row],[割合]],0))/広告表示数[[#Totals],[広告表示数]],"-")
+```
+
+`広告売上[広告売上]` はサマリ自身の小テーブル(revenue_yen)、`広告表示数[[#Totals],[広告表示数]]` は
+iOS/Android各シートの`広告表示数`合計(SUBTOTAL)。つまり:
+
+```
+単価 = ROUND(revenue_yen * 割合, 0) / 総広告表示数
+```
+
+`ad_revenue_work_summaries.unit_price()` はこの式をそのまま実装(`round_yen`はExcelの`ROUND`と同じ
+「0.5は必ず正方向に丸める」動作、PythonやDecimalの既定である銀行丸めとは異なる)。2026-08の実測値
+(`ROUND(9789547*0.5,0) = 4894774`)で完全一致確認済み。
+
+全体detail各行の `広告売上 = 広告表示数 * 単価`、`広告売上_原資50 = 広告表示数 * (50%用単価)` も
+この単価をそのまま使う(Decimal精度、floatの丸め誤差に依存しない)。
+
+#### 作品別/作品別_2の列定義(実テンプレートのExcel Tableを直接確認、推測ではない)
+
+| report_type | sheet | 実テンプレートのheader(確認済み) | 集計 |
+|---|---|---|---|
+| app2 | 作品別 | 作品名, タイトルID, デジタルタイトル名, 広告売上 | group by(作品名,タイトルID,デジタルタイトル名), SUM(広告売上) |
+| app2 | 作品別_2 | 作品ID, 作品名, 広告売上_原資50 | group by(作品ID,作品名), SUM(広告売上_原資50) |
+| web | 作品別 | 作品名, タイトルID, デジタルタイトル名, 広告売上 | app2の作品別と同じ形 |
+| video-reward | 作品別 | 作品名, コイン消費数, コイン消費割合, 広告還元額 | group by(作品名), SUM(コイン消費数); 割合・還元額はPython側で算出(M言語自体には無い) |
+
+実装は `ad_revenue_work_summaries.py`(`build_app2_work_summary`/`build_app2_work_summary_50`/
+`build_web_work_summary`/`build_video_reward_work_summary`)にBigQuery/Excel I/Oから完全に分離した
+pure functionとして置く。並び順(広告売上/コイン消費数の降順)はM言語自体が保証しないため、このモジュール
+独自の仕様として「値の降順、同値時はキー(作品名等)の昇順」で決定的にした -- 実Golden Masterファイルの
+行順そのものとのbyte/row単位の突き合わせは本セッションでは実施していない(下記「未解決の食い違い」参照)。
+
+#### 未解決の食い違い: video-rewardの作品別グループ数(798 vs 804)
+
+タスクで提示された「video-reward 作品別 798グループ」は、本セッションで実データ・実M言語コードの両方から
+再現した結果と一致しない: 2026-08の実BigQueryデータ(`話データ_広告売上`=全体シートの61,699行、Golden
+Masterの合計値と完全一致するデータセット)を実際のM言語コード通り(`話データ_広告売上`をソースに
+`作品名`のみでgroup by)で集計すると **804グループ** になる。作品名の重複排除(前後空白除去、大文字小文字、
+Unicode NFKC正規化)を試しても804のまま変わらず、`Contents_master`という名前付き範囲(由来不明の残骸の
+一つと思われていたもの)も`#REF!`で実際には無効なため、隠れた「作品マスタ」による798への集約は確認できな
+かった。一方app2の138/78、webの140はいずれも実データと完全一致したため、video-rewardの798だけが今回の
+セッションで再現できていない既知の未解決差分として明記する。**Excel Desktop本番受入時に、実際の804
+グループとの整合を確認すること。**
+
+#### Power Queryテンプレート除去(`xlsx_package_writer.remove_power_query_dependency`)
+
+テンプレート移行専用の関数(`create_ad_revenue_workbook`からは呼ばれない、実行時には一切関与しない)。
+実際のapp2/video-reward公式テンプレートに対して検証済み:
+
+- `tableType="queryTable"`/`queryTableFieldId` 属性を除去(通常のExcel Tableへ変換)
+- 各TableからqueryTableへのrelationship、`xl/queryTables/*` パート自体を除去
+- `xl/connections.xml` のqueryTable経由 + `Microsoft.Mashup`署名を持つ接続をすべて除去
+  (残りの接続があれば、その分だけ残してファイル自体は保持)
+- `customXml/item1.xml` はDataMashupであることをUTF-16 decode後の`<DataMashup`タグで実際に確認してから
+  除去(それ以外のcustomXmlは無関係として保持する設計、雑な全削除はしない)
+- `[Content_Types].xml`・`xl/_rels/workbook.xml.rels`のdangling entryも同時に除去
+- 除去後、ZIP/XML妥当性・openpyxlでの再オープン・他パート(sharedStrings/styles/他sheet)のbyte-for-byte
+  保持を実データで確認済み
+
+新しいPower Query-freeテンプレートは**ローカルで生成・検証済み**(本PRでは新template file IDとしての
+Drive登録は行っていない -- item 20の「切替」はレビュー後の別ステップ)。
+
+#### `_extract_text`のふりがな(rPh)バグ(このPRで併せて修正)
+
+`sharedStrings.xml`/`inlineStr`のテキスト抽出(`_extract_text`)が、`<si>`内の`<rPh>`(ふりがな注記、
+`<si><t>作品名</t><rPh><t>サクヒンメイ</t></rPh><phoneticPr .../></si>`という構造)まで`.iter()`で
+拾ってしまい、「総計」ラベル一致が「総計ソウケイ」になって`summary_total_cell_not_found`で失敗していた
+(2026-09-24、Production revision `report-generator-00123-4gp`で実際に発生・ログで確認)。修正後は
+`<si>`/`<is>`の直接の子である`<t>`と`<r><t>`のみを読み、`<rPh>`/`<phoneticPr>`は無視する。実テンプレートの
+`sharedStrings.xml`(実際に`<rPh>`を含む)で修正確認済み。
+
+#### 新template file IDへの切替(未実施、レビュー後の別ステップ)
+
+- [ ] Power-Query-freeテンプレートをDriveへ新規アップロード(旧templateは削除しない)
+- [ ] `AD_REVENUE_VIDEO_REWARD_TEMPLATE_FILE_ID`/`AD_REVENUE_APP2_TEMPLATE_FILE_ID`/
+      `AD_REVENUE_WEB_TEMPLATE_FILE_ID` を新file IDへ切替
+- [ ] 3帳票ともExcel Desktopで実際に開き、修復ダイアログ・外部接続警告が出ないこと、Power Query再計算が
+      不要であることを確認
+- [ ] video-rewardの作品別グループ数(798 vs 804)の食い違いを実ファイルで解消してから最終確認とする
+
 ## Target month calculation
 
 `tokyo_today()` で `Asia/Tokyo` の現在時刻から日付を求め、その前月1日を既定の対象月とする

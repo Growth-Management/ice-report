@@ -126,6 +126,14 @@ class XlsxPackage:
         self._trees[name] = root
         self._dirty_parts.add(name)
 
+    def remove_part(self, name: str) -> None:
+        self._parts.pop(name, None)
+        self._trees.pop(name, None)
+        self._dirty_parts.discard(name)
+
+    def part_names(self) -> list[str]:
+        return list(self._parts.keys())
+
     def save(self, destination: Any) -> None:
         if isinstance(destination, (str, Path)):
             Path(destination).parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +199,26 @@ def _sheet_table_parts(pkg: XlsxPackage, sheet_part: str) -> list[str]:
 
 
 def _extract_text(container_el: etree._Element) -> str:
-    return "".join(t.text or "" for t in container_el.iter(_qn("main", "t")))
+    """Concatenates the *displayed* text of an <si>/<is> element: a direct
+    <t>, or each <r>'s own <t> run. Deliberately does NOT recurse with
+    .iter() -- <rPh> (phonetic guide / furigana) elements also contain a
+    <t> child, and since <rPh> is a sibling of <t>/<r> (not nested inside
+    a <r>), a blind .iter() over all descendant <t> elements concatenates
+    the furigana onto the real text (e.g. "総計" + "ソウケイ" ->
+    "総計ソウケイ"), which broke every label lookup this module does
+    (update_summary_value's "総計" match, detail sheet header matching) the
+    first time a real template with phonetic guides hit production."""
+    parts = []
+    for child in container_el:
+        tag = etree.QName(child).localname
+        if tag == "t":
+            parts.append(child.text or "")
+        elif tag == "r":
+            t_el = child.find(_qn("main", "t"))
+            if t_el is not None:
+                parts.append(t_el.text or "")
+        # rPh (phonetic run) and phoneticPr are intentionally skipped.
+    return "".join(parts)
 
 
 def _read_shared_strings(pkg: XlsxPackage) -> list[str]:
@@ -479,6 +506,185 @@ def replace_detail_rows(
     if autofilter_el is not None:
         autofilter_el.set("ref", f"{min_col_letter}{header_row}:{max_col_letter}{new_last_data_row}")
     pkg.set_xml(table_part, table_root)
+
+
+_CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+
+def _is_data_mashup_custom_xml(data: bytes) -> bool:
+    """True only for a customXml part that is actually an Excel Power Query
+    DataMashup package (checked by content, not by path/name), so a
+    legitimate, unrelated customXml part is never touched -- see item 10 of
+    the migration plan ("Power Query以外のcustomXmlが存在する場合は用途を
+    確認してから削除する")."""
+    try:
+        text = data.decode("utf-16")
+    except UnicodeDecodeError:
+        return False
+    return "<DataMashup " in text or "<DataMashup>" in text
+
+
+def _remove_relationships_by_target_suffix(pkg: "XlsxPackage", rels_part: str, target_suffix: str) -> list[str]:
+    if not pkg.has(rels_part):
+        return []
+    root = pkg.xml(rels_part)
+    all_rels = root.findall(_qn("rel", "Relationship"))
+    removed_ids = [r.get("Id") for r in all_rels if r.get("Target", "").endswith(target_suffix)]
+    remaining = [r for r in all_rels if not r.get("Target", "").endswith(target_suffix)]
+    if not removed_ids:
+        return []
+    for r in list(root):
+        root.remove(r)
+    for r in remaining:
+        root.append(r)
+    if remaining:
+        pkg.set_xml(rels_part, root)
+    else:
+        pkg.remove_part(rels_part)
+    return removed_ids
+
+
+def _remove_content_types_override(pkg: "XlsxPackage", part_name: str) -> None:
+    if not pkg.has("[Content_Types].xml"):
+        return
+    root = pkg.xml("[Content_Types].xml")
+    for el in root.findall(f"{{{_CT_NS}}}Override"):
+        if el.get("PartName") == part_name:
+            root.remove(el)
+            pkg.set_xml("[Content_Types].xml", root)
+            return
+
+
+def _remove_custom_xml_part(pkg: "XlsxPackage", item_path: str) -> None:
+    base_dir, base_name = item_path.rsplit("/", 1)
+    rels_path = f"{base_dir}/_rels/{base_name}.rels"
+    if pkg.has(rels_path):
+        rels_root = pkg.xml(rels_path)
+        for rel_el in rels_root.findall(_qn("rel", "Relationship")):
+            target = rel_el.get("Target", "")
+            resolved = _normalize_part_path(target[1:]) if target.startswith("/") else _normalize_part_path(f"{base_dir}/{target}")
+            if pkg.has(resolved):
+                pkg.remove_part(resolved)
+                _remove_content_types_override(pkg, f"/{resolved}")
+        pkg.remove_part(rels_path)
+    pkg.remove_part(item_path)
+    _remove_content_types_override(pkg, f"/{item_path}")
+    _remove_relationships_by_target_suffix(pkg, "xl/_rels/workbook.xml.rels", base_name)
+
+
+def remove_power_query_dependency(pkg: "XlsxPackage") -> dict[str, list[str]]:
+    """Strips Power Query (queryTable-backed Excel Tables) from the package:
+    clears `tableType="queryTable"`/`queryTableFieldId` markers on any table,
+    removes the queryTable parts themselves and the relationship linking
+    each table to its queryTable, removes the `<connection>` entries in
+    `xl/connections.xml` that those queryTables referenced (deleting the
+    whole part, and its own relationship/Content_Types entry, only if no
+    connections are left), and removes the customXml DataMashup part(s) that
+    hold the actual Power Query M code -- verified by content
+    (`_is_data_mashup_custom_xml`), never by location alone, so an unrelated
+    customXml part already in the template is left untouched.
+
+    Returns what was removed (part paths / connection ids), for the caller
+    to log and put in a PR description -- this function itself does not log
+    anything, since it operates on a package that may still be discarded
+    without ever being saved."""
+    removed: dict[str, list[str]] = {"query_tables": [], "connections": [], "custom_xml": []}
+
+    table_paths = sorted(n for n in pkg.part_names() if n.startswith("xl/tables/table") and n.endswith(".xml"))
+    query_table_targets: dict[str, str | None] = {}
+
+    for table_path in table_paths:
+        table_root = pkg.xml(table_path)
+        if table_root.get("tableType") != "queryTable":
+            continue
+        table_root.attrib.pop("tableType", None)
+        cols_el = table_root.find(_qn("main", "tableColumns"))
+        if cols_el is not None:
+            for col_el in cols_el.findall(_qn("main", "tableColumn")):
+                col_el.attrib.pop("queryTableFieldId", None)
+        pkg.set_xml(table_path, table_root)
+
+        rels_path = _part_rels_path(table_path)
+        if not pkg.has(rels_path):
+            continue
+        rels_root = pkg.xml(rels_path)
+        base_dir = table_path.rsplit("/", 1)[0]
+        all_rels = rels_root.findall(_qn("rel", "Relationship"))
+        remaining = []
+        for rel_el in all_rels:
+            if not rel_el.get("Type", "").endswith("/queryTable"):
+                remaining.append(rel_el)
+                continue
+            target = rel_el.get("Target", "")
+            resolved = _normalize_part_path(target[1:]) if target.startswith("/") else _normalize_part_path(f"{base_dir}/{target}")
+            query_table_targets[resolved] = None
+        if len(remaining) != len(all_rels):
+            for rel_el in list(rels_root):
+                rels_root.remove(rel_el)
+            for rel_el in remaining:
+                rels_root.append(rel_el)
+            if remaining:
+                pkg.set_xml(rels_path, rels_root)
+            else:
+                pkg.remove_part(rels_path)
+
+    for target in list(query_table_targets):
+        if pkg.has(target):
+            query_table_targets[target] = pkg.xml(target).get("connectionId")
+
+    connection_ids = {cid for cid in query_table_targets.values() if cid}
+
+    for target in query_table_targets:
+        if pkg.has(target):
+            pkg.remove_part(target)
+            _remove_content_types_override(pkg, f"/{target}")
+            removed["query_tables"].append(target)
+
+    if pkg.has("xl/connections.xml"):
+        conn_root = pkg.xml("xl/connections.xml")
+        all_connections = conn_root.findall(_qn("main", "connection"))
+
+        def _is_power_query_connection(conn_el: etree._Element) -> bool:
+            if conn_el.get("id") in connection_ids:
+                return True
+            # Some Power Query connections (e.g. an intermediate/staging
+            # query never loaded to a worksheet table) have no queryTable
+            # at all, so they can't be found via table linkage -- but they
+            # still carry Power Query's own OLE DB provider signature.
+            for db_pr in conn_el.iter(_qn("main", "dbPr")):
+                if "Microsoft.Mashup" in (db_pr.get("connection") or ""):
+                    return True
+            return False
+
+        to_remove = [c for c in all_connections if _is_power_query_connection(c)]
+        remaining_conns = [c for c in all_connections if c not in to_remove]
+        removed["connections"].extend(c.get("id") for c in to_remove)
+        if remaining_conns:
+            for c in list(conn_root):
+                conn_root.remove(c)
+            for c in remaining_conns:
+                conn_root.append(c)
+            pkg.set_xml("xl/connections.xml", conn_root)
+        else:
+            pkg.remove_part("xl/connections.xml")
+            _remove_relationships_by_target_suffix(pkg, "xl/_rels/workbook.xml.rels", "connections.xml")
+            _remove_content_types_override(pkg, "/xl/connections.xml")
+
+    for name in sorted(pkg.part_names()):
+        base_name = name.rsplit("/", 1)[-1]
+        is_item_part = (
+            name.startswith("customXml/")
+            and name.endswith(".xml")
+            and "_rels" not in name
+            and re.match(r"^item\d+\.xml$", base_name)
+        )
+        if not is_item_part or not pkg.has(name):
+            continue
+        if _is_data_mashup_custom_xml(pkg.raw(name)):
+            _remove_custom_xml_part(pkg, name)
+            removed["custom_xml"].append(name)
+
+    return removed
 
 
 def sha256_of(source: Any, part_name: str) -> str:

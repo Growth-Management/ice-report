@@ -36,9 +36,18 @@ TABLE_RELS_TEMPLATE = (
     "</Relationships>\n"
 )
 
-CUSTOM_XML_ITEM = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<root xmlns="urn:test-custom-xml"><note>template-origin custom data</note></root>
-"""
+# Real Power Query DataMashup parts are UTF-16, with the base64-encoded
+# mini-OPC package (containing Formulas/Section1.m, the actual M code) as
+# the element's text content. This stub doesn't need a decodable payload --
+# only the <DataMashup> wrapper matters, since
+# xlsx_package_writer._is_data_mashup_custom_xml only checks for that tag
+# after a UTF-16 decode, exactly like the real official templates' own
+# customXml/item1.xml (confirmed by decoding them directly).
+CUSTOM_XML_ITEM = (
+    '<?xml version="1.0" encoding="utf-16"?>'
+    '<DataMashup sqmid="00000000-0000-0000-0000-000000000000" '
+    'xmlns="http://schemas.microsoft.com/DataMashup">AAAAAAAA</DataMashup>'
+).encode("utf-16")
 
 CUSTOM_XML_ITEM_PROPS = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <ds:datastoreItem ds:itemID="{7B9A2F1A-0000-0000-0000-000000000001}" xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"/>
@@ -118,9 +127,11 @@ def build_app2_like_template(output_path: str | Path) -> Path:
     zentai_headers = headers_10[:5] + ("広告売上", "広告売上_原資50", "作品ID") + headers_10[5:]
     _add_detail_sheet(wb, "全体", zentai_headers, freeze="I4")  # 全体
 
-    # 作品別=A3:D4 (4 cols) / 作品別_2=A3:C4 (3 cols) in the real template.
-    sakuhin = _add_detail_sheet(wb, "作品別", ("A", "B", "C", "D"))  # 作品別
-    sakuhin2 = _add_detail_sheet(wb, "作品別_2", ("A", "B", "C"))  # 作品別_2
+    # 作品別=A3:D4 (4 cols) / 作品別_2=A3:C4 (3 cols) in the real template --
+    # real header text confirmed by direct inspection of the official
+    # templates' 話データ_広告売上_作品別/_2 tables.
+    sakuhin = _add_detail_sheet(wb, "作品別", ("作品名", "タイトルID", "デジタルタイトル名", "広告売上"))
+    sakuhin2 = _add_detail_sheet(wb, "作品別_2", ("作品ID", "作品名", "広告売上_原資50"))
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

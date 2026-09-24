@@ -239,9 +239,7 @@ class PowerQueryPreservationTests(unittest.TestCase):
         self.template_path = build_app2_like_template(Path(self.tmp_dir.name) / "app2_template.xlsx")
         self.output_path = Path(self.tmp_dir.name) / "app2_output.xlsx"
 
-    def _generate(self, *, ios=2, android=2, zentai=2):
-        headers = report.AD_VIEW_DETAIL_HEADERS
-
+    def _generate(self, *, ios=2, android=2, zentai=2, revenue_yen=9789547):
         def _rows(count):
             return [
                 {
@@ -250,21 +248,25 @@ class PowerQueryPreservationTests(unittest.TestCase):
                     "コンテンツ名": f"content-{i}",
                     "JDCN": f"jdcn-{i}",
                     "広告表示数": i * 10,
-                    "作品名": "work",
+                    "作品名": f"work-{i}",
                     "コミックスJDCN": "comic-jdcn",
                     "コミックス巻数": 1,
-                    "タイトルID": 999,
-                    "デジタルタイトル名": "digital-title",
+                    "タイトルID": 900 + i,
+                    "デジタルタイトル名": f"digital-title-{i}",
+                    "作品ID": i,
                 }
                 for i in range(1, count + 1)
             ]
 
         detail_rows = {"iOS": _rows(ios), "Android": _rows(android), "全体": _rows(zentai)}
+        detail_rows = report.add_work_summary_rows(
+            report_type="app2", revenue_yen=revenue_yen, detail_rows=detail_rows
+        )
         result = report.create_ad_revenue_workbook(
             report_type="app2",
             template_path=self.template_path,
             output_path=self.output_path,
-            revenue_yen=9789547,
+            revenue_yen=revenue_yen,
             detail_rows=detail_rows,
         )
         return result
@@ -305,22 +307,36 @@ class PowerQueryPreservationTests(unittest.TestCase):
         self.assertIn(qt1.get("connectionId"), connection_ids)
         self.assertIn(qt2.get("connectionId"), connection_ids)
 
-    def test_query_table_sheets_are_byte_for_byte_untouched(self):
-        """作品別/作品別_2 worksheet XML itself -- not just connections/
-        queryTables -- must be untouched, since this module never calls
-        replace_detail_rows for them."""
-        self._generate()
+    def test_query_table_sheets_now_get_python_computed_values(self):
+        """作品別/作品別_2 are no longer left untouched: create_ad_revenue_workbook
+        now writes the Python-computed work-summary rows into them (replacing
+        what used to be Power Query), while their Power Query *metadata*
+        (connections.xml, queryTables/*, the tableType="queryTable" marker)
+        is untouched by this same call -- covered separately by the other
+        tests in this class. Removing that metadata is a distinct migration
+        step (xlsx_package_writer.remove_power_query_dependency), not
+        something create_ad_revenue_workbook does at runtime."""
+        self._generate(ios=3, android=3, zentai=3)
+        wb = load_workbook(self.output_path)
+        sakuhin = wb["作品別"]
+        sakuhin_table = list(sakuhin.tables.values())[0]
+        # 3 全体 rows, each a distinct work -> 3 作品別 groups
+        self.assertEqual(sakuhin_table.ref, "A3:D6")
+        self.assertIsNotNone(sakuhin.cell(row=4, column=1).value)  # 作品名
+        self.assertIsNotNone(sakuhin.cell(row=4, column=4).value)  # 広告売上
+
         with zipfile.ZipFile(self.template_path) as zf:
-            sheet_names = zf.namelist()
             template_pkg = pkg_writer.XlsxPackage.load(self.template_path)
         sakuhin_part = pkg_writer._sheet_name_to_part(template_pkg, "作品別")
-        sakuhin2_part = pkg_writer._sheet_name_to_part(template_pkg, "作品別_2")
-
+        table_part = pkg_writer._sheet_table_parts(template_pkg, sakuhin_part)[0]
         preserved = pkg_writer.validate_preserved_parts(
-            self.template_path, self.output_path, [sakuhin_part, sakuhin2_part]
+            self.template_path, self.output_path, list(POWER_QUERY_PARTS)
         )
-        self.assertTrue(preserved[sakuhin_part])
-        self.assertTrue(preserved[sakuhin2_part])
+        for part, ok in preserved.items():
+            self.assertTrue(ok, f"{part} was not preserved byte-for-byte")
+        with zipfile.ZipFile(self.output_path) as zf:
+            table_xml = zf.read(table_part).decode("utf-8")
+        self.assertIn('tableType="queryTable"', table_xml)  # metadata untouched here on purpose
 
     def test_read_only_parsed_parts_are_byte_for_byte_preserved(self):
         """Dirty-tracking regression: xml() is called (for lookup only) on
@@ -389,6 +405,124 @@ class PowerQueryPreservationTests(unittest.TestCase):
             set(wb.sheetnames),
             {"サマリ", "iOS", "Android", "全体", "作品別", "作品別_2"},
         )
+
+
+class RemovePowerQueryDependencyTests(unittest.TestCase):
+    """xlsx_package_writer.remove_power_query_dependency: the one-time
+    template migration step (not called at runtime by
+    create_ad_revenue_workbook) that strips Power Query so the resulting
+    template needs no Power Query refresh at all, matching the "Power Query
+    廃止" acceptance criteria."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+        self.template_path = build_app2_like_template(Path(self.tmp_dir.name) / "app2_template.xlsx")
+        self.output_path = Path(self.tmp_dir.name) / "app2_pq_free.xlsx"
+
+    def _convert(self):
+        pkg = pkg_writer.XlsxPackage.load(self.template_path)
+        removed = pkg_writer.remove_power_query_dependency(pkg)
+        pkg.save(self.output_path)
+        return removed
+
+    def test_removes_both_query_tables_and_their_connections(self):
+        removed = self._convert()
+        self.assertEqual(len(removed["query_tables"]), 2)
+        self.assertEqual(set(removed["connections"]), {"2", "3"})
+        self.assertEqual(removed["custom_xml"], ["customXml/item1.xml"])
+
+    def test_no_power_query_parts_remain_in_output(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            names = zf.namelist()
+        for part in POWER_QUERY_PARTS:
+            self.assertNotIn(part, names)
+
+    def test_table_type_and_field_id_markers_are_stripped(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            for name in zf.namelist():
+                if name.startswith("xl/tables/table") and name.endswith(".xml"):
+                    xml = zf.read(name).decode("utf-8")
+                    self.assertNotIn("queryTable", xml)
+
+    def test_no_dangling_relationships_or_content_types_overrides(self):
+        self._convert()
+        CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+        with zipfile.ZipFile(self.output_path) as zf:
+            names = set(zf.namelist())
+            ct_root = etree.fromstring(zf.read("[Content_Types].xml"))
+            for el in ct_root.findall(f"{CT_NS}Override"):
+                part = el.get("PartName").lstrip("/")
+                self.assertIn(part, names, f"dangling Content_Types Override -> {part}")
+            wb_rels = etree.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+            for rel in wb_rels.findall(f"{REL_NS}Relationship"):
+                target = rel.get("Target")
+                resolved = (
+                    pkg_writer._normalize_part_path(target[1:])
+                    if target.startswith("/")
+                    else pkg_writer._normalize_part_path(f"xl/{target}")
+                )
+                self.assertIn(resolved, names, f"dangling workbook.xml.rels Relationship -> {target}")
+
+    def test_zip_and_xml_still_valid_and_reopens(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            self.assertIsNone(zf.testzip())
+            for name in zf.namelist():
+                if name.endswith(".xml") or name.endswith(".rels"):
+                    etree.fromstring(zf.read(name))
+        wb = load_workbook(self.output_path)
+        self.assertEqual(
+            set(wb.sheetnames), {"サマリ", "iOS", "Android", "全体", "作品別", "作品別_2"}
+        )
+
+    def test_other_sheets_and_non_power_query_parts_are_untouched(self):
+        self._convert()
+        preserved = pkg_writer.validate_preserved_parts(
+            self.template_path,
+            self.output_path,
+            ["xl/sharedStrings.xml", "xl/styles.xml", "xl/worksheets/sheet1.xml"],
+        )
+        for part, ok in preserved.items():
+            self.assertTrue(ok, f"{part} was not preserved byte-for-byte")
+
+    def test_can_then_be_used_normally_by_create_ad_revenue_workbook(self):
+        """The converted, Power-Query-free template still works with the
+        exact same runtime write path as before -- no special-casing needed
+        once a template has been migrated."""
+        self._convert()
+        result = report.create_ad_revenue_workbook(
+            report_type="app2",
+            template_path=self.output_path,
+            output_path=Path(self.tmp_dir.name) / "final.xlsx",
+            revenue_yen=9789547,
+            detail_rows={
+                "iOS": [],
+                "Android": [],
+                "全体": [
+                    {
+                        "コンテンツID_Raise": "ec1",
+                        "コンテンツID": 1,
+                        "コンテンツ名": "c1",
+                        "JDCN": "j1",
+                        "広告表示数": 100,
+                        "作品名": "work-1",
+                        "コミックスJDCN": "cj1",
+                        "コミックス巻数": 1,
+                        "タイトルID": 901,
+                        "デジタルタイトル名": "dt1",
+                        "作品ID": 1,
+                        "広告売上": 50,
+                        "広告売上_原資50": 25,
+                    }
+                ],
+                "作品別": [{"作品名": "work-1", "タイトルID": 901, "デジタルタイトル名": "dt1", "広告売上": 50}],
+                "作品別_2": [{"作品ID": 1, "作品名": "work-1", "広告売上_原資50": 25}],
+            },
+        )
+        self.assertEqual(result["detail_row_count"], 1)
 
 
 if __name__ == "__main__":

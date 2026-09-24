@@ -5,6 +5,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,6 +14,8 @@ from google.cloud import bigquery
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
+
+import ad_revenue_work_summaries as work_summaries
 
 # ---------------------------------------------------------------------------
 # Report identity / defaults
@@ -69,6 +72,28 @@ _REQUIRED_DETAIL_HEADERS = (
     "作品名",
 )
 
+# Extra columns written only to the "全体" sheet (never iOS/Android), feeding
+# the Python-side 作品別/作品別_2 aggregations that replace what used to be
+# Power Query. See ad_revenue_work_summaries.py and
+# docs/jumpplus-ad-revenue-report.md ("Power Query廃止").
+APP2_ZENTAI_EXTRA_HEADERS = ("広告売上", "広告売上_原資50", "作品ID")
+WEB_ZENTAI_EXTRA_HEADERS = ("広告売上",)
+
+# 作品別/作品別_2 sheet headers -- confirmed by direct inspection of the real
+# official templates' Excel Tables (not guessed): APP_2's 話データ_広告売上_作品別
+# (A3:D4), 話データ_広告売上_作品別_2 (A3:C4), video-reward's
+# 話データ_コイン消費数_作品別 (A3:D4).
+APP2_WORK_SUMMARY_HEADERS = ("作品名", "タイトルID", "デジタルタイトル名", "広告売上")
+APP2_WORK_SUMMARY_50_HEADERS = ("作品ID", "作品名", "広告売上_原資50")
+WEB_WORK_SUMMARY_HEADERS = ("作品名", "タイトルID", "デジタルタイトル名", "広告売上")
+VIDEO_REWARD_WORK_SUMMARY_HEADERS = ("作品名", "コイン消費数", "コイン消費割合", "広告還元額")
+
+
+@dataclass(frozen=True)
+class WorkSummarySheetSpec:
+    sheet_name: str
+    headers: tuple[str, ...]
+
 
 @dataclass(frozen=True)
 class AdRevenueReportSpec:
@@ -81,6 +106,9 @@ class AdRevenueReportSpec:
     detail_sheets: tuple[str, ...]
     detail_headers: tuple[str, ...]
     value_header: str  # the per-row count column: "コイン消費数" or "広告表示数"
+    zentai_sheet: str = "全体"
+    zentai_extra_headers: tuple[str, ...] = ()
+    work_summary_sheets: tuple[WorkSummarySheetSpec, ...] = ()
 
 
 # Official templates placed by システム管理室 in the "広告売上" Drive folder
@@ -103,6 +131,7 @@ REPORT_SPECS: dict[str, AdRevenueReportSpec] = {
         detail_sheets=("iOS", "Android", "全体"),
         detail_headers=VIDEO_REWARD_DETAIL_HEADERS,
         value_header="コイン消費数",
+        work_summary_sheets=(WorkSummarySheetSpec("作品別", VIDEO_REWARD_WORK_SUMMARY_HEADERS),),
     ),
     "app2": AdRevenueReportSpec(
         report_id="app2",
@@ -114,6 +143,11 @@ REPORT_SPECS: dict[str, AdRevenueReportSpec] = {
         detail_sheets=("iOS", "Android", "全体"),
         detail_headers=AD_VIEW_DETAIL_HEADERS,
         value_header="広告表示数",
+        zentai_extra_headers=APP2_ZENTAI_EXTRA_HEADERS,
+        work_summary_sheets=(
+            WorkSummarySheetSpec("作品別", APP2_WORK_SUMMARY_HEADERS),
+            WorkSummarySheetSpec("作品別_2", APP2_WORK_SUMMARY_50_HEADERS),
+        ),
     ),
     "web": AdRevenueReportSpec(
         report_id="web",
@@ -125,6 +159,8 @@ REPORT_SPECS: dict[str, AdRevenueReportSpec] = {
         detail_sheets=("全体",),
         detail_headers=AD_VIEW_DETAIL_HEADERS,
         value_header="広告表示数",
+        zentai_extra_headers=WEB_ZENTAI_EXTRA_HEADERS,
+        work_summary_sheets=(WorkSummarySheetSpec("作品別", WEB_WORK_SUMMARY_HEADERS),),
     ),
 }
 
@@ -382,6 +418,7 @@ def run_ad_view_query(
             , any_value(ex_episode_package_no) as ex_episode_package_no
             , any_value(ex_episode_title_id) as ex_episode_title_id
             , any_value(ex_episode_title_name) as ex_episode_title_name
+            , any_value(work_id) as work_id
         from `{table or ad_view_table()}`
         where date_jst_month = @target_month
             and app_pf in unnest(@app_pfs)
@@ -398,6 +435,17 @@ def run_ad_view_query(
     )
     frame = client.query(query, job_config=job_config).to_dataframe()
     return frame.to_dict("records")
+
+
+def _safe_int(value: Any) -> int | None:
+    """int(value), but treats None and pandas' float NaN (which is not
+    None, and which int() raises ValueError on) both as missing -- unlike
+    id-type columns, 作品ID/work_id can legitimately be unlinked/null."""
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:
+        return None
+    return int(value)
 
 
 def _coin_content_row_to_detail(record: dict[str, Any]) -> dict[str, Any]:
@@ -425,6 +473,7 @@ def _ad_view_row_to_detail(record: dict[str, Any]) -> dict[str, Any]:
         "コミックス巻数": record.get("ex_episode_package_no"),
         "タイトルID": record.get("ex_episode_title_id"),
         "デジタルタイトル名": record.get("ex_episode_title_name"),
+        "作品ID": _safe_int(record.get("work_id")),
     }
 
 
@@ -451,6 +500,54 @@ def fetch_detail_rows(*, project_id: str, report_type: str, target_month: date) 
         records = run_ad_view_query(project_id=project_id, target_month=target_month, app_pfs=["Web"])
         return {"全体": [_ad_view_row_to_detail(r) for r in records]}
     raise AdRevenueReportError("unknown_report_type", report_type=report_type)
+
+
+def add_work_summary_rows(
+    *, report_type: str, revenue_yen: int, detail_rows: dict[str, list[dict[str, Any]]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Fills in the 作品別/作品別_2 replacements for what used to be Power
+    Query (ad_revenue_work_summaries.py), and -- for app2/web -- the 全体
+    sheet's own 広告売上/広告売上_原資50 per-row values those aggregations
+    are computed from. See docs/jumpplus-ad-revenue-report.md
+    ("Power Query廃止") for how the unit-price formula and each grouping was
+    verified against the real official templates' own native Excel formula
+    and decoded Power Query M source, not just guessed from the task
+    description.
+
+    Pure with respect to BigQuery/Drive: only touches the `detail_rows` dict
+    already fetched by fetch_detail_rows(), returning a new dict (the input
+    is not mutated) with the 全体 sheet's rows augmented in place and the
+    work-summary sheets' rows added under their own sheet-name keys.
+    """
+    spec = REPORT_SPECS[report_type]
+    if not spec.work_summary_sheets:
+        return detail_rows
+
+    augmented = dict(detail_rows)
+    zentai_rows = [dict(row) for row in augmented.get(spec.zentai_sheet, [])]
+
+    if report_type in ("app2", "web"):
+        total_views = sum(int(row.get(spec.value_header) or 0) for row in zentai_rows)
+        price = work_summaries.unit_price(revenue_yen, total_views)
+        for row in zentai_rows:
+            row["広告売上"] = work_summaries.ad_revenue_for_row(row.get(spec.value_header) or 0, price)
+
+        if report_type == "app2":
+            price_50 = work_summaries.unit_price(revenue_yen, total_views, ratio=Decimal("0.5"))
+            for row in zentai_rows:
+                row["広告売上_原資50"] = work_summaries.ad_revenue_for_row(
+                    row.get(spec.value_header) or 0, price_50
+                )
+            augmented["作品別"] = work_summaries.build_app2_work_summary(zentai_rows)
+            augmented["作品別_2"] = work_summaries.build_app2_work_summary_50(zentai_rows)
+        else:
+            augmented["作品別"] = work_summaries.build_web_work_summary(zentai_rows)
+
+        augmented[spec.zentai_sheet] = zentai_rows
+    elif report_type == "video-reward":
+        augmented["作品別"] = work_summaries.build_video_reward_work_summary(zentai_rows, revenue_yen=revenue_yen)
+
+    return augmented
 
 
 # ---------------------------------------------------------------------------
@@ -596,14 +693,12 @@ def create_ad_revenue_workbook(
             raise AdRevenueReportError("summary_total_cell_not_found", report_type=report_type) from exc
         raise
 
-    total_rows = 0
-    for sheet_name in spec.detail_sheets:
-        rows = detail_rows.get(sheet_name, [])
+    def _write_sheet(sheet_name: str, headers: tuple[str, ...], rows: list[dict[str, Any]]) -> None:
         try:
             pkg_writer.replace_detail_rows(
                 package,
                 sheet_name,
-                spec.detail_headers,
+                headers,
                 rows,
                 required_headers=_REQUIRED_DETAIL_HEADERS,
             )
@@ -621,7 +716,22 @@ def create_ad_revenue_workbook(
                     "missing_detail_headers", sheet=sheet_name, missing=exc.details.get("missing")
                 ) from exc
             raise
+
+    total_rows = 0
+    for sheet_name in spec.detail_sheets:
+        headers = spec.detail_headers
+        if sheet_name == spec.zentai_sheet and spec.zentai_extra_headers:
+            headers = spec.detail_headers + spec.zentai_extra_headers
+        rows = detail_rows.get(sheet_name, [])
+        _write_sheet(sheet_name, headers, rows)
         total_rows += len(rows)
+
+    # 作品別/作品別_2: Python-computed replacements for what used to be Power
+    # Query (see ad_revenue_work_summaries.py). Not counted in
+    # detail_row_count, which has always meant "iOS/Android/全体 rows" --
+    # existing callers (API response, audit log) rely on that meaning.
+    for work_spec in spec.work_summary_sheets:
+        _write_sheet(work_spec.sheet_name, work_spec.headers, detail_rows.get(work_spec.sheet_name, []))
 
     package.save(output_path)
 
@@ -662,6 +772,9 @@ def generate_ad_revenue_report(
         )
 
     detail_rows = fetch_detail_rows(project_id=project_id, report_type=report_type, target_month=target_month)
+    detail_rows = add_work_summary_rows(
+        report_type=report_type, revenue_yen=readiness.revenue_yen, detail_rows=detail_rows
+    )
 
     template_id = template_file_id_override or template_file_id(report_type)
     if not template_id:
