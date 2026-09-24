@@ -337,7 +337,12 @@ class CreateAdRevenueWorkbookTests(_RestoringTestCase):
         _build_summary_sheet(wb)
         spec = report.REPORT_SPECS[report_type]
         for sheet_name in spec.detail_sheets:
-            _build_detail_sheet(wb, sheet_name, spec.detail_headers, data_row_count=2)
+            headers = spec.detail_headers
+            if sheet_name == spec.zentai_sheet and spec.zentai_extra_headers:
+                headers = headers + spec.zentai_extra_headers
+            _build_detail_sheet(wb, sheet_name, headers, data_row_count=2)
+        for work_spec in spec.work_summary_sheets:
+            _build_detail_sheet(wb, work_spec.sheet_name, work_spec.headers, data_row_count=1)
         return wb
 
     def test_video_reward_end_to_end(self):
@@ -440,6 +445,87 @@ class RunCoinContentQueryGoldenMasterTests(_RestoringTestCase):
         array_param = next(p for p in job_config.query_parameters if p.name == "app_pfs")
         self.assertEqual(array_param.values, ["iOS"])
 
+    def test_query_text_fetches_ex_work_name_alongside_work_title(self):
+        """作品別 sheet's Golden Master grouping (798 works) matches
+        ex_work_name, not work_title (804 distinct values) -- confirmed
+        against the real 2026-08 production file. work_title is still
+        fetched for debugging only; _coin_content_row_to_detail must build
+        the report's own 作品名 from ex_work_name."""
+        query_text, _ = self._run_and_capture_query(["iOS", "And"])
+        self.assertIn("any_value(ex_work_name) as ex_work_name", query_text)
+        self.assertIn("any_value(work_title) as work_title", query_text)
+
+
+class CoinContentRowToDetailTests(_RestoringTestCase):
+    def test_work_name_column_comes_from_ex_work_name_not_work_title(self):
+        record = {
+            "prefixed_id": "ec1",
+            "content_id": 1,
+            "name": "content-1",
+            "jdcn": "j1",
+            "reward_video_ad_coin_count": 100,
+            "work_title": "ONE PIECE　第1部",
+            "ex_work_name": "ONE PIECE",
+            "ex_comics_jdcn": None,
+            "ex_episode_package_no": None,
+        }
+        detail = report._coin_content_row_to_detail(record)
+        self.assertEqual(detail["作品名"], "ONE PIECE")
+
+    def test_golden_master_ex_work_name_rollups_2026_08(self):
+        """Locks in the real 2026-08 production file's per-work totals for
+        works whose work_title variants collapse under ex_work_name (e.g.
+        ONE PIECE's 第1部/第2部/第3部 all roll up to "ONE PIECE") --
+        confirmed directly against the real Golden Master file, independent
+        of the 798-vs-804 group-count investigation itself."""
+        # (work_title, ex_work_name, coin_count) -- content-level rows that
+        # collapse into one 作品別 group once grouped by ex_work_name.
+        rows = [
+            ("ONE PIECE　第1部", "ONE PIECE", 5_000_000),
+            ("ONE PIECE　第2部", "ONE PIECE", 4_722_390),
+            ("ONE PIECE　第3部", "ONE PIECE", 3_000_000),
+            ("チェンソーマン 第一部", "チェンソーマン", 3_000_000),
+            ("チェンソーマン 第二部", "チェンソーマン", 1_956_500),
+            ("キン肉マン (38巻以降～、週プレ連載シリーズ)", "キン肉マン", 1_361_255),
+            ("After World", "終末のハーレム", 208_920),
+            ("奴隷遵戲　GUREN", "奴隷遵戲", 57_640),
+            ("天神-TENJIN- イーグルネスト", "天神―TENJIN―", 23_690),
+            ("放課後ましまし俱楽部", "声優ましまし俱楽部", 840),
+        ]
+        detail_rows = [
+            report._coin_content_row_to_detail(
+                {
+                    "prefixed_id": f"ec{i}",
+                    "content_id": i,
+                    "name": f"content-{i}",
+                    "jdcn": f"j{i}",
+                    "reward_video_ad_coin_count": coin,
+                    "work_title": work_title,
+                    "ex_work_name": ex_work_name,
+                    "ex_comics_jdcn": None,
+                    "ex_episode_package_no": None,
+                }
+            )
+            for i, (work_title, ex_work_name, coin) in enumerate(rows, start=1)
+        ]
+
+        summary = report.work_summaries.build_video_reward_work_summary(detail_rows, revenue_yen=14017945)
+        by_name = {r["作品名"]: r["コイン消費数"] for r in summary}
+
+        expected = {
+            "ONE PIECE": 12_722_390,
+            "チェンソーマン": 4_956_500,
+            "キン肉マン": 1_361_255,
+            "終末のハーレム": 208_920,
+            "奴隷遵戲": 57_640,
+            "天神―TENJIN―": 23_690,
+            "声優ましまし俱楽部": 840,
+        }
+        for name, coin in expected.items():
+            self.assertEqual(by_name[name], coin, f"{name} mismatch")
+        # every work_title variant collapsed -- 10 content rows -> 7 works
+        self.assertEqual(len(summary), 7)
+
 
 class FetchDetailRowsDispatchTests(_RestoringTestCase):
     """Locks in each report type's mapping to BigQuery queries and detail
@@ -500,6 +586,80 @@ class FetchDetailRowsDispatchTests(_RestoringTestCase):
         so one report waiting never blocks another from being generated."""
         columns = {spec.revenue_column for spec in report.REPORT_SPECS.values()}
         self.assertEqual(len(columns), len(report.REPORT_SPECS))
+
+
+class AddWorkSummaryRowsTests(_RestoringTestCase):
+    """Orchestration around ad_revenue_work_summaries.py: populates 全体's
+    own 広告売上/広告売上_原資50/作品ID and the 作品別/作品別_2 replacements
+    for what used to be Power Query."""
+
+    def _zentai_row(self, i, *, work_id=None):
+        return {
+            "コンテンツID_Raise": f"ec{i}",
+            "コンテンツID": i,
+            "コンテンツ名": f"content-{i}",
+            "JDCN": f"jdcn-{i}",
+            "広告表示数": i * 10,
+            "作品名": f"work-{i}",
+            "コミックスJDCN": "comic-jdcn",
+            "コミックス巻数": 1,
+            "タイトルID": 900 + i,
+            "デジタルタイトル名": f"digital-title-{i}",
+            "作品ID": work_id if work_id is not None else i,
+        }
+
+    def test_app2_populates_zentai_and_both_work_summary_sheets(self):
+        zentai = [self._zentai_row(1), self._zentai_row(2)]
+        detail_rows = {"iOS": [], "Android": [], "全体": zentai}
+
+        result = report.add_work_summary_rows(report_type="app2", revenue_yen=1000, detail_rows=detail_rows)
+
+        self.assertIn("広告売上", result["全体"][0])
+        self.assertIn("広告売上_原資50", result["全体"][0])
+        self.assertEqual(set(result.keys()), {"iOS", "Android", "全体", "作品別", "作品別_2"})
+        self.assertEqual(len(result["作品別"]), 2)
+        self.assertEqual(len(result["作品別_2"]), 2)
+        # revenue is split proportionally to 広告表示数 (10 and 20) -- total
+        # ad revenue across 作品別 groups must sum back to the input revenue.
+        total = sum((r["広告売上"] for r in result["作品別"]), start=type(result["作品別"][0]["広告売上"])(0))
+        self.assertEqual(round(total), 1000)
+
+    def test_web_populates_zentai_and_single_work_summary_sheet(self):
+        zentai = [self._zentai_row(1), self._zentai_row(2)]
+        detail_rows = {"全体": zentai}
+
+        result = report.add_work_summary_rows(report_type="web", revenue_yen=500, detail_rows=detail_rows)
+
+        self.assertIn("広告売上", result["全体"][0])
+        self.assertNotIn("広告売上_原資50", result["全体"][0])
+        self.assertEqual(set(result.keys()), {"全体", "作品別"})
+        self.assertEqual(len(result["作品別"]), 2)
+
+    def test_video_reward_adds_only_work_summary_sheet(self):
+        zentai = [
+            {"作品名": "A", "コイン消費数": 300},
+            {"作品名": "B", "コイン消費数": 700},
+        ]
+        detail_rows = {"iOS": [], "Android": [], "全体": zentai}
+
+        result = report.add_work_summary_rows(
+            report_type="video-reward", revenue_yen=14017945, detail_rows=detail_rows
+        )
+
+        self.assertEqual(set(result.keys()), {"iOS", "Android", "全体", "作品別"})
+        # 全体 rows themselves are untouched (no new keys added, unlike app2/web)
+        self.assertEqual(set(result["全体"][0].keys()), {"作品名", "コイン消費数"})
+        self.assertEqual(len(result["作品別"]), 2)
+
+    def test_does_not_mutate_input_dict(self):
+        zentai = [self._zentai_row(1)]
+        detail_rows = {"iOS": [], "Android": [], "全体": zentai}
+        original_zentai_row_keys = set(zentai[0].keys())
+
+        report.add_work_summary_rows(report_type="app2", revenue_yen=100, detail_rows=detail_rows)
+
+        self.assertEqual(set(detail_rows["全体"][0].keys()), original_zentai_row_keys)
+        self.assertNotIn("作品別", detail_rows)
 
 
 class ReadinessTests(_RestoringTestCase):

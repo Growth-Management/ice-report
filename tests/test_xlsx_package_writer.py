@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from decimal import Decimal
 from pathlib import Path
 
 from lxml import etree
@@ -13,7 +14,13 @@ import jumpplus_ad_revenue_report as report
 import xlsx_package_writer as pkg_writer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from xlsx_fixtures import POWER_QUERY_PARTS, build_app2_like_template  # noqa: E402
+from xlsx_fixtures import (  # noqa: E402
+    POWER_QUERY_PARTS,
+    POWER_QUERY_PARTS_SINGLE,
+    build_app2_like_template,
+    build_video_reward_like_template,
+    build_web_like_template,
+)
 
 MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
@@ -239,9 +246,7 @@ class PowerQueryPreservationTests(unittest.TestCase):
         self.template_path = build_app2_like_template(Path(self.tmp_dir.name) / "app2_template.xlsx")
         self.output_path = Path(self.tmp_dir.name) / "app2_output.xlsx"
 
-    def _generate(self, *, ios=2, android=2, zentai=2):
-        headers = report.AD_VIEW_DETAIL_HEADERS
-
+    def _generate(self, *, ios=2, android=2, zentai=2, revenue_yen=9789547):
         def _rows(count):
             return [
                 {
@@ -250,21 +255,25 @@ class PowerQueryPreservationTests(unittest.TestCase):
                     "コンテンツ名": f"content-{i}",
                     "JDCN": f"jdcn-{i}",
                     "広告表示数": i * 10,
-                    "作品名": "work",
+                    "作品名": f"work-{i}",
                     "コミックスJDCN": "comic-jdcn",
                     "コミックス巻数": 1,
-                    "タイトルID": 999,
-                    "デジタルタイトル名": "digital-title",
+                    "タイトルID": 900 + i,
+                    "デジタルタイトル名": f"digital-title-{i}",
+                    "作品ID": i,
                 }
                 for i in range(1, count + 1)
             ]
 
         detail_rows = {"iOS": _rows(ios), "Android": _rows(android), "全体": _rows(zentai)}
+        detail_rows = report.add_work_summary_rows(
+            report_type="app2", revenue_yen=revenue_yen, detail_rows=detail_rows
+        )
         result = report.create_ad_revenue_workbook(
             report_type="app2",
             template_path=self.template_path,
             output_path=self.output_path,
-            revenue_yen=9789547,
+            revenue_yen=revenue_yen,
             detail_rows=detail_rows,
         )
         return result
@@ -305,22 +314,36 @@ class PowerQueryPreservationTests(unittest.TestCase):
         self.assertIn(qt1.get("connectionId"), connection_ids)
         self.assertIn(qt2.get("connectionId"), connection_ids)
 
-    def test_query_table_sheets_are_byte_for_byte_untouched(self):
-        """作品別/作品別_2 worksheet XML itself -- not just connections/
-        queryTables -- must be untouched, since this module never calls
-        replace_detail_rows for them."""
-        self._generate()
+    def test_query_table_sheets_now_get_python_computed_values(self):
+        """作品別/作品別_2 are no longer left untouched: create_ad_revenue_workbook
+        now writes the Python-computed work-summary rows into them (replacing
+        what used to be Power Query), while their Power Query *metadata*
+        (connections.xml, queryTables/*, the tableType="queryTable" marker)
+        is untouched by this same call -- covered separately by the other
+        tests in this class. Removing that metadata is a distinct migration
+        step (xlsx_package_writer.remove_power_query_dependency), not
+        something create_ad_revenue_workbook does at runtime."""
+        self._generate(ios=3, android=3, zentai=3)
+        wb = load_workbook(self.output_path)
+        sakuhin = wb["作品別"]
+        sakuhin_table = list(sakuhin.tables.values())[0]
+        # 3 全体 rows, each a distinct work -> 3 作品別 groups
+        self.assertEqual(sakuhin_table.ref, "A3:D6")
+        self.assertIsNotNone(sakuhin.cell(row=4, column=1).value)  # 作品名
+        self.assertIsNotNone(sakuhin.cell(row=4, column=4).value)  # 広告売上
+
         with zipfile.ZipFile(self.template_path) as zf:
-            sheet_names = zf.namelist()
             template_pkg = pkg_writer.XlsxPackage.load(self.template_path)
         sakuhin_part = pkg_writer._sheet_name_to_part(template_pkg, "作品別")
-        sakuhin2_part = pkg_writer._sheet_name_to_part(template_pkg, "作品別_2")
-
+        table_part = pkg_writer._sheet_table_parts(template_pkg, sakuhin_part)[0]
         preserved = pkg_writer.validate_preserved_parts(
-            self.template_path, self.output_path, [sakuhin_part, sakuhin2_part]
+            self.template_path, self.output_path, list(POWER_QUERY_PARTS)
         )
-        self.assertTrue(preserved[sakuhin_part])
-        self.assertTrue(preserved[sakuhin2_part])
+        for part, ok in preserved.items():
+            self.assertTrue(ok, f"{part} was not preserved byte-for-byte")
+        with zipfile.ZipFile(self.output_path) as zf:
+            table_xml = zf.read(table_part).decode("utf-8")
+        self.assertIn('tableType="queryTable"', table_xml)  # metadata untouched here on purpose
 
     def test_read_only_parsed_parts_are_byte_for_byte_preserved(self):
         """Dirty-tracking regression: xml() is called (for lookup only) on
@@ -389,6 +412,504 @@ class PowerQueryPreservationTests(unittest.TestCase):
             set(wb.sheetnames),
             {"サマリ", "iOS", "Android", "全体", "作品別", "作品別_2"},
         )
+
+
+class DecimalNumericCellTests(unittest.TestCase):
+    """ad_revenue_work_summaries.py returns Decimal for 広告売上/
+    広告売上_原資50/コイン消費割合/広告還元額; the writer must store these as
+    real OOXML numeric cells (t absent/"n"), not inlineStr, or every one of
+    those columns would come out as text in Excel."""
+
+    def _write_and_reload(self, value):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _build_plain_template(Path(tmp), headers=report.AD_VIEW_DETAIL_HEADERS)
+            pkg = pkg_writer.XlsxPackage.load(path)
+            rows = [{h: (value if h == "広告表示数" else f"v-{h}") for h in report.AD_VIEW_DETAIL_HEADERS}]
+            pkg_writer.replace_detail_rows(pkg, "全体", report.AD_VIEW_DETAIL_HEADERS, rows)
+            out = Path(tmp) / "out.xlsx"
+            pkg.save(out)
+
+            with zipfile.ZipFile(out) as zf:
+                sheet_xml = [n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")]
+                raw_xmls = {n: zf.read(n) for n in sheet_xml}
+
+            wb = load_workbook(out)
+            cell = wb["全体"].cell(row=4, column=5)  # 広告表示数 column
+            return cell, raw_xmls
+
+    def test_decimal_cell_has_numeric_data_type(self):
+        cell, _ = self._write_and_reload(Decimal("123.456"))
+        self.assertEqual(cell.data_type, "n")
+
+    def test_decimal_cell_has_no_inline_str_marker_in_raw_xml(self):
+        # The template's own サマリ sheet legitimately has t="inlineStr" for
+        # its own text header labels (unrelated to this test) -- only the
+        # 全体 sheet's row 4 (where the Decimal was written) matters here.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _build_plain_template(Path(tmp), headers=report.AD_VIEW_DETAIL_HEADERS)
+            pkg = pkg_writer.XlsxPackage.load(path)
+            rows = [
+                {h: (Decimal("123.456") if h == "広告表示数" else f"v-{h}") for h in report.AD_VIEW_DETAIL_HEADERS}
+            ]
+            pkg_writer.replace_detail_rows(pkg, "全体", report.AD_VIEW_DETAIL_HEADERS, rows)
+            out = Path(tmp) / "out.xlsx"
+            pkg.save(out)
+
+            zentai_part = pkg_writer._sheet_name_to_part(pkg, "全体")
+            with zipfile.ZipFile(out) as zf:
+                data = zf.read(zentai_part)
+            # 広告表示数 is the 5th header -> column E
+            cell_xml = data.split(b'<c r="E4"')[1].split(b"</c>")[0]
+            self.assertNotIn(b't="inlineStr"', cell_xml)
+
+    def test_decimal_value_is_numeric_after_reload(self):
+        cell, _ = self._write_and_reload(Decimal("123.456"))
+        self.assertEqual(float(cell.value), 123.456)
+
+    def test_large_decimal_does_not_use_scientific_notation(self):
+        _, raw_xmls = self._write_and_reload(Decimal("12722390"))
+        combined = b"".join(raw_xmls.values())
+        self.assertNotIn(b"E+", combined)
+        self.assertNotIn(b"e+", combined)
+
+    def test_non_finite_decimal_is_empty_cell_not_text(self):
+        cell, _ = self._write_and_reload(Decimal("NaN"))
+        self.assertIsNone(cell.value)
+
+    def test_app2_work_summary_ad_revenue_column_is_numeric(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_app2_like_template(Path(tmp) / "app2_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": "ec1",
+                    "コンテンツID": 1,
+                    "コンテンツ名": "c1",
+                    "JDCN": "j1",
+                    "広告表示数": 100,
+                    "作品名": "work-1",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                    "タイトルID": 901,
+                    "デジタルタイトル名": "dt1",
+                    "作品ID": 1,
+                }
+            ]
+            detail_rows = {"iOS": [], "Android": [], "全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="app2", revenue_yen=9789547, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="app2",
+                template_path=path,
+                output_path=output,
+                revenue_yen=9789547,
+                detail_rows=detail_rows,
+            )
+            wb = load_workbook(output)
+            sakuhin = wb["作品別"]
+            revenue_cell = sakuhin.cell(row=4, column=4)  # 広告売上 column
+            self.assertEqual(revenue_cell.data_type, "n")
+
+    def test_web_work_summary_ad_revenue_column_is_numeric(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_web_like_template(Path(tmp) / "web_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": "ec1",
+                    "コンテンツID": 1,
+                    "コンテンツ名": "c1",
+                    "JDCN": "j1",
+                    "広告表示数": 100,
+                    "作品名": "work-1",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                    "タイトルID": 901,
+                    "デジタルタイトル名": "dt1",
+                }
+            ]
+            detail_rows = {"全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="web", revenue_yen=734139, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="web",
+                template_path=path,
+                output_path=output,
+                revenue_yen=734139,
+                detail_rows=detail_rows,
+            )
+            wb = load_workbook(output)
+            sakuhin = wb["作品別"]
+            revenue_cell = sakuhin.cell(row=4, column=4)  # 広告売上 column
+            self.assertEqual(revenue_cell.data_type, "n")
+
+
+class FormulaPreservationTests(unittest.TestCase):
+    """Power Query is gone, but existing Excel formulas unrelated to Power
+    Query must survive: APP_2's 全体 F/G, WEB's 全体 F, and video-reward's
+    作品別 C/D are all Excel-native formulas in the real Golden Master, never
+    written by this module (see jumpplus_ad_revenue_report.py's
+    APP2_ZENTAI_EXTRA_HEADERS/WEB_ZENTAI_EXTRA_HEADERS/
+    VIDEO_REWARD_WORK_SUMMARY_HEADERS comments)."""
+
+    def _detail_row(self, i, headers, value_header):
+        row = {h: f"v{i}-{h}" for h in headers}
+        row[value_header] = i * 10
+        return row
+
+    def test_app2_zentai_f_and_g_formulas_survive_row_growth(self):
+        from xlsx_fixtures import APP2_F_FORMULA, APP2_G_FORMULA
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_app2_like_template(Path(tmp) / "app2_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": f"ec{i}",
+                    "コンテンツID": i,
+                    "コンテンツ名": f"c{i}",
+                    "JDCN": f"j{i}",
+                    "広告表示数": i * 10,
+                    "作品名": f"work-{i}",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                    "タイトルID": 900 + i,
+                    "デジタルタイトル名": f"dt{i}",
+                    "作品ID": i,
+                }
+                for i in range(1, 4)
+            ]
+            detail_rows = {"iOS": [], "Android": [], "全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="app2", revenue_yen=9789547, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="app2",
+                template_path=path,
+                output_path=output,
+                revenue_yen=9789547,
+                detail_rows=detail_rows,
+            )
+            wb = load_workbook(output)
+            ws = wb["全体"]
+            for row in (4, 5, 6):
+                self.assertEqual(ws.cell(row=row, column=6).value, APP2_F_FORMULA)  # F
+                self.assertEqual(ws.cell(row=row, column=7).value, APP2_G_FORMULA)  # G
+                self.assertIsInstance(ws.cell(row=row, column=8).value, int)  # H = 作品ID
+
+    def test_web_zentai_f_formula_survives_row_growth(self):
+        from xlsx_fixtures import WEB_F_FORMULA
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_web_like_template(Path(tmp) / "web_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": f"ec{i}",
+                    "コンテンツID": i,
+                    "コンテンツ名": f"c{i}",
+                    "JDCN": f"j{i}",
+                    "広告表示数": i * 10,
+                    "作品名": f"work-{i}",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                    "タイトルID": 900 + i,
+                    "デジタルタイトル名": f"dt{i}",
+                }
+                for i in range(1, 4)
+            ]
+            detail_rows = {"全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="web", revenue_yen=734139, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="web",
+                template_path=path,
+                output_path=output,
+                revenue_yen=734139,
+                detail_rows=detail_rows,
+            )
+            wb = load_workbook(output)
+            ws = wb["全体"]
+            for row in (4, 5, 6):
+                self.assertEqual(ws.cell(row=row, column=6).value, WEB_F_FORMULA)  # F
+
+    def test_video_reward_sakuhin_c_and_d_formulas_survive_row_growth(self):
+        from xlsx_fixtures import VIDEO_REWARD_C_FORMULA, VIDEO_REWARD_D_FORMULA
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_video_reward_like_template(Path(tmp) / "video_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": f"ec{i}",
+                    "コンテンツID": i,
+                    "コンテンツ名": f"c{i}",
+                    "JDCN": f"j{i}",
+                    "コイン消費数": i * 100,
+                    "作品名": f"work-{i}",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                }
+                for i in range(1, 4)
+            ]
+            detail_rows = {"iOS": [], "Android": [], "全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="video-reward", revenue_yen=14017945, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="video-reward",
+                template_path=path,
+                output_path=output,
+                revenue_yen=14017945,
+                detail_rows=detail_rows,
+            )
+            wb = load_workbook(output)
+            ws = wb["作品別"]
+            for row in (4, 5, 6):
+                self.assertEqual(ws.cell(row=row, column=3).value, VIDEO_REWARD_C_FORMULA)  # C
+                self.assertEqual(ws.cell(row=row, column=4).value, VIDEO_REWARD_D_FORMULA)  # D
+                self.assertIsInstance(ws.cell(row=row, column=1).value, str)  # A = 作品名 (Python)
+                self.assertIsInstance(ws.cell(row=row, column=2).value, int)  # B = コイン消費数 (Python)
+
+
+class WebPowerQueryMigrationTests(unittest.TestCase):
+    """Item 4 of the review: WEB's real official template also carries
+    connections.xml/queryTables/DataMashup/table-to-queryTable relationship
+    (confirmed via the Google Drive connector's natural-language read of the
+    real file: 作品別's table headers matched exactly). This session could
+    not reliably retrieve the real template's raw bytes (two attempts at
+    manual transcription of the connector's base64 output produced
+    differently-corrupted zips both times), so this uses a
+    structurally-faithful synthetic WEB template instead -- same sheets,
+    real header text, single queryTable-backed 作品別, F=広告売上 formula in
+    全体. remove_power_query_dependency() itself is already verified against
+    the *real* app2/video-reward templates (see the module docstring and
+    docs/jumpplus-ad-revenue-report.md)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+        self.template_path = build_web_like_template(Path(self.tmp_dir.name) / "web_template.xlsx")
+        self.output_path = Path(self.tmp_dir.name) / "web_pq_free.xlsx"
+
+    def _convert(self):
+        pkg = pkg_writer.XlsxPackage.load(self.template_path)
+        removed = pkg_writer.remove_power_query_dependency(pkg)
+        pkg.save(self.output_path)
+        return removed
+
+    def test_removes_connections_query_tables_and_data_mashup(self):
+        removed = self._convert()
+        self.assertEqual(len(removed["query_tables"]), 1)
+        self.assertEqual(set(removed["connections"]), {"2"})
+        self.assertEqual(removed["custom_xml"], ["customXml/item1.xml"])
+        with zipfile.ZipFile(self.output_path) as zf:
+            names = zf.namelist()
+        for part in POWER_QUERY_PARTS_SINGLE:
+            self.assertNotIn(part, names)
+
+    def test_table_type_marker_stripped(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            for name in zf.namelist():
+                if name.startswith("xl/tables/table") and name.endswith(".xml"):
+                    self.assertNotIn("queryTable", zf.read(name).decode("utf-8"))
+
+    def test_no_dangling_relationships_or_content_types_overrides(self):
+        self._convert()
+        CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+        with zipfile.ZipFile(self.output_path) as zf:
+            names = set(zf.namelist())
+            ct_root = etree.fromstring(zf.read("[Content_Types].xml"))
+            for el in ct_root.findall(f"{CT_NS}Override"):
+                part = el.get("PartName").lstrip("/")
+                self.assertIn(part, names)
+            wb_rels = etree.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+            for rel in wb_rels.findall(f"{REL_NS}Relationship"):
+                target = rel.get("Target")
+                resolved = (
+                    pkg_writer._normalize_part_path(target[1:])
+                    if target.startswith("/")
+                    else pkg_writer._normalize_part_path(f"xl/{target}")
+                )
+                self.assertIn(resolved, names)
+
+    def test_zip_xml_valid_and_reopens(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            self.assertIsNone(zf.testzip())
+            for name in zf.namelist():
+                if name.endswith(".xml") or name.endswith(".rels"):
+                    etree.fromstring(zf.read(name))
+        wb = load_workbook(self.output_path)
+        self.assertEqual(set(wb.sheetnames), {"サマリ", "全体", "作品別"})
+
+    def test_sakuhin_is_normal_excel_table_after_conversion(self):
+        self._convert()
+        wb = load_workbook(self.output_path)
+        ws = wb["作品別"]
+        table = list(ws.tables.values())[0]
+        self.assertEqual(table.ref, "A3:D4")
+
+    def test_zentai_f_formula_preserved_through_conversion_and_write(self):
+        """Converting to Power-Query-free must not disturb 全体's own F
+        formula either -- it's a completely separate part (worksheet
+        sheetData) from the Power Query metadata this function targets."""
+        from xlsx_fixtures import WEB_F_FORMULA
+
+        self._convert()
+        wb = load_workbook(self.output_path)
+        self.assertEqual(wb["全体"]["F4"].value, WEB_F_FORMULA)
+
+    def test_converted_template_works_with_normal_runtime_write_path(self):
+        self._convert()
+        zentai_rows = [
+            {
+                "コンテンツID_Raise": "ec1",
+                "コンテンツID": 1,
+                "コンテンツ名": "c1",
+                "JDCN": "j1",
+                "広告表示数": 100,
+                "作品名": "work-1",
+                "コミックスJDCN": "cj",
+                "コミックス巻数": 1,
+                "タイトルID": 901,
+                "デジタルタイトル名": "dt1",
+            }
+        ]
+        detail_rows = {"全体": zentai_rows}
+        detail_rows = report.add_work_summary_rows(
+            report_type="web", revenue_yen=734139, detail_rows=detail_rows
+        )
+        result = report.create_ad_revenue_workbook(
+            report_type="web",
+            template_path=self.output_path,
+            output_path=Path(self.tmp_dir.name) / "final.xlsx",
+            revenue_yen=734139,
+            detail_rows=detail_rows,
+        )
+        self.assertEqual(result["detail_row_count"], 1)
+
+
+class RemovePowerQueryDependencyTests(unittest.TestCase):
+    """xlsx_package_writer.remove_power_query_dependency: the one-time
+    template migration step (not called at runtime by
+    create_ad_revenue_workbook) that strips Power Query so the resulting
+    template needs no Power Query refresh at all, matching the "Power Query
+    廃止" acceptance criteria."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+        self.template_path = build_app2_like_template(Path(self.tmp_dir.name) / "app2_template.xlsx")
+        self.output_path = Path(self.tmp_dir.name) / "app2_pq_free.xlsx"
+
+    def _convert(self):
+        pkg = pkg_writer.XlsxPackage.load(self.template_path)
+        removed = pkg_writer.remove_power_query_dependency(pkg)
+        pkg.save(self.output_path)
+        return removed
+
+    def test_removes_both_query_tables_and_their_connections(self):
+        removed = self._convert()
+        self.assertEqual(len(removed["query_tables"]), 2)
+        self.assertEqual(set(removed["connections"]), {"2", "3"})
+        self.assertEqual(removed["custom_xml"], ["customXml/item1.xml"])
+
+    def test_no_power_query_parts_remain_in_output(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            names = zf.namelist()
+        for part in POWER_QUERY_PARTS:
+            self.assertNotIn(part, names)
+
+    def test_table_type_and_field_id_markers_are_stripped(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            for name in zf.namelist():
+                if name.startswith("xl/tables/table") and name.endswith(".xml"):
+                    xml = zf.read(name).decode("utf-8")
+                    self.assertNotIn("queryTable", xml)
+
+    def test_no_dangling_relationships_or_content_types_overrides(self):
+        self._convert()
+        CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+        with zipfile.ZipFile(self.output_path) as zf:
+            names = set(zf.namelist())
+            ct_root = etree.fromstring(zf.read("[Content_Types].xml"))
+            for el in ct_root.findall(f"{CT_NS}Override"):
+                part = el.get("PartName").lstrip("/")
+                self.assertIn(part, names, f"dangling Content_Types Override -> {part}")
+            wb_rels = etree.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+            for rel in wb_rels.findall(f"{REL_NS}Relationship"):
+                target = rel.get("Target")
+                resolved = (
+                    pkg_writer._normalize_part_path(target[1:])
+                    if target.startswith("/")
+                    else pkg_writer._normalize_part_path(f"xl/{target}")
+                )
+                self.assertIn(resolved, names, f"dangling workbook.xml.rels Relationship -> {target}")
+
+    def test_zip_and_xml_still_valid_and_reopens(self):
+        self._convert()
+        with zipfile.ZipFile(self.output_path) as zf:
+            self.assertIsNone(zf.testzip())
+            for name in zf.namelist():
+                if name.endswith(".xml") or name.endswith(".rels"):
+                    etree.fromstring(zf.read(name))
+        wb = load_workbook(self.output_path)
+        self.assertEqual(
+            set(wb.sheetnames), {"サマリ", "iOS", "Android", "全体", "作品別", "作品別_2"}
+        )
+
+    def test_other_sheets_and_non_power_query_parts_are_untouched(self):
+        self._convert()
+        preserved = pkg_writer.validate_preserved_parts(
+            self.template_path,
+            self.output_path,
+            ["xl/sharedStrings.xml", "xl/styles.xml", "xl/worksheets/sheet1.xml"],
+        )
+        for part, ok in preserved.items():
+            self.assertTrue(ok, f"{part} was not preserved byte-for-byte")
+
+    def test_can_then_be_used_normally_by_create_ad_revenue_workbook(self):
+        """The converted, Power-Query-free template still works with the
+        exact same runtime write path as before -- no special-casing needed
+        once a template has been migrated."""
+        self._convert()
+        result = report.create_ad_revenue_workbook(
+            report_type="app2",
+            template_path=self.output_path,
+            output_path=Path(self.tmp_dir.name) / "final.xlsx",
+            revenue_yen=9789547,
+            detail_rows={
+                "iOS": [],
+                "Android": [],
+                "全体": [
+                    {
+                        "コンテンツID_Raise": "ec1",
+                        "コンテンツID": 1,
+                        "コンテンツ名": "c1",
+                        "JDCN": "j1",
+                        "広告表示数": 100,
+                        "作品名": "work-1",
+                        "コミックスJDCN": "cj1",
+                        "コミックス巻数": 1,
+                        "タイトルID": 901,
+                        "デジタルタイトル名": "dt1",
+                        "作品ID": 1,
+                        "広告売上": 50,
+                        "広告売上_原資50": 25,
+                    }
+                ],
+                "作品別": [{"作品名": "work-1", "タイトルID": 901, "デジタルタイトル名": "dt1", "広告売上": 50}],
+                "作品別_2": [{"作品ID": 1, "作品名": "work-1", "広告売上_原資50": 25}],
+            },
+        )
+        self.assertEqual(result["detail_row_count"], 1)
 
 
 if __name__ == "__main__":
