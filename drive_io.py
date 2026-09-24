@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -14,6 +15,18 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 DRIVE_XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+# Passed to next_chunk()/execute() so the google-api-python-client's own
+# exponential-backoff retry handles transient 5xx/connection errors during
+# upload. Do not wrap this in an additional custom retry loop -- that would
+# double-retry the same transient failure.
+DRIVE_UPLOAD_NUM_RETRIES = 3
+
+# Must be a multiple of 256 KiB (Drive API resumable upload requirement).
+# 4 MiB keeps even a small report (e.g. WEB, ~0.5 MiB) uploading in a single
+# chunk while still bounding how much of a large report (e.g. video-reward,
+# ~9 MiB) any one HTTP request has to carry.
+DRIVE_UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 
 
 class DriveOperationError(Exception):
@@ -30,6 +43,14 @@ def _drive_http_error_code(exc: HttpError) -> str:
     if status == 404:
         return "drive_not_found"
     return "drive_api_error"
+
+
+def _sanitized_http_status(exc: Exception) -> str:
+    """HTTP status only -- never the exception's message/reason, which can
+    echo request details. Used for logging, never for the raised error."""
+    if isinstance(exc, HttpError):
+        return str(int(getattr(exc.resp, "status", 0) or 0))
+    return "unknown"
 
 
 def _raise_drive_error(exc: Exception) -> None:
@@ -192,25 +213,65 @@ def upload_xlsx_to_drive(
     *,
     folder_id: str,
     file_name: str,
+    report_type: str | None = None,
     service=None,
 ) -> dict:
+    """Uploads an XLSX file to Drive via a resumable upload.
+
+    All XLSX uploads use resumable=True regardless of size: small files work
+    fine over resumable too, and a single upload mode avoids a size-branch
+    that would otherwise need its own tests and its own failure mode. Large
+    non-resumable ("simple"/"multipart") uploads were observed in production
+    to fail with a 502 from the Drive API on a single long-lived request;
+    resumable uploads send bounded chunks instead, so no single request has to
+    carry the whole payload end-to-end.
+    """
     service = service or get_drive_service()
     path = Path(local_path)
+    file_size_bytes = path.stat().st_size
     metadata = {
         "name": file_name,
         "parents": [folder_id],
     }
-    media = MediaFileUpload(str(path), mimetype=DRIVE_XLSX_MIME_TYPE, resumable=False)
+    media = MediaFileUpload(
+        str(path),
+        mimetype=DRIVE_XLSX_MIME_TYPE,
+        resumable=True,
+        chunksize=DRIVE_UPLOAD_CHUNK_SIZE,
+    )
+    request = service.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id,name,webViewLink",
+        supportsAllDrives=True,
+    )
+
+    logging.info(
+        "ICE_REPORT_DRIVE_UPLOAD operation=upload_xlsx report_type=%s "
+        "file_size_bytes=%d resumable=true status=start",
+        report_type or "",
+        file_size_bytes,
+    )
+
     try:
-        return (
-            service.files()
-            .create(
-                body=metadata,
-                media_body=media,
-                fields="id,name,webViewLink",
-                supportsAllDrives=True,
-            )
-            .execute()
-        )
+        response = None
+        while response is None:
+            _, response = request.next_chunk(num_retries=DRIVE_UPLOAD_NUM_RETRIES)
     except Exception as exc:
+        logging.error(
+            "ICE_REPORT_DRIVE_UPLOAD operation=upload_xlsx report_type=%s "
+            "file_size_bytes=%d resumable=true status=failure http_status=%s",
+            report_type or "",
+            file_size_bytes,
+            _sanitized_http_status(exc),
+        )
         _raise_drive_error(exc)
+        raise
+
+    logging.info(
+        "ICE_REPORT_DRIVE_UPLOAD operation=upload_xlsx report_type=%s "
+        "file_size_bytes=%d resumable=true status=success",
+        report_type or "",
+        file_size_bytes,
+    )
+    return response

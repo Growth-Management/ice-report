@@ -648,7 +648,9 @@ def generate_ad_revenue_report(
             revenue_yen=readiness.revenue_yen,
             detail_rows=detail_rows,
         )
-        uploaded = upload_xlsx_to_drive(output_path, folder_id=folder_id, file_name=file_name)
+        uploaded = upload_xlsx_to_drive(
+            output_path, folder_id=folder_id, file_name=file_name, report_type=report_type
+        )
 
     return {
         "status": "ok",
