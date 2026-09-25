@@ -850,6 +850,68 @@ row4に直接formulaを書き込んでいたため、「複製元に既に式が
 formula/cached値の欠落0件、Golden Master数値(video: SUM(コイン消費数)=365,253,010、
 著者還元額formula=ROUND(14017945*0.15,0)=2,102,692等)と一致することを確認済み。
 
+## Drive upload transport failures と AuthorizedSession実装(2026-09-25)
+
+video-rewardのProduction uploadが`upload_xlsx_to_drive()`(`googleapiclient`の
+`MediaFileUpload`/`request.next_chunk()`)経由で3回失敗した。いずれもchunk_index=1
+(最初のchunkから一度も先に進めない)、直前に`googleapiclient`自身がログする
+`Retry #1 for media upload ... following status: 502`が発生していた:
+
+| chunk size | 例外 | elapsed_ms |
+|---|---|---|
+| 4 MiB | `TimeoutError` | 90,234 |
+| 4 MiB | `BrokenPipeError`(errno=32) | 22,469 |
+| 1 MiB | `TimeoutError` | 84,187 |
+
+chunk sizeを1/4にしても同一の失敗モード(chunk_index=1、直前502)だったため、
+ペイロードサイズが原因ではないと判断。`next_chunk()`はresumable sessionの
+initiation POSTとfirst data PUTという2つの別々のHTTPリクエストを1呼び出しに
+隠蔽しており、どちらが失敗しているか判別できなかった。
+
+PR #141で、`google.auth.transport.requests.AuthorizedSession`を直接使い
+(`googleapiclient`/`httplib2`のresumable実装を経由せず)この2段階を分離して
+観測するadmin診断endpoint(`POST /admin/drive/resumable-diagnostic`)を追加。
+同一Production環境・同一OAuth・同程度のfile sizeで1回実行した結果:
+
+```
+init:        status=success http_status=200 elapsed_ms=1346 location_present=true
+first_chunk: status=success http_status=308 elapsed_ms=668
+```
+
+**CASE C**: 低レベルのAuthorizedSession経路は高速かつ正常。これは、
+`googleapiclient`/`httplib2`のresumable upload実装自体に何らかの固有の問題が
+ある可能性を強く示唆する結果であり(Cloud Run egressやDrive API自体の問題では
+説明しづらい)、この診断結果を受けて`AuthorizedSession`ベースの新しいuploaderを
+実装した。
+
+### 実装
+
+`drive_io.upload_xlsx_to_drive()`は環境変数`DRIVE_UPLOAD_TRANSPORT`で
+実装を切り替えられるようにした:
+
+- `googleapiclient`(未設定時のdefault): 既存の`MediaFileUpload`/`next_chunk()`実装
+  (`_upload_xlsx_googleapiclient()`として温存、無変更)
+- `authorized_session`: 新規実装(`_upload_xlsx_authorized_session()`)
+
+新実装の要点:
+
+- ファイル全体をmemoryへ読み込まず、`drive_upload_chunk_size()`の単位で
+  chunkごとに読み出す
+- 308応答の`Range`ヘッダから「Driveが実際に受信済みのoffset」を取得し、
+  そこから送信を再開する(`chunk_size * chunk_index`という前提には依存しない)
+- transport例外や想定外のHTTP statusを受けたら、同じchunkを無条件で再送する
+  代わりに、必ずstatus query(`Content-Range: bytes */total`の空PUT)で
+  実際の受信状況を確認してから再開する
+- 最大3回のbounded recovery、期限切れセッション(404)時は最大1回まで
+  session再作成(いずれも無制限retryを行わない)
+- 既存の`DRIVE_UPLOAD_NUM_RETRIES`(=3、`googleapiclient`経路専用)には影響しない
+- session URL・token・response body・exception message/repr/tracebackは
+  一切ログに出力しない(PR #139/#141で確立した既存方針を踏襲)
+
+`googleapiclient`経路は削除せず維持している。問題が再発した場合、
+`DRIVE_UPLOAD_TRANSPORT=googleapiclient`(または未設定)へ戻すだけで
+image rollback不要にロールバックできる。
+
 ## Status / open items(未解決事項)
 
 本番化に向けて残っているのは、コード側の問題ではなく外部設定(IAM・共有・Scheduler・deploy)のみ。

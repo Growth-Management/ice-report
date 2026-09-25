@@ -66,6 +66,37 @@ def drive_upload_chunk_size() -> int:
     return value
 
 
+DRIVE_UPLOAD_TRANSPORT_ENV = "DRIVE_UPLOAD_TRANSPORT"
+DRIVE_UPLOAD_TRANSPORT_GOOGLEAPICLIENT = "googleapiclient"
+DRIVE_UPLOAD_TRANSPORT_AUTHORIZED_SESSION = "authorized_session"
+_DRIVE_UPLOAD_TRANSPORTS = (DRIVE_UPLOAD_TRANSPORT_GOOGLEAPICLIENT, DRIVE_UPLOAD_TRANSPORT_AUTHORIZED_SESSION)
+
+
+def drive_upload_transport() -> str:
+    """DRIVE_UPLOAD_TRANSPORT override: "googleapiclient" (default, the
+    long-established MediaFileUpload/next_chunk() path) or
+    "authorized_session" (a from-scratch resumable-upload implementation on
+    google-auth's AuthorizedSession, added after Production video-reward
+    uploads failed 3 times on googleapiclient's resumable path -- see
+    docs/jumpplus-ad-revenue-report.md, "Drive upload transport
+    failures" -- while a low-level AuthorizedSession probe of the same
+    Production environment succeeded immediately). Kept switchable by env
+    rather than replacing the default outright: if the new path turns out
+    to have its own problems, reverting to "googleapiclient" (or just
+    unsetting the var) needs no image rollback. An invalid value falls back
+    to the default with a warning, matching drive_upload_chunk_size()."""
+    raw = os.environ.get(DRIVE_UPLOAD_TRANSPORT_ENV, "").strip()
+    if not raw:
+        return DRIVE_UPLOAD_TRANSPORT_GOOGLEAPICLIENT
+    if raw not in _DRIVE_UPLOAD_TRANSPORTS:
+        logging.warning(
+            "ICE_REPORT_DRIVE_UPLOAD_TRANSPORT_INVALID falling_back_to=%s",
+            DRIVE_UPLOAD_TRANSPORT_GOOGLEAPICLIENT,
+        )
+        return DRIVE_UPLOAD_TRANSPORT_GOOGLEAPICLIENT
+    return raw
+
+
 class DriveOperationError(Exception):
     def __init__(self, code: str, *, status_code: int = 500) -> None:
         super().__init__(code)
@@ -264,6 +295,35 @@ def upload_xlsx_to_drive(
     service=None,
 ) -> dict:
     """Uploads an XLSX file to Drive via a resumable upload.
+
+    Dispatches on drive_upload_transport(): "googleapiclient" (default) uses
+    the long-established MediaFileUpload/next_chunk() path unchanged;
+    "authorized_session" uses a from-scratch resumable-upload implementation
+    on google-auth's AuthorizedSession (see _upload_xlsx_authorized_session).
+    `service` is only meaningful for the googleapiclient path -- the
+    authorized_session path builds its own session from _drive_credentials()
+    and ignores it, since it never uses a googleapiclient service object at
+    all.
+    """
+    if drive_upload_transport() == DRIVE_UPLOAD_TRANSPORT_AUTHORIZED_SESSION:
+        return _upload_xlsx_authorized_session(
+            local_path, folder_id=folder_id, file_name=file_name, report_type=report_type
+        )
+    return _upload_xlsx_googleapiclient(
+        local_path, folder_id=folder_id, file_name=file_name, report_type=report_type, service=service
+    )
+
+
+def _upload_xlsx_googleapiclient(
+    local_path: str | Path,
+    *,
+    folder_id: str,
+    file_name: str,
+    report_type: str | None = None,
+    service=None,
+) -> dict:
+    """The original resumable upload path, unchanged since before
+    DRIVE_UPLOAD_TRANSPORT existed (still the default transport).
 
     All XLSX uploads use resumable=True regardless of size: small files work
     fine over resumable too, and a single upload mode avoids a size-branch
@@ -594,3 +654,368 @@ def run_resumable_upload_diagnostic(
             logging.warning("ICE_REPORT_DRIVE_DIAGNOSTIC operation=cleanup status=failed_to_trash")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# AuthorizedSession resumable uploader -- the production alternative to
+# _upload_xlsx_googleapiclient(), selected via DRIVE_UPLOAD_TRANSPORT (see
+# drive_upload_transport()). Uses the exact same low-level HTTP primitives
+# as the diagnostics above (AuthorizedSession, allow_redirects=False), but
+# is a full resumable-upload implementation rather than a one-shot probe:
+# streams the file in bounded chunks (never loading it whole into memory),
+# tracks the server-confirmed offset from each 308's Range header rather
+# than assuming its own chunk size advanced the position, and on a
+# transport error or unexpected status queries the session for what was
+# actually received before ever resending anything.
+# ---------------------------------------------------------------------------
+
+_UPLOAD_MAX_RECOVER_ATTEMPTS = 3
+_UPLOAD_MAX_SESSION_RESTARTS = 1
+_UPLOAD_STATUS_QUERY_TIMEOUT_S = 30
+
+
+def _parse_range_header(value: str | None) -> int | None:
+    """Parses a resumable-upload "bytes=0-1048575" Range header (present on
+    a 308 once Drive has received at least one byte) into the next byte
+    offset to send. None if absent or unparseable -- callers must not guess
+    in that case (a 308 with no Range header at all means nothing has been
+    received yet, i.e. offset 0, which is not the same as "unparseable")."""
+    if not value:
+        return None
+    try:
+        _, range_part = value.split("=", 1)
+        _, end = range_part.split("-", 1)
+        return int(end) + 1
+    except (ValueError, AttributeError):
+        return None
+
+
+def _open_resumable_session(
+    session,
+    *,
+    file_name: str,
+    file_size_bytes: int,
+    folder_id: str,
+    report_type: str | None,
+    mime_type: str = DRIVE_XLSX_MIME_TYPE,
+) -> str:
+    """Session-initiation POST for the production upload path. Distinct
+    from diagnose_resumable_session_init() (diagnostic-only, returns a dict
+    shaped for the admin API instead of raising). Returns the session URL --
+    held only in the caller's memory, never logged."""
+    started = time.monotonic()
+    try:
+        response = session.post(
+            DRIVE_UPLOAD_ENDPOINT,
+            params={
+                "uploadType": "resumable",
+                "supportsAllDrives": "true",
+                "fields": "id,name,webViewLink",
+            },
+            headers={
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Type": mime_type,
+                "X-Upload-Content-Length": str(file_size_bytes),
+            },
+            json={"name": file_name, "parents": [folder_id]},
+            timeout=_DIAGNOSTIC_INIT_TIMEOUT_S,
+            allow_redirects=False,
+        )
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        module, type_name, errno = _sanitized_exception_fields(exc)
+        logging.error(
+            "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=session_init "
+            "report_type=%s elapsed_ms=%d status=failure "
+            "exception_module=%s exception_type=%s errno=%s",
+            report_type or "",
+            elapsed_ms,
+            module,
+            type_name,
+            errno,
+        )
+        raise DriveOperationError("drive_api_error", status_code=502) from exc
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    location = response.headers.get("Location")
+    status_code = response.status_code
+    response.close()
+
+    if not (200 <= status_code < 300 and location):
+        logging.error(
+            "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=session_init "
+            "report_type=%s elapsed_ms=%d http_status=%d location_present=%s status=failure",
+            report_type or "",
+            elapsed_ms,
+            status_code,
+            bool(location),
+        )
+        raise DriveOperationError("drive_api_error", status_code=status_code)
+
+    logging.info(
+        "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=session_init "
+        "report_type=%s elapsed_ms=%d http_status=%d status=success",
+        report_type or "",
+        elapsed_ms,
+        status_code,
+    )
+    return location
+
+
+def _query_upload_status(session, session_url: str, total_size_bytes: int) -> tuple[str, object]:
+    """Drive's documented way to ask a resumable session what it actually
+    received, instead of blindly resending a chunk after a transport error
+    or an unexpected status: an empty PUT with Content-Range: bytes */total.
+
+    Returns (state, payload):
+      "incomplete", next_offset (int)      -- resume sending from here
+      "complete",   response JSON or None  -- the upload already finished;
+                                               nothing left to send
+      "expired",    None                   -- session no longer valid
+      "unknown",    None                   -- query itself failed/ambiguous
+    """
+    try:
+        response = session.put(
+            session_url,
+            headers={"Content-Range": f"bytes */{total_size_bytes}"},
+            timeout=_UPLOAD_STATUS_QUERY_TIMEOUT_S,
+            allow_redirects=False,
+        )
+    except Exception:
+        return "unknown", None
+
+    status_code = response.status_code
+    if status_code == 308:
+        next_offset = _parse_range_header(response.headers.get("Range"))
+        response.close()
+        return "incomplete", (next_offset if next_offset is not None else 0)
+    if status_code in (200, 201):
+        try:
+            result = response.json()
+        except Exception:
+            result = None
+        response.close()
+        return "complete", result
+    if status_code == 404:
+        response.close()
+        return "expired", None
+    response.close()
+    return "unknown", None
+
+
+def _recover_upload(
+    session,
+    session_url: str,
+    file_size_bytes: int,
+    session_restarts: int,
+    *,
+    file_name: str,
+    folder_id: str,
+    report_type: str | None,
+) -> tuple[str, object, str, int]:
+    """Called after a transport error or an unexpected chunk-PUT status.
+    Never blindly resends the failed chunk -- always asks the session what
+    it actually has first. Returns (outcome, payload, session_url,
+    session_restarts):
+      "resume",   next_offset (int)  -- continue sending from here
+      "complete", response JSON      -- upload already finished
+      "failed",   None               -- recovery exhausted or impossible;
+                                         caller must raise
+    A 404 (expired session) opens at most _UPLOAD_MAX_SESSION_RESTARTS new
+    sessions from scratch (offset resets to 0) -- never unbounded."""
+    state, payload = _query_upload_status(session, session_url, file_size_bytes)
+    if state == "incomplete":
+        return "resume", payload, session_url, session_restarts
+    if state == "complete":
+        return "complete", payload, session_url, session_restarts
+    if state == "expired" and session_restarts < _UPLOAD_MAX_SESSION_RESTARTS:
+        new_session_url = _open_resumable_session(
+            session,
+            file_name=file_name,
+            file_size_bytes=file_size_bytes,
+            folder_id=folder_id,
+            report_type=report_type,
+        )
+        return "resume", 0, new_session_url, session_restarts + 1
+    return "failed", None, session_url, session_restarts
+
+
+def _upload_xlsx_authorized_session(
+    local_path: str | Path,
+    *,
+    folder_id: str,
+    file_name: str,
+    report_type: str | None = None,
+) -> dict:
+    path = Path(local_path)
+    file_size_bytes = path.stat().st_size
+    chunk_size = drive_upload_chunk_size()
+    session = _authorized_session()
+
+    logging.info(
+        "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_xlsx "
+        "report_type=%s file_size_bytes=%d chunk_size_bytes=%d status=start",
+        report_type or "",
+        file_size_bytes,
+        chunk_size,
+    )
+
+    session_url = _open_resumable_session(
+        session,
+        file_name=file_name,
+        file_size_bytes=file_size_bytes,
+        folder_id=folder_id,
+        report_type=report_type,
+    )
+
+    offset = 0
+    chunk_index = 0
+    recover_attempts = 0
+    session_restarts = 0
+
+    with path.open("rb") as fh:
+        while offset < file_size_bytes:
+            chunk_index += 1
+            fh.seek(offset)
+            data = fh.read(chunk_size)
+            end = offset + len(data) - 1
+            chunk_started = time.monotonic()
+
+            try:
+                response = session.put(
+                    session_url,
+                    data=data,
+                    headers={
+                        "Content-Length": str(len(data)),
+                        "Content-Range": f"bytes {offset}-{end}/{file_size_bytes}",
+                    },
+                    timeout=_DIAGNOSTIC_PUT_TIMEOUT_S,
+                    allow_redirects=False,
+                )
+            except Exception as exc:
+                elapsed_ms = int((time.monotonic() - chunk_started) * 1000)
+                module, type_name, errno = _sanitized_exception_fields(exc)
+                logging.error(
+                    "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_chunk "
+                    "report_type=%s chunk_index=%d offset_start=%d offset_end=%d elapsed_ms=%d "
+                    "status=failure exception_module=%s exception_type=%s errno=%s",
+                    report_type or "",
+                    chunk_index,
+                    offset,
+                    end,
+                    elapsed_ms,
+                    module,
+                    type_name,
+                    errno,
+                )
+                recover_attempts += 1
+                if recover_attempts > _UPLOAD_MAX_RECOVER_ATTEMPTS:
+                    raise DriveOperationError("drive_api_error", status_code=502) from exc
+                outcome, payload, session_url, session_restarts = _recover_upload(
+                    session,
+                    session_url,
+                    file_size_bytes,
+                    session_restarts,
+                    file_name=file_name,
+                    folder_id=folder_id,
+                    report_type=report_type,
+                )
+                if outcome == "resume":
+                    offset = payload
+                    continue
+                if outcome == "complete":
+                    logging.info(
+                        "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_xlsx "
+                        "report_type=%s file_size_bytes=%d chunk_count=%d status=success",
+                        report_type or "",
+                        file_size_bytes,
+                        chunk_index,
+                    )
+                    return payload
+                raise DriveOperationError("drive_api_error", status_code=502) from exc
+
+            elapsed_ms = int((time.monotonic() - chunk_started) * 1000)
+            status_code = response.status_code
+
+            if status_code in (200, 201):
+                result = response.json()
+                response.close()
+                logging.info(
+                    "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_chunk "
+                    "report_type=%s chunk_index=%d offset_start=%d offset_end=%d elapsed_ms=%d "
+                    "http_status=%d status=success",
+                    report_type or "",
+                    chunk_index,
+                    offset,
+                    end,
+                    elapsed_ms,
+                    status_code,
+                )
+                logging.info(
+                    "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_xlsx "
+                    "report_type=%s file_size_bytes=%d chunk_count=%d status=success",
+                    report_type or "",
+                    file_size_bytes,
+                    chunk_index,
+                )
+                return result
+
+            if status_code == 308:
+                response.close()
+                logging.info(
+                    "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_chunk "
+                    "report_type=%s chunk_index=%d offset_start=%d offset_end=%d elapsed_ms=%d "
+                    "http_status=308 status=success",
+                    report_type or "",
+                    chunk_index,
+                    offset,
+                    end,
+                    elapsed_ms,
+                )
+                next_offset = _parse_range_header(response.headers.get("Range"))
+                offset = next_offset if next_offset is not None else (end + 1)
+                recover_attempts = 0
+                continue
+
+            response.close()
+            logging.error(
+                "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_chunk "
+                "report_type=%s chunk_index=%d offset_start=%d offset_end=%d elapsed_ms=%d "
+                "http_status=%d status=failure",
+                report_type or "",
+                chunk_index,
+                offset,
+                end,
+                elapsed_ms,
+                status_code,
+            )
+            recover_attempts += 1
+            if recover_attempts > _UPLOAD_MAX_RECOVER_ATTEMPTS:
+                raise DriveOperationError("drive_api_error", status_code=status_code)
+            outcome, payload, session_url, session_restarts = _recover_upload(
+                session,
+                session_url,
+                file_size_bytes,
+                session_restarts,
+                file_name=file_name,
+                folder_id=folder_id,
+                report_type=report_type,
+            )
+            if outcome == "resume":
+                offset = payload
+                continue
+            if outcome == "complete":
+                logging.info(
+                    "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_xlsx "
+                    "report_type=%s file_size_bytes=%d chunk_count=%d status=success",
+                    report_type or "",
+                    file_size_bytes,
+                    chunk_index,
+                )
+                return payload
+            raise DriveOperationError("drive_api_error", status_code=status_code)
+
+    # file_size_bytes == 0 edge case: no chunk loop ever ran. Treat the same
+    # as any other never-started upload rather than silently returning
+    # nothing.
+    raise DriveOperationError("drive_api_error", status_code=400)
