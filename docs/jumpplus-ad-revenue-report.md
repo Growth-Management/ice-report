@@ -850,9 +850,89 @@ row4に直接formulaを書き込んでいたため、「複製元に既に式が
 formula/cached値の欠落0件、Golden Master数値(video: SUM(コイン消費数)=365,253,010、
 著者還元額formula=ROUND(14017945*0.15,0)=2,102,692等)と一致することを確認済み。
 
+## Drive upload transport failures と AuthorizedSession実装(2026-09-25)
+
+video-rewardのProduction uploadが`upload_xlsx_to_drive()`(`googleapiclient`の
+`MediaFileUpload`/`request.next_chunk()`)経由で3回失敗した。いずれもchunk_index=1
+(最初のchunkから一度も先に進めない)、直前に`googleapiclient`自身がログする
+`Retry #1 for media upload ... following status: 502`が発生していた:
+
+| chunk size | 例外 | elapsed_ms |
+|---|---|---|
+| 4 MiB | `TimeoutError` | 90,234 |
+| 4 MiB | `BrokenPipeError`(errno=32) | 22,469 |
+| 1 MiB | `TimeoutError` | 84,187 |
+
+chunk sizeを1/4にしても同一の失敗モード(chunk_index=1、直前502)だったため、
+ペイロードサイズが原因ではないと判断。`next_chunk()`はresumable sessionの
+initiation POSTとfirst data PUTという2つの別々のHTTPリクエストを1呼び出しに
+隠蔽しており、どちらが失敗しているか判別できなかった。
+
+PR #141で、`google.auth.transport.requests.AuthorizedSession`を直接使い
+(`googleapiclient`/`httplib2`のresumable実装を経由せず)この2段階を分離して
+観測するadmin診断endpoint(`POST /admin/drive/resumable-diagnostic`)を追加。
+同一Production環境・同一OAuth・同程度のfile sizeで1回実行した結果:
+
+```
+init:        status=success http_status=200 elapsed_ms=1346 location_present=true
+first_chunk: status=success http_status=308 elapsed_ms=668
+```
+
+**CASE C**: 低レベルのAuthorizedSession経路は高速かつ正常。これは、
+`googleapiclient`/`httplib2`のresumable upload実装自体に何らかの固有の問題が
+ある可能性を強く示唆する結果であり(Cloud Run egressやDrive API自体の問題では
+説明しづらい)、この診断結果を受けて`AuthorizedSession`ベースの新しいuploaderを
+実装した。
+
+### 実装
+
+`drive_io.upload_xlsx_to_drive()`は環境変数`DRIVE_UPLOAD_TRANSPORT`で
+実装を切り替えられるようにした:
+
+- `googleapiclient`(未設定時のdefault): 既存の`MediaFileUpload`/`next_chunk()`実装
+  (`_upload_xlsx_googleapiclient()`として温存、無変更)
+- `authorized_session`: 新規実装(`_upload_xlsx_authorized_session()`)
+
+新実装の要点:
+
+- ファイル全体をmemoryへ読み込まず、`drive_upload_chunk_size()`の単位で
+  chunkごとに読み出す
+- 308応答の`Range`ヘッダから「Driveが実際に受信済みのoffset」を取得し、
+  そこから送信を再開する(`chunk_size * chunk_index`という前提には依存しない)
+- transport例外や想定外のHTTP statusを受けたら、同じchunkを無条件で再送する
+  代わりに、必ずstatus query(`Content-Range: bytes */total`の空PUT)で
+  実際の受信状況を確認してから再開する
+- 最大3回のbounded recovery、期限切れセッション(404)時は最大1回まで
+  session再作成(いずれも無制限retryを行わない)
+- 既存の`DRIVE_UPLOAD_NUM_RETRIES`(=3、`googleapiclient`経路専用)には影響しない
+- session URL・token・response body・exception message/repr/tracebackは
+  一切ログに出力しない(PR #139/#141で確立した既存方針を踏襲)
+
+`googleapiclient`経路は削除せず維持している。問題が再発した場合、
+`DRIVE_UPLOAD_TRANSPORT=googleapiclient`(または未設定)へ戻すだけで
+image rollback不要にロールバックできる。
+
 ## Status / open items(未解決事項)
 
-本番化に向けて残っているのは、コード側の問題ではなく外部設定(IAM・共有・Scheduler・deploy)のみ。
+2026-09-25時点で残っているのは外部設定だけではない。少なくとも以下が未完了:
+
+- **AuthorizedSession uploaderのProduction完走検証**(PR #142): Production診断(CASE C)は
+  session initiation + first chunk PUTの1回のみの成功を確認したものであり、実際の
+  video-reward(~10MB)を最後まで完走できるかは未検証。ローカル統合テストでも
+  1回目は実HTTP 502を4回連続で受けて(bounded recoveryが正しく機能して)クリーンに
+  失敗、2回目は成功、という結果で、intermittentな挙動である可能性が高いが確証はない。
+  `DRIVE_UPLOAD_TRANSPORT=authorized_session`でのProduction試験生成がまだ実施されていない。
+- **video-rewardのformula/recalcation machine validation**(PR #140の効果測定): PR #140で
+  実装したcalculatedColumnFormula materialize・fullCalcOnLoad/forceFullCalcが、
+  Drive uploadが完走した実際のProduction生成物に対して機能しているかは、
+  upload自体が完走していないため未確認。
+- **video-rewardのExcel Desktop acceptance**: 上記2点が解決した生成物に対して、
+  作品別C/D列・サマリ数値・修復ダイアログ有無をユーザーが実機で確認する工程が未実施。
+- **app2/webのProduction E2E・Excel Desktop acceptance**: video-reward PASS後にのみ着手する
+  方針のため、video-rewardが確定するまで着手できない。
+- **Scheduler**: 3帳票すべてのExcel Desktop acceptanceがPASSするまでBLOCKED。
+
+このほか、外部設定(IAM・共有・deploy)に関する既知事項は以下の通り。
 
 1. **Sheets OAuth認証情報・API有効化が未整備**: `ice-report-runner` への共有は行わない方針(確定、上記
    「Sheets認証」参照)。代わりに `sinohara@impress.co.jp` のユーザーOAuth(`SHEETS_AUTH_MODE=oauth`、
