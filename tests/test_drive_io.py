@@ -26,10 +26,18 @@ class _FakeResumableRequest:
     is called repeatedly until it returns a non-None response, mirroring the
     real googleapiclient resumable upload protocol."""
 
-    def __init__(self, chunk_count: int, final_response: dict, *, fail_on_chunk: int | None = None):
+    def __init__(
+        self,
+        chunk_count: int,
+        final_response: dict,
+        *,
+        fail_on_chunk: int | None = None,
+        fail_with: Exception | None = None,
+    ):
         self.chunk_count = chunk_count
         self.final_response = final_response
         self.fail_on_chunk = fail_on_chunk
+        self.fail_with = fail_with
         self.calls = 0
         self.num_retries_seen: list[int] = []
 
@@ -37,7 +45,7 @@ class _FakeResumableRequest:
         self.calls += 1
         self.num_retries_seen.append(num_retries)
         if self.fail_on_chunk is not None and self.calls == self.fail_on_chunk:
-            raise _fake_http_error(503)
+            raise self.fail_with if self.fail_with is not None else _fake_http_error(503)
         if self.calls < self.chunk_count:
             return (mock.Mock(), None)
         return (mock.Mock(), self.final_response)
@@ -279,6 +287,101 @@ class UploadXlsxToDriveTests(unittest.TestCase):
         )
 
         self.assertEqual(request.num_retries_seen, [drive_io.DRIVE_UPLOAD_NUM_RETRIES] * 2)
+
+    def test_uses_configured_chunk_size(self):
+        request = _FakeResumableRequest(chunk_count=1, final_response={"id": "f1"})
+        service = _FakeDriveService(request)
+        captured = {}
+
+        class _CapturingMediaFileUpload:
+            def __init__(self, *args, **kwargs):
+                captured["kwargs"] = kwargs
+
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": "1048576"}, clear=True):
+            with mock.patch.object(drive_io, "MediaFileUpload", _CapturingMediaFileUpload):
+                drive_io.upload_xlsx_to_drive(
+                    self.tmp_path, folder_id="folder-1", file_name="n.xlsx", service=service
+                )
+
+        self.assertEqual(captured["kwargs"]["chunksize"], 1024 * 1024)
+
+    def test_exception_diagnostics_are_logged_without_message_or_secrets(self):
+        secret_message = "boom access_token=SECRET_VALUE refresh_token=OTHER_SECRET"
+        request = _FakeResumableRequest(
+            chunk_count=2,
+            final_response={"id": "f1"},
+            fail_on_chunk=1,
+            fail_with=ConnectionResetError(secret_message),
+        )
+        service = _FakeDriveService(request)
+
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(ConnectionResetError):
+                drive_io.upload_xlsx_to_drive(
+                    self.tmp_path, folder_id="folder-1", file_name="n.xlsx", service=service
+                )
+
+        joined = "\n".join(logs.output)
+        self.assertIn("exception_module=builtins", joined)
+        self.assertIn("exception_type=ConnectionResetError", joined)
+        self.assertIn("chunk_index=1", joined)
+        self.assertNotIn("SECRET_VALUE", joined)
+        self.assertNotIn("OTHER_SECRET", joined)
+        self.assertNotIn(secret_message, joined)
+
+    def test_chunk_progress_is_logged_across_multiple_chunks(self):
+        request = _FakeResumableRequest(chunk_count=3, final_response={"id": "f1"})
+        service = _FakeDriveService(request)
+
+        with self.assertLogs(level="INFO") as logs:
+            drive_io.upload_xlsx_to_drive(
+                self.tmp_path, folder_id="folder-1", file_name="n.xlsx", service=service
+            )
+
+        chunk_logs = [line for line in logs.output if "operation=upload_chunk" in line]
+        self.assertEqual(len(chunk_logs), 3)
+        self.assertTrue(any("chunk_index=1" in line for line in chunk_logs))
+        self.assertTrue(any("chunk_index=2" in line for line in chunk_logs))
+        self.assertTrue(any("chunk_index=3" in line for line in chunk_logs))
+
+
+class DriveUploadChunkSizeTests(unittest.TestCase):
+    def test_default_is_4_mib_when_env_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(drive_io.drive_upload_chunk_size(), 4 * 1024 * 1024)
+
+    def test_env_override_is_used_when_valid(self):
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": "1048576"}, clear=True):
+            self.assertEqual(drive_io.drive_upload_chunk_size(), 1024 * 1024)
+
+    def test_accepts_any_positive_multiple_of_256_kib(self):
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": str(768 * 1024)}, clear=True):
+            self.assertEqual(drive_io.drive_upload_chunk_size(), 768 * 1024)
+
+    def test_non_integer_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": "not-a-number"}, clear=True):
+            self.assertEqual(drive_io.drive_upload_chunk_size(), drive_io.DRIVE_UPLOAD_CHUNK_SIZE)
+
+    def test_zero_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": "0"}, clear=True):
+            self.assertEqual(drive_io.drive_upload_chunk_size(), drive_io.DRIVE_UPLOAD_CHUNK_SIZE)
+
+    def test_negative_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": "-1048576"}, clear=True):
+            self.assertEqual(drive_io.drive_upload_chunk_size(), drive_io.DRIVE_UPLOAD_CHUNK_SIZE)
+
+    def test_non_multiple_of_256_kib_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": "1000000"}, clear=True):
+            self.assertEqual(drive_io.drive_upload_chunk_size(), drive_io.DRIVE_UPLOAD_CHUNK_SIZE)
+
+    def test_invalid_value_logs_warning_without_leaking_the_raw_value(self):
+        with mock.patch.dict(os.environ, {"DRIVE_UPLOAD_CHUNK_SIZE_BYTES": "not-a-number"}, clear=True):
+            with self.assertLogs(level="WARNING") as logs:
+                drive_io.drive_upload_chunk_size()
+
+        joined = "\n".join(logs.output)
+        self.assertIn("ICE_REPORT_DRIVE_UPLOAD_CHUNK_SIZE_INVALID", joined)
+        self.assertNotIn("not-a-number", joined)
 
 
 if __name__ == "__main__":

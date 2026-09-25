@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import google.auth
@@ -25,8 +26,44 @@ DRIVE_UPLOAD_NUM_RETRIES = 3
 # Must be a multiple of 256 KiB (Drive API resumable upload requirement).
 # 4 MiB keeps even a small report (e.g. WEB, ~0.5 MiB) uploading in a single
 # chunk while still bounding how much of a large report (e.g. video-reward,
-# ~9 MiB) any one HTTP request has to carry.
+# ~9 MiB) any one HTTP request has to carry. Overridable per-environment via
+# DRIVE_UPLOAD_CHUNK_SIZE_BYTES (see drive_upload_chunk_size()) without a new
+# image -- useful for isolating whether a large-file upload failure is
+# chunk-size-sensitive (e.g. a transport/timeout issue on one request) versus
+# something else entirely.
 DRIVE_UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+DRIVE_UPLOAD_CHUNK_SIZE_BYTES_ENV = "DRIVE_UPLOAD_CHUNK_SIZE_BYTES"
+_DRIVE_UPLOAD_CHUNK_SIZE_UNIT = 256 * 1024  # Drive API resumable upload requirement
+
+
+def drive_upload_chunk_size() -> int:
+    """DRIVE_UPLOAD_CHUNK_SIZE_BYTES override, falling back to the
+    DRIVE_UPLOAD_CHUNK_SIZE default on anything that isn't a positive
+    multiple of 256 KiB (Drive's own resumable upload chunk-size
+    requirement). Never raises: an operator typo in this env var should
+    degrade to a known-good default, not take report generation down."""
+    raw = os.environ.get(DRIVE_UPLOAD_CHUNK_SIZE_BYTES_ENV, "").strip()
+    if not raw:
+        return DRIVE_UPLOAD_CHUNK_SIZE
+
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.warning(
+            "ICE_REPORT_DRIVE_UPLOAD_CHUNK_SIZE_INVALID reason=not_an_integer falling_back_to=%d",
+            DRIVE_UPLOAD_CHUNK_SIZE,
+        )
+        return DRIVE_UPLOAD_CHUNK_SIZE
+
+    if value <= 0 or value % _DRIVE_UPLOAD_CHUNK_SIZE_UNIT != 0:
+        logging.warning(
+            "ICE_REPORT_DRIVE_UPLOAD_CHUNK_SIZE_INVALID reason=not_positive_multiple_of_256kib "
+            "falling_back_to=%d",
+            DRIVE_UPLOAD_CHUNK_SIZE,
+        )
+        return DRIVE_UPLOAD_CHUNK_SIZE
+
+    return value
 
 
 class DriveOperationError(Exception):
@@ -51,6 +88,16 @@ def _sanitized_http_status(exc: Exception) -> str:
     if isinstance(exc, HttpError):
         return str(int(getattr(exc.resp, "status", 0) or 0))
     return "unknown"
+
+
+def _sanitized_exception_fields(exc: Exception) -> tuple[str, str, object]:
+    """(module, type name, errno) for logging only -- never str(exc)/repr(exc):
+    both can echo request/response details (URLs, headers, an OAuth error
+    body). This is what lets a non-HttpError upload failure (transport
+    errors like a timeout or reset connection have no HTTP status at all)
+    be told apart from an auth/logic/config failure without ever risking a
+    credential or request body reaching the logs."""
+    return type(exc).__module__, type(exc).__name__, getattr(exc, "errno", None)
 
 
 def _raise_drive_error(exc: Exception) -> None:
@@ -229,6 +276,7 @@ def upload_xlsx_to_drive(
     service = service or get_drive_service()
     path = Path(local_path)
     file_size_bytes = path.stat().st_size
+    chunk_size = drive_upload_chunk_size()
     metadata = {
         "name": file_name,
         "parents": [folder_id],
@@ -237,7 +285,7 @@ def upload_xlsx_to_drive(
         str(path),
         mimetype=DRIVE_XLSX_MIME_TYPE,
         resumable=True,
-        chunksize=DRIVE_UPLOAD_CHUNK_SIZE,
+        chunksize=chunk_size,
     )
     request = service.files().create(
         body=metadata,
@@ -248,30 +296,69 @@ def upload_xlsx_to_drive(
 
     logging.info(
         "ICE_REPORT_DRIVE_UPLOAD operation=upload_xlsx report_type=%s "
-        "file_size_bytes=%d resumable=true status=start",
+        "file_size_bytes=%d resumable=true chunk_size_bytes=%d status=start",
         report_type or "",
         file_size_bytes,
+        chunk_size,
     )
 
-    try:
-        response = None
-        while response is None:
-            _, response = request.next_chunk(num_retries=DRIVE_UPLOAD_NUM_RETRIES)
-    except Exception as exc:
-        logging.error(
-            "ICE_REPORT_DRIVE_UPLOAD operation=upload_xlsx report_type=%s "
-            "file_size_bytes=%d resumable=true status=failure http_status=%s",
+    response = None
+    chunk_index = 0
+    while response is None:
+        chunk_index += 1
+        chunk_started_at = time.monotonic()
+        try:
+            status, response = request.next_chunk(num_retries=DRIVE_UPLOAD_NUM_RETRIES)
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - chunk_started_at) * 1000)
+            module, type_name, errno = _sanitized_exception_fields(exc)
+            logging.error(
+                "ICE_REPORT_DRIVE_UPLOAD operation=upload_chunk report_type=%s "
+                "chunk_index=%d elapsed_ms=%d status=failure "
+                "exception_module=%s exception_type=%s errno=%s",
+                report_type or "",
+                chunk_index,
+                elapsed_ms,
+                module,
+                type_name,
+                errno,
+            )
+            logging.error(
+                "ICE_REPORT_DRIVE_UPLOAD operation=upload_xlsx report_type=%s "
+                "file_size_bytes=%d resumable=true chunk_size_bytes=%d status=failure "
+                "http_status=%s exception_module=%s exception_type=%s errno=%s",
+                report_type or "",
+                file_size_bytes,
+                chunk_size,
+                _sanitized_http_status(exc),
+                module,
+                type_name,
+                errno,
+            )
+            _raise_drive_error(exc)
+            raise
+
+        elapsed_ms = int((time.monotonic() - chunk_started_at) * 1000)
+        progress_percent = None
+        if status is not None:
+            try:
+                progress_percent = round(status.progress() * 100, 1)
+            except Exception:
+                progress_percent = None
+        logging.info(
+            "ICE_REPORT_DRIVE_UPLOAD operation=upload_chunk report_type=%s "
+            "chunk_index=%d progress_percent=%s elapsed_ms=%d status=success",
             report_type or "",
-            file_size_bytes,
-            _sanitized_http_status(exc),
+            chunk_index,
+            progress_percent,
+            elapsed_ms,
         )
-        _raise_drive_error(exc)
-        raise
 
     logging.info(
         "ICE_REPORT_DRIVE_UPLOAD operation=upload_xlsx report_type=%s "
-        "file_size_bytes=%d resumable=true status=success",
+        "file_size_bytes=%d resumable=true chunk_size_bytes=%d status=success",
         report_type or "",
         file_size_bytes,
+        chunk_size,
     )
     return response
