@@ -3508,10 +3508,24 @@ def drive_resumable_upload_diagnostic():
         return error_response
 
     payload = request.get_json(silent=True) or {}
-    try:
-        file_size_bytes = int(payload.get("file_size_bytes") or 10 * 1024 * 1024)
-    except (TypeError, ValueError):
-        return jsonify({"error": "invalid_file_size_bytes"}), 400
+
+    if "file_size_bytes" not in payload:
+        file_size_bytes = 10 * 1024 * 1024
+    else:
+        raw_file_size_bytes = payload["file_size_bytes"]
+        # bool is an int subclass (int(True) == 1), so it would otherwise
+        # silently pass through int(...) as a "valid" size -- reject it
+        # explicitly. `... or default` (the previous implementation) also
+        # replaced an explicit 0 with the 10 MiB default before the <= 0
+        # check ever saw it; an explicit invalid value must be rejected,
+        # not silently upgraded to something valid.
+        if isinstance(raw_file_size_bytes, bool):
+            return jsonify({"error": "invalid_file_size_bytes"}), 400
+        try:
+            file_size_bytes = int(raw_file_size_bytes)
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_file_size_bytes"}), 400
+
     if file_size_bytes <= 0 or file_size_bytes > _DRIVE_DIAGNOSTIC_MAX_FILE_SIZE_BYTES:
         return jsonify({"error": "invalid_file_size_bytes"}), 400
 

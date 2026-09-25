@@ -360,23 +360,72 @@ class DriveResumableDiagnosticEndpointTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         run_diag_mock.assert_not_called()
 
-    def test_rejects_invalid_file_size(self):
-        with mock.patch.dict(os.environ, {"ADMIN_API_KEY": "secret"}):
+    def _post_with_file_size(self, run_diag, value=_UNSET):
+        payload = {}
+        if value is not _UNSET:
+            payload["file_size_bytes"] = value
+        with mock.patch.dict(os.environ, {"ADMIN_API_KEY": "secret"}), mock.patch(
+            "drive_io.run_resumable_upload_diagnostic", return_value=run_diag
+        ) as run_diag_mock:
             resp = self.client.post(
                 "/admin/drive/resumable-diagnostic",
-                json={"file_size_bytes": -1},
+                json=payload,
                 headers={"X-Admin-Key": "secret"},
             )
+        return resp, run_diag_mock
+
+    def test_file_size_bytes_unspecified_defaults_to_10mib(self):
+        resp, run_diag_mock = self._post_with_file_size(self._FAKE_INIT_ONLY_RESULT)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(run_diag_mock.call_args.kwargs["file_size_bytes"], 10 * 1024 * 1024)
+
+    def test_file_size_bytes_explicit_zero_is_rejected_not_defaulted(self):
+        """Regression: `payload.get(...) or default` previously replaced an
+        explicit 0 with the 10 MiB default before the <= 0 check ever saw
+        it, silently accepting a value that must be rejected."""
+        resp, run_diag_mock = self._post_with_file_size(None, value=0)
         self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_rejects_invalid_file_size(self):
+        resp, run_diag_mock = self._post_with_file_size(None, value=-1)
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_file_size_bytes_null_is_rejected(self):
+        resp, run_diag_mock = self._post_with_file_size(None, value=None)
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_file_size_bytes_true_is_rejected(self):
+        resp, run_diag_mock = self._post_with_file_size(None, value=True)
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_file_size_bytes_false_is_rejected(self):
+        resp, run_diag_mock = self._post_with_file_size(None, value=False)
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_file_size_bytes_valid_int_is_accepted(self):
+        resp, run_diag_mock = self._post_with_file_size(self._FAKE_INIT_ONLY_RESULT, value=1_048_576)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(run_diag_mock.call_args.kwargs["file_size_bytes"], 1_048_576)
+
+    def test_file_size_bytes_numeric_string_is_parsed(self):
+        resp, run_diag_mock = self._post_with_file_size(self._FAKE_INIT_ONLY_RESULT, value="1048576")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(run_diag_mock.call_args.kwargs["file_size_bytes"], 1_048_576)
+
+    def test_file_size_bytes_non_numeric_string_is_rejected(self):
+        resp, run_diag_mock = self._post_with_file_size(None, value="abc")
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
 
     def test_rejects_oversized_file_size(self):
-        with mock.patch.dict(os.environ, {"ADMIN_API_KEY": "secret"}):
-            resp = self.client.post(
-                "/admin/drive/resumable-diagnostic",
-                json={"file_size_bytes": 500 * 1024 * 1024},
-                headers={"X-Admin-Key": "secret"},
-            )
+        resp, run_diag_mock = self._post_with_file_size(None, value=500 * 1024 * 1024)
         self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
 
     def test_folder_id_is_not_accepted_from_request_body(self):
         """The endpoint must not let a caller redirect the diagnostic upload
