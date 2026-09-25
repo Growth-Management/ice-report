@@ -3514,7 +3514,18 @@ def drive_resumable_upload_diagnostic():
         return jsonify({"error": "invalid_file_size_bytes"}), 400
     if file_size_bytes <= 0 or file_size_bytes > _DRIVE_DIAGNOSTIC_MAX_FILE_SIZE_BYTES:
         return jsonify({"error": "invalid_file_size_bytes"}), 400
-    run_first_chunk = bool(payload.get("run_first_chunk"))
+
+    if "run_first_chunk" not in payload:
+        run_first_chunk = False
+    else:
+        # This actually sends a PUT to Drive, so it takes strict JSON
+        # boolean only -- bool(...) would silently treat "false"/1/[] as
+        # truthy. isinstance(x, bool) also correctly rejects 1/0 despite
+        # bool being an int subclass (isinstance(1, bool) is False).
+        raw_run_first_chunk = payload["run_first_chunk"]
+        if not isinstance(raw_run_first_chunk, bool):
+            return jsonify({"error": "invalid_run_first_chunk"}), 400
+        run_first_chunk = raw_run_first_chunk
 
     try:
         import drive_io

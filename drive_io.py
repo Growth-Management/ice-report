@@ -423,6 +423,7 @@ def diagnose_resumable_session_init(
             },
             json={"name": file_name, "parents": [folder_id]},
             timeout=_DIAGNOSTIC_INIT_TIMEOUT_S,
+            allow_redirects=False,
         )
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -498,6 +499,7 @@ def diagnose_resumable_first_chunk(
                 "Content-Range": f"bytes 0-{end}/{total_size_bytes}",
             },
             timeout=_DIAGNOSTIC_PUT_TIMEOUT_S,
+            allow_redirects=False,
         )
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - started) * 1000)

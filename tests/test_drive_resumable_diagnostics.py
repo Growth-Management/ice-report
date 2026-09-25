@@ -15,6 +15,8 @@ for _name in list(sys.modules):
 import app  # noqa: E402
 import drive_io  # noqa: E402
 
+_UNSET = object()
+
 
 class _FakeResponse:
     def __init__(self, status_code, *, headers=None, json_body=None):
@@ -109,6 +111,16 @@ class ResumableSessionInitTests(unittest.TestCase):
         self.assertNotIn("SECRET_VALUE", joined)
         self.assertIn("location_present=True", joined)
 
+    def test_does_not_follow_redirects(self):
+        fake = _FakeSession(post_result=_FakeResponse(200, headers={"Location": "https://secret-session-url.example/abc"}))
+        with mock.patch.object(drive_io, "_authorized_session", return_value=fake):
+            drive_io.diagnose_resumable_session_init(
+                file_name="x.xlsx", file_size_bytes=100, folder_id="folder-1"
+            )
+        self.assertEqual(len(fake.post_calls), 1)
+        _, kwargs = fake.post_calls[0]
+        self.assertIs(kwargs["allow_redirects"], False)
+
 
 class ResumableFirstChunkTests(unittest.TestCase):
     def test_308_is_success(self):
@@ -168,6 +180,18 @@ class ResumableFirstChunkTests(unittest.TestCase):
         joined = "\n".join(logs.output)
         self.assertNotIn("secret-session-url.example", joined)
         self.assertNotIn("SECRET_TOKEN", joined)
+
+    def test_does_not_follow_redirects(self):
+        fake = _FakeSession(put_result=_FakeResponse(308))
+        with mock.patch.object(drive_io, "_authorized_session", return_value=fake):
+            drive_io.diagnose_resumable_first_chunk(
+                session_url="https://secret-session-url.example/abc",
+                chunk_bytes=b"x" * 1024,
+                total_size_bytes=10_000_000,
+            )
+        self.assertEqual(len(fake.put_calls), 1)
+        _, kwargs = fake.put_calls[0]
+        self.assertIs(kwargs["allow_redirects"], False)
 
 
 class RunResumableUploadDiagnosticTests(unittest.TestCase):
@@ -275,6 +299,66 @@ class DriveResumableDiagnosticEndpointTests(unittest.TestCase):
         run_diag.assert_called_once()
         self.assertEqual(run_diag.call_args.kwargs["file_size_bytes"], 10_143_332)
         self.assertTrue(run_diag.call_args.kwargs["run_first_chunk"])
+
+    def _post_with_run_first_chunk(self, run_diag, value=_UNSET):
+        payload = {"file_size_bytes": 1000}
+        if value is not _UNSET:
+            payload["run_first_chunk"] = value
+        with mock.patch.dict(os.environ, {"ADMIN_API_KEY": "secret"}), mock.patch(
+            "drive_io.run_resumable_upload_diagnostic", return_value=run_diag
+        ) as run_diag_mock:
+            resp = self.client.post(
+                "/admin/drive/resumable-diagnostic",
+                json=payload,
+                headers={"X-Admin-Key": "secret"},
+            )
+        return resp, run_diag_mock
+
+    _FAKE_INIT_ONLY_RESULT = {"init": {"status": "success", "http_status": 200, "location_present": True}, "first_chunk": None}
+    _FAKE_FULL_RESULT = {
+        "init": {"status": "success", "http_status": 200, "location_present": True},
+        "first_chunk": {"status": "success", "http_status": 308},
+    }
+
+    def test_run_first_chunk_unspecified_defaults_to_false(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(self._FAKE_INIT_ONLY_RESULT)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(run_diag_mock.call_args.kwargs["run_first_chunk"])
+
+    def test_run_first_chunk_false_is_accepted(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(self._FAKE_INIT_ONLY_RESULT, value=False)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(run_diag_mock.call_args.kwargs["run_first_chunk"])
+
+    def test_run_first_chunk_true_is_accepted(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(self._FAKE_FULL_RESULT, value=True)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(run_diag_mock.call_args.kwargs["run_first_chunk"])
+
+    def test_run_first_chunk_string_false_is_rejected(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(None, value="false")
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_run_first_chunk_string_true_is_rejected(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(None, value="true")
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_run_first_chunk_int_1_is_rejected(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(None, value=1)
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_run_first_chunk_int_0_is_rejected(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(None, value=0)
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
+
+    def test_run_first_chunk_null_is_rejected_distinctly_from_unspecified(self):
+        resp, run_diag_mock = self._post_with_run_first_chunk(None, value=None)
+        self.assertEqual(resp.status_code, 400)
+        run_diag_mock.assert_not_called()
 
     def test_rejects_invalid_file_size(self):
         with mock.patch.dict(os.environ, {"ADMIN_API_KEY": "secret"}):
