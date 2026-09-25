@@ -713,6 +713,66 @@ IAM・Sheets OAuth整備・deployが完了した後、Cloud Scheduler有効化�
 **Scheduler有効化は、上記3帳票すべてがExcel Desktopで「修復なし」で開けることを確認するまでBLOCKED**
 (package-preserving writer導入PRの受け入れ条件、詳細はPR本文参照)。
 
+## Production OOM investigation(2026-09-25、report-generator-00124-zqp)
+
+`video-reward` の2026-08手動生成が本番で2回連続HTTP 503(Cloud Run `Memory limit of 2048 MiB
+exceeded with 2050 MiB used`)で失敗した。ローカルで実2026-08 BigQueryデータ・実PQ-free
+video-rewardテンプレートを使い、`generate_ad_revenue_report`の各段階でRSS/peak RSSを実測して
+原因を特定した(psutil、`resource`/`/proc`が使えないWindows開発環境向け。本番Linuxと絶対値は
+一致しないが、どの段階で急増するかの相対比較には十分)。
+
+**実測(修正前)**:
+
+| 段階 | RSS | 備考 |
+|---|---|---|
+| 開始〜BigQuery取得完了(iOS 59,614/Android 58,899/全体61,699行) | ~408 MB | |
+| `add_work_summary_rows`(作品別798行の集計) | +2 MB | 無視できる規模 |
+| iOS `replace_detail_rows`後 | 1,071.8 MB (**+705.5 MB**) | |
+| Android `replace_detail_rows`後 | 1,747.9 MB (**+676.1 MB**) | |
+| 全体 `replace_detail_rows`後 | 2,456.9 MB (**+709.0 MB**、最大の増分) | |
+| 作品別(798行)`replace_detail_rows`後 | 2,457.3 MB | +0.4 MBのみ、作品別自体は無罪 |
+| `save()`直後のpeak | **2,535.4 MB** | |
+
+3シートとも1行あたり約11.5KBの増分でほぼ一致しており、BigQuery側やDecimal集計側ではなく、
+**`xlsx_package_writer.XlsxPackage`がsave()まで全ての編集済みシートのlxml treeを同時に
+保持し続ける設計**が原因と判明した(iOS/Android/全体という3つの大きいシートを同時に書き込む
+video-rewardで特に顕著。以前からあった`XlsxPackage._trees`キャッシュの前提 -- 「触った部分を
+`save()`まで覚えておく」-- が、save()を呼ぶまでどのシートのtreeも解放されないことを意味していた)。
+`add_work_summary_rows`の`zentai_rows = [dict(row) for row in ...]`という61,699行分のコピー
+(video-rewardでは本来不要 -- コピーされた行は読み取り専用の集計にしか使われず、
+`augmented[全体]`へ書き戻されることもない)も調査したが、実測+2 MBのみで支配的要因ではなかった。
+
+**修正(このブランチ)**:
+
+- `XlsxPackage.set_xml()`を、書き込みを`save()`まで遅延させず**即座に`etree.tostring()`して
+  `_parts`へ格納し、パース済みtreeをその場で解放する**よう変更。`save()`は`_parts`の中身を
+  そのまま書き出すだけになった(dirty/clean問わず常に最新)。この設計変更で、どの時点でも
+  「メモリに残るシートtreeは高々1枚」になる。
+- `add_work_summary_rows`: video-rewardの分岐でのみ、不要な`zentai_rows`コピーを撤去し、
+  fetch済みの全体行リストをそのまま読み取り専用で渡すよう変更(app2/web は広告売上列を
+  行へ書き戻すため、引き続き専用コピーを作る)。
+
+**実測(修正後)**:
+
+| 段階 | RSS |
+|---|---|
+| BigQuery取得完了 | ~409 MB(変化なし) |
+| iOS `replace_detail_rows`後 | 401.2 MB(tostring中のtransient peak 1,145.5 MB) |
+| Android `replace_detail_rows`後 | 438.2 MB(transient peak 1,174.6 MB) |
+| 全体 `replace_detail_rows`後 | 477.5 MB(transient peak 1,247.8 MB) |
+| `save()`直後のpeak | **1,247.8 MB** |
+
+ピークは **2,535.4 MB → 1,247.8 MB(約51%減)** となり、Cloud Runの2 GiB上限に対して
+約800 MBの余裕が生まれた。生成物は`ZipFile.testzip()==None`・Power Query関連part 0件・
+`作品別`テーブルref `A3:D801`・`SUM(コイン消費数)==365,253,010`と、修正前後で完全に同一の
+出力であることを確認済み(`python -m pytest tests/`: 224 passed、変更なし)。
+
+CASE判定(3択のうち): **CASE B**(不要なduplicate保持が実測で特定・修正できた)。単純な
+メモリ上限引き上げ(4Gi化)は行っていない -- 修正後のピーク(~1.25 GiB)は既存の2 GiBで
+十分な余裕があるため。app2(iOS/Android/全体、計28,644行)は元々video-rewardよりデータ量が
+少なく、同じ設計上のボトルネックを抱えていたが2 GiB以内に収まっていたと考えられる
+(video-rewardの約1/6の行数)。この修正はapp2にも同様の恩恵がある。
+
 ## Status / open items(未解決事項)
 
 本番化に向けて残っているのは、コード側の問題ではなく外部設定(IAM・共有・Scheduler・deploy)のみ。

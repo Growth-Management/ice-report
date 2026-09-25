@@ -554,9 +554,15 @@ def add_work_summary_rows(
         return detail_rows
 
     augmented = dict(detail_rows)
-    zentai_rows = [dict(row) for row in augmented.get(spec.zentai_sheet, [])]
 
     if report_type in ("app2", "web"):
+        # app2/web add 広告売上(_原資50) onto each 全体 row below, so this
+        # branch needs its own per-row copy -- augmented[spec.zentai_sheet]
+        # is reassigned to it at the end. video-reward never mutates or
+        # reassigns 全体's rows (see the elif below), so it reads the
+        # original list directly instead of paying for a ~62k-dict copy
+        # that's discarded before this function returns.
+        zentai_rows = [dict(row) for row in augmented.get(spec.zentai_sheet, [])]
         total_views = sum(int(row.get(spec.value_header) or 0) for row in zentai_rows)
         price = work_summaries.unit_price(revenue_yen, total_views)
         for row in zentai_rows:
@@ -575,6 +581,7 @@ def add_work_summary_rows(
 
         augmented[spec.zentai_sheet] = zentai_rows
     elif report_type == "video-reward":
+        zentai_rows = augmented.get(spec.zentai_sheet, [])
         augmented["作品別"] = work_summaries.build_video_reward_work_summary(zentai_rows, revenue_yen=revenue_yen)
 
     return augmented
