@@ -3488,6 +3488,95 @@ def _check_ad_revenue_sync_scheduler_auth() -> tuple[bool, str]:
     )
 
 
+_DRIVE_DIAGNOSTIC_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
+
+
+@app.post("/admin/drive/resumable-diagnostic")
+def drive_resumable_upload_diagnostic():
+    """Diagnostic-only: splits a Drive resumable upload into its two HTTP
+    legs (session-initiation POST, first data PUT) to tell apart a
+    session-creation-side failure from a data-PUT-side failure, using
+    google-auth's AuthorizedSession directly instead of the normal report
+    upload path's googleapiclient/httplib2 resumable code
+    (drive_io.upload_xlsx_to_drive, unchanged). Never touches real report
+    data or an externally-supplied folder/URL -- content is deterministic
+    filler generated in-process, and the target folder is this server's own
+    ad-revenue output folder config, not something the caller can point
+    elsewhere."""
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+
+    if "file_size_bytes" not in payload:
+        file_size_bytes = 10 * 1024 * 1024
+    else:
+        raw_file_size_bytes = payload["file_size_bytes"]
+        # bool is an int subclass (int(True) == 1), so it would otherwise
+        # silently pass through int(...) as a "valid" size -- reject it
+        # explicitly. `... or default` (the previous implementation) also
+        # replaced an explicit 0 with the 10 MiB default before the <= 0
+        # check ever saw it; an explicit invalid value must be rejected,
+        # not silently upgraded to something valid.
+        if isinstance(raw_file_size_bytes, bool):
+            return jsonify({"error": "invalid_file_size_bytes"}), 400
+        try:
+            file_size_bytes = int(raw_file_size_bytes)
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_file_size_bytes"}), 400
+
+    if file_size_bytes <= 0 or file_size_bytes > _DRIVE_DIAGNOSTIC_MAX_FILE_SIZE_BYTES:
+        return jsonify({"error": "invalid_file_size_bytes"}), 400
+
+    if "run_first_chunk" not in payload:
+        run_first_chunk = False
+    else:
+        # This actually sends a PUT to Drive, so it takes strict JSON
+        # boolean only -- bool(...) would silently treat "false"/1/[] as
+        # truthy. isinstance(x, bool) also correctly rejects 1/0 despite
+        # bool being an int subclass (isinstance(1, bool) is False).
+        raw_run_first_chunk = payload["run_first_chunk"]
+        if not isinstance(raw_run_first_chunk, bool):
+            return jsonify({"error": "invalid_run_first_chunk"}), 400
+        run_first_chunk = raw_run_first_chunk
+
+    try:
+        import drive_io
+        from jumpplus_ad_revenue_report import default_output_folder_id
+
+        result = drive_io.run_resumable_upload_diagnostic(
+            file_size_bytes=file_size_bytes,
+            run_first_chunk=run_first_chunk,
+            chunk_size_bytes=drive_io.drive_upload_chunk_size(),
+            folder_id=default_output_folder_id(),
+        )
+    except Exception as exc:
+        logging.error("ICE_REPORT_DRIVE_DIAGNOSTIC_FAILED reason=%s", type(exc).__name__)
+        _log_admin_audit_event(
+            action="drive_resumable_diagnostic",
+            result="failure",
+            target_type="admin_api",
+            target_id="drive_resumable_diagnostic",
+            status_code=500,
+            reason=type(exc).__name__,
+        )
+        return jsonify({"error": "diagnostic_failed"}), 500
+
+    _log_admin_audit_event(
+        action="drive_resumable_diagnostic",
+        result="success",
+        target_type="admin_api",
+        target_id="drive_resumable_diagnostic",
+        status_code=200,
+        detail={
+            "init_status": result["init"]["status"],
+            "first_chunk_status": (result["first_chunk"] or {}).get("status"),
+        },
+    )
+    return jsonify(result)
+
+
 @app.post("/admin/ad-revenue/scheduled-sync")
 def scheduled_sync_jumpplus_ad_revenue():
     ok, reason = _check_ad_revenue_sync_scheduler_auth()
