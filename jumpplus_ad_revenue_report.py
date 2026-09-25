@@ -720,6 +720,7 @@ def create_ad_revenue_workbook(
 
     spec = REPORT_SPECS[report_type]
     package = pkg_writer.XlsxPackage.load(template_path)
+    pkg_writer.force_recalculation_on_load(package)
 
     try:
         pkg_writer.update_summary_value(package, SUMMARY_SHEET, revenue_yen)

@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 from openpyxl import Workbook
-from openpyxl.worksheet.table import Table, TableColumn
+from openpyxl.worksheet.table import Table, TableColumn, TableFormula
 
 QUERY_TABLE_XML_TEMPLATE = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
@@ -89,18 +89,37 @@ def _add_detail_sheet(
     freeze: str | None = None,
     formulas: dict[str, str] | None = None,
 ) -> "Worksheet":
+    """`formulas` sets each named column's table-level
+    `calculatedColumnFormula` -- NOT a row-4 cell value. Confirmed against
+    the real official templates: a calculated column's formula lives only
+    in the table definition (xl/tables/tableN.xml); the template's own
+    row-4 cell for that column is genuinely blank (`<c r="C4" s="25"/>`,
+    no `<f>`, no `<v>`). A cell-level formula here would let
+    replace_detail_rows's row-cloning accidentally "work" by copying an
+    already-present formula -- which is exactly what let the real bug
+    (calculatedColumnFormula present, but no per-row `<f>` ever
+    materialized, so Excel Desktop showed blank C/D) slip past this
+    fixture's own tests before it was found in production."""
     ws = wb.create_sheet(name)
     for col, header in enumerate(headers, start=1):
         ws.cell(row=3, column=col, value=header)
     for col in range(1, len(headers) + 1):
         ws.cell(row=4, column=col).number_format = "#,##0"
-    if formulas:
-        for header, formula in formulas.items():
-            col = headers.index(header) + 1
-            ws.cell(row=4, column=col).value = formula
     last_col_letter = ws.cell(row=3, column=len(headers)).column_letter
     table = Table(displayName=f"table_{name}".replace("　", "_"), ref=f"A3:{last_col_letter}4")
-    table.tableColumns = [TableColumn(id=i, name=h) for i, h in enumerate(headers, start=1)]
+    columns = []
+    for i, header in enumerate(headers, start=1):
+        calc_formula = None
+        if formulas and header in formulas:
+            # Real calculatedColumnFormula/<f> text never carries the
+            # leading "=" -- confirmed against the real official templates
+            # (e.g. IFERROR(SUM(...)...), not =IFERROR(...)). The FORMULA
+            # constants below keep their "=" because that's how openpyxl's
+            # own Cell.value read-back presents a formula string, which is
+            # what the tests assert against.
+            calc_formula = TableFormula(attr_text=formulas[header].lstrip("="))
+        columns.append(TableColumn(id=i, name=header, calculatedColumnFormula=calc_formula))
+    table.tableColumns = columns
     ws.add_table(table)
     if freeze:
         ws.freeze_panes = freeze

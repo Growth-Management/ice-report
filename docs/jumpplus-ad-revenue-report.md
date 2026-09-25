@@ -773,6 +773,83 @@ CASE判定(3択のうち): **CASE B**(不要なduplicate保持が実測で特定
 少なく、同じ設計上のボトルネックを抱えていたが2 GiB以内に収まっていたと考えられる
 (video-rewardの約1/6の行数)。この修正はapp2にも同様の恩恵がある。
 
+## Excel Desktop acceptance: blank calculated columns / stale summary values(2026-09-25)
+
+video-rewardのProduction E2E(machine validation PASS後)をExcel Desktopで実機確認したところ、
+2つの問題が見つかった:
+
+- 作品別のC(コイン消費割合)/D(広告還元額)が空欄
+- サマリの動画リワード広告コイン消費数/著者還元額が0
+
+いずれもmachine validationでは検出できなかった(「table定義にcalculatedColumnFormulaが
+存在する」ことしか確認していなかったため)。
+
+### Root cause 1: calculatedColumnFormulaは実セルではない
+
+Golden Master(`J+_動画リワード広告売上_2026年08月期_260901.xlsx`)とProduction生成物の
+作品別シートRaw XMLを比較した。
+
+Golden Masterの各data row(例: row4):
+```xml
+<c r="C4" s="42"><f>話データ_コイン消費数_作品別[[#This Row],[コイン消費数]]/SUM(...)</f><v>0.1206...</v></c>
+<c r="D4" s="44"><f>著者還元額[還元額]*話データ_コイン消費数_作品別[[#This Row],[コイン消費割合]]</f><v>253731.03...</v></c>
+```
+
+Production生成物の同じ行:
+```xml
+<c r="C4" s="25"/><c r="D4" s="20"/>
+```
+
+さらにPQ-freeテンプレート自体のrow4も確認すると、C4/D4は完全に空(`<c r="C4" s="25"/>`)
+だった。`xlsx_package_writer.replace_detail_rows()`は新規行をtemplateの最終data row
+(`_clone_row_as`)から複製するため、複製元が空なら複製結果も空になる。**Excel Tableの
+`calculatedColumnFormula`(xl/tables/tableN.xml側)は「人がテーブルに新しい行を手入力
+したときにExcelが自動補完する式」を宣言しているだけで、それ自体はworksheetのセルでは
+ない** -- 我々のようにXMLを直接生成するwriterはこれを自動展開してくれない。
+
+修正: `xlsx_package_writer.replace_detail_rows()`がtableの`tableColumns/tableColumn`から
+`calculatedColumnFormula`を読み取り、Python側で値を書かない列(video-reward作品別のC/D、
+APP_2全体のF/G、WEB全体のF)については各data rowに実際に`<f>`(構造化参照式なので行間で
+テキストは同一のまま使い回せる)を生成するようにした。Python側で同じ列名のDecimal値を
+既に計算済みの場合は`<v>`にキャッシュ値も入れる(`ad_revenue_work_summaries.py`が
+計算するコイン消費割合/広告還元額/広告売上/広告売上_原資50をそのまま利用)。
+
+### Root cause 2: サマリのcached値が再計算されない
+
+サマリのC10(iOS計)/C11(Android計)/C12(全体計)/C17(著者還元額)はいずれも
+`話データ_iOS`/`話データ_Android`/`動画リワード広告コイン消費数`/`広告売上`テーブルを
+参照するExcel-native formula(`SUM(...)`/`SUBTOTAL(109,...)`/`IFERROR(ROUND(...*0.15,0),"-")`)
+で、この設計どおりこのモジュールは一切書き込まない。しかしcached `<v>`は空のテンプレート
+由来のまま(`0`)で、Excelが自動で再計算してくれないと表示され続けてしまう。
+
+`xl/workbook.xml`の`calcPr`は`calcId`のみで`fullCalcOnLoad`/`forceFullCalc`が未設定、かつ
+`xl/calcChain.xml`はテンプレート(数行分、4エントリ)のまま — 実際のGolden Masterは
+1,600エントリ(798行×2式+その他)なので、我々の生成物のcalcChainは著しく不完全・
+不整合な状態だった。
+
+修正: 新関数`xlsx_package_writer.force_recalculation_on_load()`を追加し、
+`create_ad_revenue_workbook()`の先頭(package load直後)で必ず呼ぶようにした。
+`calcPr`に`fullCalcOnLoad="1"`/`forceFullCalc="1"`を設定し、`xl/calcChain.xml`
+(存在すれば、関連するrelationship/Content_Types overrideも含めて)を削除する
+-- OOXML仕様上、calcChainの欠落はExcelが起動時に完全再構築するだけで無害。
+
+### Tests
+
+`tests/xlsx_fixtures.py`: `_add_detail_sheet`の`formulas`引数を、row4セルへの直接代入
+から`TableColumn`の`calculatedColumnFormula`設定へ変更 -- これにより、既存の
+`FormulaPreservationTests`が実際に今回の実バグ(calculatedColumnFormulaはあるが
+per-row `<f>`が生成されない)を再現・検証できるようになった(修正前のfixtureは
+row4に直接formulaを書き込んでいたため、「複製元に既に式がある」場合しかテストして
+おらず、実際のバグを見逃していた)。
+
+新規: `FormulaMaterializationFullScaleTests`(video-reward 798行/app2 9,548行/web 9,060行、
+全data rowについて`<f>`+cached `<v>`の存在を1件ずつ確認)、`RecalculationOnLoadTests`
+(`calcPr`のfullCalcOnLoad/forceFullCalc、calcChain.xml削除を確認)。
+
+実データ(2026-08)・実PQ-freeテンプレートで再生成し、3帳票とも全data rowで
+formula/cached値の欠落0件、Golden Master数値(video: SUM(コイン消費数)=365,253,010、
+著者還元額formula=ROUND(14017945*0.15,0)=2,102,692等)と一致することを確認済み。
+
 ## Status / open items(未解決事項)
 
 本番化に向けて残っているのは、コード側の問題ではなく外部設定(IAM・共有・Scheduler・deploy)のみ。
