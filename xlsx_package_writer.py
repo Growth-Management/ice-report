@@ -91,9 +91,20 @@ def _normalize_part_path(path: str) -> str:
 
 class XlsxPackage:
     """In-memory view of an XLSX zip package: original bytes for every part,
-    plus a small cache of parsed XML trees for the parts this module has
-    actually touched. Parts never fetched via `xml()` are written back
-    exactly as read."""
+    plus a small cache of parsed XML trees for parts currently being edited.
+    Parts never fetched via `xml()` are written back exactly as read.
+
+    A large worksheet's parsed lxml tree (tens of thousands of `<row>`/`<c>`
+    elements) can be an order of magnitude bigger in memory than its XML
+    bytes. Production video-reward generation (iOS+Android+全体, ~180k rows
+    combined) was observed to peak at ~2.5 GiB RSS and get OOM-killed on a
+    2 GiB Cloud Run instance -- almost entirely from `save()` re-serializing
+    every dirty part at the very end, which meant every large sheet's tree
+    stayed alive simultaneously from the moment it was written until the
+    whole package was saved. `set_xml()` now serializes eagerly and drops
+    the tree right away, so at most one large sheet's tree is resident at a
+    time instead of all of them (see docs/jumpplus-ad-revenue-report.md,
+    "Production OOM investigation")."""
 
     def __init__(self, parts: dict[str, bytes]) -> None:
         self._parts = parts
@@ -116,7 +127,10 @@ class XlsxPackage:
         """Parses and caches `name` for reading. Does NOT mark it dirty --
         looking up a sheet's part via workbook.xml, resolving a relationship,
         or reading sharedStrings for header text must never cause that part
-        to be re-serialized on save(). Only set_xml() does that."""
+        to be re-serialized. Only set_xml() does that. If the part was
+        edited (and released) earlier via set_xml(), this re-parses the
+        up-to-date bytes set_xml() already wrote back into `_parts` -- same
+        content, fresh tree object."""
         if name not in self._trees:
             if name not in self._parts:
                 raise XlsxPackageError("part_not_found", part=name)
@@ -124,8 +138,16 @@ class XlsxPackage:
         return self._trees[name]
 
     def set_xml(self, name: str, root: etree._Element) -> None:
-        self._trees[name] = root
+        """Marks `name` dirty and serializes it immediately, rather than
+        deferring to save(): every caller in this module reads a part once,
+        mutates it, and calls set_xml() exactly once as its last step, so
+        the parsed tree is never needed again until (if ever) a later,
+        unrelated call re-reads it via xml(). Holding it past this point
+        only costs memory -- releasing it here is what keeps save() from
+        needing every large sheet's tree alive at once."""
+        self._parts[name] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
         self._dirty_parts.add(name)
+        self._trees.pop(name, None)
 
     def remove_part(self, name: str) -> None:
         self._parts.pop(name, None)
@@ -136,14 +158,15 @@ class XlsxPackage:
         return list(self._parts.keys())
 
     def save(self, destination: Any) -> None:
+        """Writes every part's current bytes. Dirty parts already hold their
+        serialized-at-edit-time bytes (set_xml()); untouched parts hold the
+        original bytes read by load() -- either way, `_parts[name]` is
+        always the bytes to write, so there is nothing left to serialize
+        here."""
         if isinstance(destination, (str, Path)):
             Path(destination).parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
             for name, data in self._parts.items():
-                if name in self._dirty_parts:
-                    data = etree.tostring(
-                        self._trees[name], xml_declaration=True, encoding="UTF-8", standalone=True
-                    )
                 zf.writestr(name, data)
 
 
