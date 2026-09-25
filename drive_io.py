@@ -362,3 +362,233 @@ def upload_xlsx_to_drive(
         chunk_size,
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Resumable upload diagnostics -- NOT part of the normal report-generation
+# upload path (upload_xlsx_to_drive above, unchanged). Production video-reward
+# uploads have failed twice at 4 MiB and once at 1 MiB chunk size, always on
+# the very first chunk, always preceded by a googleapiclient-logged 502 retry,
+# with the final exception being TimeoutError or BrokenPipeError -- i.e. the
+# chunk-size change ruled out a payload-size cause, but next_chunk() conflates
+# two distinct HTTP legs (the resumable session's initiating POST, and the
+# first data PUT) into one call, so it can't say which leg is actually
+# failing. These functions issue each leg directly via google-auth's
+# AuthorizedSession (bypassing googleapiclient/httplib2's own resumable-upload
+# code entirely) so a Production admin can tell apart a session-creation-side
+# failure, a data-PUT-side failure, and (if this succeeds where the real
+# upload path doesn't) a problem specific to googleapiclient/httplib2's own
+# transport. Never logs a session URL, token, or response body -- only
+# HTTP status, elapsed time, and (on failure) the sanitized exception fields
+# already used by upload_xlsx_to_drive.
+# ---------------------------------------------------------------------------
+
+DRIVE_UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/drive/v3/files"
+_DIAGNOSTIC_INIT_TIMEOUT_S = 30
+_DIAGNOSTIC_PUT_TIMEOUT_S = 120
+
+
+def _authorized_session():
+    from google.auth.transport.requests import AuthorizedSession
+
+    return AuthorizedSession(_drive_credentials())
+
+
+def diagnose_resumable_session_init(
+    *,
+    file_name: str,
+    file_size_bytes: int,
+    folder_id: str,
+    mime_type: str = DRIVE_XLSX_MIME_TYPE,
+) -> tuple[dict, str | None]:
+    """Phase A: issues only the resumable-upload session-initiation POST (no
+    file bytes). Returns (sanitized result dict, session URL) -- the caller
+    may pass the URL straight to diagnose_resumable_first_chunk() in the same
+    request; it must never be logged, persisted, or returned to an API
+    caller."""
+    session = _authorized_session()
+    started = time.monotonic()
+    try:
+        response = session.post(
+            DRIVE_UPLOAD_ENDPOINT,
+            params={
+                "uploadType": "resumable",
+                "supportsAllDrives": "true",
+                "fields": "id,name,webViewLink",
+            },
+            headers={
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Type": mime_type,
+                "X-Upload-Content-Length": str(file_size_bytes),
+            },
+            json={"name": file_name, "parents": [folder_id]},
+            timeout=_DIAGNOSTIC_INIT_TIMEOUT_S,
+        )
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        module, type_name, errno = _sanitized_exception_fields(exc)
+        logging.error(
+            "ICE_REPORT_DRIVE_DIAGNOSTIC operation=drive_resumable_init "
+            "file_size_bytes=%d elapsed_ms=%d status=failure "
+            "exception_module=%s exception_type=%s errno=%s",
+            file_size_bytes,
+            elapsed_ms,
+            module,
+            type_name,
+            errno,
+        )
+        return (
+            {
+                "status": "failure",
+                "http_status": None,
+                "elapsed_ms": elapsed_ms,
+                "location_present": False,
+                "exception_module": module,
+                "exception_type": type_name,
+                "errno": errno,
+            },
+            None,
+        )
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    location = response.headers.get("Location")
+    location_present = bool(location)
+    success = 200 <= response.status_code < 300 and location_present
+    response.close()
+    logging.info(
+        "ICE_REPORT_DRIVE_DIAGNOSTIC operation=drive_resumable_init "
+        "file_size_bytes=%d elapsed_ms=%d http_status=%d location_present=%s status=%s",
+        file_size_bytes,
+        elapsed_ms,
+        response.status_code,
+        location_present,
+        "success" if success else "failure",
+    )
+    return (
+        {
+            "status": "success" if success else "failure",
+            "http_status": response.status_code,
+            "elapsed_ms": elapsed_ms,
+            "location_present": location_present,
+        },
+        location if success else None,
+    )
+
+
+def diagnose_resumable_first_chunk(
+    *,
+    session_url: str,
+    chunk_bytes: bytes,
+    total_size_bytes: int,
+) -> dict:
+    """Phase B: PUTs exactly one chunk (the caller decides its size) to the
+    session URL from Phase A. A 308 means Drive accepted this chunk and is
+    waiting for more (the normal, expected outcome for a chunk smaller than
+    the whole file); 200/201 means the whole upload completed in this one
+    PUT. session_url is used only to make the request -- never logged."""
+    session = _authorized_session()
+    end = len(chunk_bytes) - 1
+    started = time.monotonic()
+    try:
+        response = session.put(
+            session_url,
+            data=chunk_bytes,
+            headers={
+                "Content-Length": str(len(chunk_bytes)),
+                "Content-Range": f"bytes 0-{end}/{total_size_bytes}",
+            },
+            timeout=_DIAGNOSTIC_PUT_TIMEOUT_S,
+        )
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        module, type_name, errno = _sanitized_exception_fields(exc)
+        logging.error(
+            "ICE_REPORT_DRIVE_DIAGNOSTIC operation=drive_resumable_first_put "
+            "chunk_index=1 chunk_size_bytes=%d elapsed_ms=%d status=failure "
+            "exception_module=%s exception_type=%s errno=%s",
+            len(chunk_bytes),
+            elapsed_ms,
+            module,
+            type_name,
+            errno,
+        )
+        return {
+            "status": "failure",
+            "http_status": None,
+            "elapsed_ms": elapsed_ms,
+            "chunk_size_bytes": len(chunk_bytes),
+            "exception_module": module,
+            "exception_type": type_name,
+            "errno": errno,
+        }
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    success = response.status_code in (200, 201, 308)
+    file_id = None
+    if response.status_code in (200, 201):
+        try:
+            file_id = response.json().get("id")
+        except Exception:
+            file_id = None
+    response.close()
+    logging.info(
+        "ICE_REPORT_DRIVE_DIAGNOSTIC operation=drive_resumable_first_put "
+        "chunk_index=1 chunk_size_bytes=%d elapsed_ms=%d http_status=%d status=%s",
+        len(chunk_bytes),
+        elapsed_ms,
+        response.status_code,
+        "success" if success else "failure",
+    )
+    result = {
+        "status": "success" if success else "failure",
+        "http_status": response.status_code,
+        "elapsed_ms": elapsed_ms,
+        "chunk_size_bytes": len(chunk_bytes),
+    }
+    if file_id:
+        # internal only, for cleanup -- popped before returning to any API caller
+        result["_file_id"] = file_id
+    return result
+
+
+def run_resumable_upload_diagnostic(
+    *,
+    file_size_bytes: int,
+    run_first_chunk: bool,
+    chunk_size_bytes: int,
+    folder_id: str,
+) -> dict:
+    """Orchestrates Phase A (+ Phase B if requested) against deterministic
+    filler bytes generated in-process -- never real report data, and never
+    content supplied by the caller of the admin endpoint this backs. Cleans
+    up any Drive file this diagnostic itself completed (only possible if
+    file_size_bytes <= chunk_size_bytes, so the single PUT both starts and
+    finishes the upload); a chunk smaller than the whole file leaves no
+    visible Drive file behind at all (Drive does not create the file
+    resource until the upload completes), so there is nothing to clean up
+    in the normal case."""
+    file_name = f"DIAGNOSTIC_resumable_upload_test_{int(time.time())}.xlsx"
+    init_result, session_url = diagnose_resumable_session_init(
+        file_name=file_name, file_size_bytes=file_size_bytes, folder_id=folder_id
+    )
+    result: dict = {"init": init_result, "first_chunk": None}
+
+    if not run_first_chunk or session_url is None:
+        return result
+
+    chunk_size = min(chunk_size_bytes, file_size_bytes)
+    chunk_bytes = b"D" * chunk_size  # deterministic filler, not real report content
+    first_chunk_result = diagnose_resumable_first_chunk(
+        session_url=session_url, chunk_bytes=chunk_bytes, total_size_bytes=file_size_bytes
+    )
+    file_id = first_chunk_result.pop("_file_id", None)
+    result["first_chunk"] = first_chunk_result
+
+    if file_id:
+        try:
+            service = get_drive_service()
+            service.files().update(fileId=file_id, body={"trashed": True}, supportsAllDrives=True).execute()
+        except Exception:
+            logging.warning("ICE_REPORT_DRIVE_DIAGNOSTIC operation=cleanup status=failed_to_trash")
+
+    return result

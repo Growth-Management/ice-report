@@ -3488,6 +3488,70 @@ def _check_ad_revenue_sync_scheduler_auth() -> tuple[bool, str]:
     )
 
 
+_DRIVE_DIAGNOSTIC_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
+
+
+@app.post("/admin/drive/resumable-diagnostic")
+def drive_resumable_upload_diagnostic():
+    """Diagnostic-only: splits a Drive resumable upload into its two HTTP
+    legs (session-initiation POST, first data PUT) to tell apart a
+    session-creation-side failure from a data-PUT-side failure, using
+    google-auth's AuthorizedSession directly instead of the normal report
+    upload path's googleapiclient/httplib2 resumable code
+    (drive_io.upload_xlsx_to_drive, unchanged). Never touches real report
+    data or an externally-supplied folder/URL -- content is deterministic
+    filler generated in-process, and the target folder is this server's own
+    ad-revenue output folder config, not something the caller can point
+    elsewhere."""
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        file_size_bytes = int(payload.get("file_size_bytes") or 10 * 1024 * 1024)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_file_size_bytes"}), 400
+    if file_size_bytes <= 0 or file_size_bytes > _DRIVE_DIAGNOSTIC_MAX_FILE_SIZE_BYTES:
+        return jsonify({"error": "invalid_file_size_bytes"}), 400
+    run_first_chunk = bool(payload.get("run_first_chunk"))
+
+    try:
+        import drive_io
+        from jumpplus_ad_revenue_report import default_output_folder_id
+
+        result = drive_io.run_resumable_upload_diagnostic(
+            file_size_bytes=file_size_bytes,
+            run_first_chunk=run_first_chunk,
+            chunk_size_bytes=drive_io.drive_upload_chunk_size(),
+            folder_id=default_output_folder_id(),
+        )
+    except Exception as exc:
+        logging.error("ICE_REPORT_DRIVE_DIAGNOSTIC_FAILED reason=%s", type(exc).__name__)
+        _log_admin_audit_event(
+            action="drive_resumable_diagnostic",
+            result="failure",
+            target_type="admin_api",
+            target_id="drive_resumable_diagnostic",
+            status_code=500,
+            reason=type(exc).__name__,
+        )
+        return jsonify({"error": "diagnostic_failed"}), 500
+
+    _log_admin_audit_event(
+        action="drive_resumable_diagnostic",
+        result="success",
+        target_type="admin_api",
+        target_id="drive_resumable_diagnostic",
+        status_code=200,
+        detail={
+            "init_status": result["init"]["status"],
+            "first_chunk_status": (result["first_chunk"] or {}).get("status"),
+        },
+    )
+    return jsonify(result)
+
+
 @app.post("/admin/ad-revenue/scheduled-sync")
 def scheduled_sync_jumpplus_ad_revenue():
     ok, reason = _check_ad_revenue_sync_scheduler_auth()
