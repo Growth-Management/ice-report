@@ -347,18 +347,24 @@ class PowerQueryPreservationTests(unittest.TestCase):
 
     def test_read_only_parsed_parts_are_byte_for_byte_preserved(self):
         """Dirty-tracking regression: xml() is called (for lookup only) on
-        workbook.xml, workbook.xml.rels, sharedStrings.xml and the iOS
-        sheet's own _rels part while resolving sheet names and table
-        relationships -- none of those may be re-serialized on save() just
-        because they were read, only the sheet/table parts actually passed
-        to set_xml() should be."""
+        workbook.xml.rels, sharedStrings.xml and the iOS sheet's own _rels
+        part while resolving sheet names and table relationships -- none of
+        those may be re-serialized on save() just because they were read,
+        only the sheet/table parts actually passed to set_xml() should be.
+
+        xl/workbook.xml is deliberately NOT in this list: create_ad_revenue_
+        workbook() calls force_recalculation_on_load(), which intentionally
+        sets calcPr's fullCalcOnLoad/forceFullCalc so Excel recomputes the
+        Excel-native formulas this module never writes to (サマリ's per-
+        platform totals, 著者還元額) instead of showing whatever the
+        template's stale cached values were -- see the dedicated
+        RecalculationOnLoadTests below."""
         self._generate()
         template_pkg = pkg_writer.XlsxPackage.load(self.template_path)
         ios_part = pkg_writer._sheet_name_to_part(template_pkg, "iOS")
         ios_rels_part = pkg_writer._part_rels_path(ios_part)
 
         parts_to_check = [
-            "xl/workbook.xml",
             "xl/_rels/workbook.xml.rels",
             "xl/sharedStrings.xml",
             ios_rels_part,
@@ -675,6 +681,308 @@ class FormulaPreservationTests(unittest.TestCase):
                 self.assertIsInstance(ws.cell(row=row, column=2).value, int)  # B = コイン消費数 (Python)
 
 
+class FormulaMaterializationFullScaleTests(unittest.TestCase):
+    """Excel Desktop acceptance found that calculatedColumnFormula alone
+    isn't enough -- see xlsx_package_writer._set_formula_cell /
+    force_recalculation_on_load. FormulaPreservationTests above checks a
+    handful of rows; these check every single data row at real production
+    scale (798/9,548/9,060), since a bug specific to the style-source row,
+    the last row, or a boundary case would not show up with only 3 rows."""
+
+    def _formula_and_cached_value(self, sheet_root, ref: str):
+        col_letter = "".join(ch for ch in ref if ch.isalpha())
+        row_num = ref[len(col_letter) :]
+        row_el = sheet_root.find(f'{MAIN_NS}sheetData/{MAIN_NS}row[@r="{row_num}"]')
+        self.assertIsNotNone(row_el, f"row {row_num} missing")
+        cell_el = None
+        for c in row_el.findall(f"{MAIN_NS}c"):
+            if c.get("r") == ref:
+                cell_el = c
+                break
+        self.assertIsNotNone(cell_el, f"cell {ref} missing")
+        f_el = cell_el.find(f"{MAIN_NS}f")
+        v_el = cell_el.find(f"{MAIN_NS}v")
+        self.assertIsNotNone(f_el, f"{ref} has no <f> -- calculatedColumnFormula was not materialized")
+        return f_el.text, (v_el.text if v_el is not None else None)
+
+    def test_video_reward_798_rows_all_have_materialized_c_and_d_formulas(self):
+        from xlsx_fixtures import VIDEO_REWARD_C_FORMULA, VIDEO_REWARD_D_FORMULA
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_video_reward_like_template(Path(tmp) / "video_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": f"ec{i}",
+                    "コンテンツID": i,
+                    "コンテンツ名": f"c{i}",
+                    "JDCN": f"j{i}",
+                    "コイン消費数": i,
+                    "作品名": f"work-{i:03d}",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                }
+                for i in range(1, 799)
+            ]
+            detail_rows = {"iOS": [], "Android": [], "全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="video-reward", revenue_yen=14017945, detail_rows=detail_rows
+            )
+            self.assertEqual(len(detail_rows["作品別"]), 798)
+            report.create_ad_revenue_workbook(
+                report_type="video-reward",
+                template_path=path,
+                output_path=output,
+                revenue_yen=14017945,
+                detail_rows=detail_rows,
+            )
+
+            pkg = pkg_writer.XlsxPackage.load(output)
+            sheet_part = pkg_writer._sheet_name_to_part(pkg, "作品別")
+            sheet_root = pkg.xml(sheet_part)
+
+            table = pkg.xml(pkg_writer._sheet_table_parts(pkg, sheet_part)[0])
+            self.assertEqual(table.get("ref"), "A3:D801")
+
+            expected_c = VIDEO_REWARD_C_FORMULA.lstrip("=")
+            expected_d = VIDEO_REWARD_D_FORMULA.lstrip("=")
+            for row_num in (4, 5, 402, 800, 801):  # first / near-first / middle / near-last / last
+                c_formula, c_cached = self._formula_and_cached_value(sheet_root, f"C{row_num}")
+                d_formula, d_cached = self._formula_and_cached_value(sheet_root, f"D{row_num}")
+                self.assertEqual(c_formula, expected_c)
+                self.assertEqual(d_formula, expected_d)
+                self.assertIsNotNone(c_cached, f"C{row_num} has no cached <v>")
+                self.assertIsNotNone(d_cached, f"D{row_num} has no cached <v>")
+                float(c_cached)
+                float(d_cached)
+
+            # every single data row, not just the sampled ones above
+            missing = []
+            for row_num in range(4, 802):
+                for col in ("C", "D"):
+                    formula, cached = self._formula_and_cached_value(sheet_root, f"{col}{row_num}")
+                    if formula is None or cached is None:
+                        missing.append(f"{col}{row_num}")
+            self.assertEqual(missing, [], f"{len(missing)} cells missing formula/cached value")
+
+    def test_app2_9548_rows_all_have_materialized_f_and_g_formulas(self):
+        from xlsx_fixtures import APP2_F_FORMULA, APP2_G_FORMULA
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_app2_like_template(Path(tmp) / "app2_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": f"ec{i}",
+                    "コンテンツID": i,
+                    "コンテンツ名": f"c{i}",
+                    "JDCN": f"j{i}",
+                    "広告表示数": i,
+                    "作品名": f"work-{i}",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                    "タイトルID": 900 + i,
+                    "デジタルタイトル名": f"dt{i}",
+                    "作品ID": i,
+                }
+                for i in range(1, 9549)
+            ]
+            detail_rows = {"iOS": [], "Android": [], "全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="app2", revenue_yen=9789547, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="app2",
+                template_path=path,
+                output_path=output,
+                revenue_yen=9789547,
+                detail_rows=detail_rows,
+            )
+
+            pkg = pkg_writer.XlsxPackage.load(output)
+            sheet_part = pkg_writer._sheet_name_to_part(pkg, "全体")
+            sheet_root = pkg.xml(sheet_part)
+            table = pkg.xml(pkg_writer._sheet_table_parts(pkg, sheet_part)[0])
+            self.assertEqual(table.get("ref"), "A3:M9551")
+
+            expected_f = APP2_F_FORMULA.lstrip("=")
+            expected_g = APP2_G_FORMULA.lstrip("=")
+            missing = []
+            for row_num in range(4, 9552):
+                f_formula, f_cached = self._formula_and_cached_value(sheet_root, f"F{row_num}")
+                g_formula, g_cached = self._formula_and_cached_value(sheet_root, f"G{row_num}")
+                if f_formula != expected_f or f_cached is None:
+                    missing.append(f"F{row_num}")
+                if g_formula != expected_g or g_cached is None:
+                    missing.append(f"G{row_num}")
+            self.assertEqual(missing, [], f"{len(missing)} F/G cells missing formula/cached value")
+
+            # H (作品ID) stays a plain Python value, never a formula
+            for row_num in (4, 9551):
+                row_el = sheet_root.find(f'{MAIN_NS}sheetData/{MAIN_NS}row[@r="{row_num}"]')
+                h_cell = next(c for c in row_el.findall(f"{MAIN_NS}c") if c.get("r") == f"H{row_num}")
+                self.assertIsNone(h_cell.find(f"{MAIN_NS}f"))
+                self.assertIsNotNone(h_cell.find(f"{MAIN_NS}v"))
+
+    def test_web_9060_rows_all_have_materialized_f_formula(self):
+        from xlsx_fixtures import WEB_F_FORMULA
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_web_like_template(Path(tmp) / "web_template.xlsx")
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": f"ec{i}",
+                    "コンテンツID": i,
+                    "コンテンツ名": f"c{i}",
+                    "JDCN": f"j{i}",
+                    "広告表示数": i,
+                    "作品名": f"work-{i}",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                    "タイトルID": 900 + i,
+                    "デジタルタイトル名": f"dt{i}",
+                }
+                for i in range(1, 9061)
+            ]
+            detail_rows = {"全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="web", revenue_yen=734139, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="web",
+                template_path=path,
+                output_path=output,
+                revenue_yen=734139,
+                detail_rows=detail_rows,
+            )
+
+            pkg = pkg_writer.XlsxPackage.load(output)
+            sheet_part = pkg_writer._sheet_name_to_part(pkg, "全体")
+            sheet_root = pkg.xml(sheet_part)
+            table = pkg.xml(pkg_writer._sheet_table_parts(pkg, sheet_part)[0])
+            self.assertEqual(table.get("ref"), "A3:K9063")
+
+            expected_f = WEB_F_FORMULA.lstrip("=")
+            missing = []
+            for row_num in range(4, 9064):
+                f_formula, f_cached = self._formula_and_cached_value(sheet_root, f"F{row_num}")
+                if f_formula != expected_f or f_cached is None:
+                    missing.append(f"F{row_num}")
+            self.assertEqual(missing, [], f"{len(missing)} F cells missing formula/cached value")
+
+
+def _inject_synthetic_calc_chain(path: Path) -> None:
+    """openpyxl doesn't write xl/calcChain.xml itself, but the real official
+    templates do (confirmed: a handful of entries in the pristine template,
+    hundreds once a real Golden Master's tables are fully populated) --
+    inject a minimal one so tests can verify force_recalculation_on_load()
+    actually removes it, not just no-ops because it was never there."""
+    with zipfile.ZipFile(path) as zf:
+        entries = {name: zf.read(name) for name in zf.namelist()}
+
+    entries["xl/calcChain.xml"] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<c r="C4" i="1"/></calcChain>\n'
+    ).encode("utf-8")
+
+    workbook_rels = entries["xl/_rels/workbook.xml.rels"].decode("utf-8")
+    calc_chain_rel = (
+        '<Relationship Id="rIdCalcChainFixture" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" '
+        'Target="calcChain.xml"/>'
+    )
+    workbook_rels = workbook_rels.replace("</Relationships>", calc_chain_rel + "</Relationships>")
+    entries["xl/_rels/workbook.xml.rels"] = workbook_rels.encode("utf-8")
+
+    content_types = entries["[Content_Types].xml"].decode("utf-8")
+    calc_chain_override = (
+        '<Override PartName="/xl/calcChain.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/>'
+    )
+    content_types = content_types.replace("</Types>", calc_chain_override + "</Types>")
+    entries["[Content_Types].xml"] = content_types.encode("utf-8")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+
+
+class RecalculationOnLoadTests(unittest.TestCase):
+    """The second Excel Desktop acceptance failure: サマリ's own SUM/SUBTOTAL/
+    IFERROR formulas (never written by this module) showed 0 because their
+    cached <v> was still whatever the near-empty template had, and nothing
+    told Excel to recompute them on open. force_recalculation_on_load()
+    (called once by create_ad_revenue_workbook) must set calcPr's
+    fullCalcOnLoad/forceFullCalc and drop the template's now-stale
+    calcChain.xml."""
+
+    def test_calc_pr_forces_full_recalculation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_video_reward_like_template(Path(tmp) / "video_template.xlsx")
+            pkg = pkg_writer.XlsxPackage.load(path)
+            pkg_writer.force_recalculation_on_load(pkg)
+            wb_root = pkg.xml("xl/workbook.xml")
+            calc_pr = wb_root.find(f"{MAIN_NS}calcPr")
+            self.assertIsNotNone(calc_pr)
+            self.assertEqual(calc_pr.get("fullCalcOnLoad"), "1")
+            self.assertEqual(calc_pr.get("forceFullCalc"), "1")
+
+    def test_stale_calc_chain_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_video_reward_like_template(Path(tmp) / "video_template.xlsx")
+            _inject_synthetic_calc_chain(path)
+            pkg = pkg_writer.XlsxPackage.load(path)
+            self.assertTrue(pkg.has("xl/calcChain.xml"))
+            pkg_writer.force_recalculation_on_load(pkg)
+            out = Path(tmp) / "out.xlsx"
+            pkg.save(out)
+            with zipfile.ZipFile(out) as zf:
+                names = zf.namelist()
+                self.assertNotIn("xl/calcChain.xml", names)
+                ct = zf.read("[Content_Types].xml").decode("utf-8")
+                self.assertNotIn("calcChain", ct)
+                rels = zf.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+                self.assertNotIn("calcChain", rels)
+
+    def test_end_to_end_generation_forces_recalc_and_drops_calc_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = build_video_reward_like_template(Path(tmp) / "video_template.xlsx")
+            _inject_synthetic_calc_chain(path)
+            output = Path(tmp) / "out.xlsx"
+            zentai_rows = [
+                {
+                    "コンテンツID_Raise": "ec1",
+                    "コンテンツID": 1,
+                    "コンテンツ名": "c1",
+                    "JDCN": "j1",
+                    "コイン消費数": 10,
+                    "作品名": "work-1",
+                    "コミックスJDCN": "cj",
+                    "コミックス巻数": 1,
+                }
+            ]
+            detail_rows = {"iOS": [], "Android": [], "全体": zentai_rows}
+            detail_rows = report.add_work_summary_rows(
+                report_type="video-reward", revenue_yen=14017945, detail_rows=detail_rows
+            )
+            report.create_ad_revenue_workbook(
+                report_type="video-reward",
+                template_path=path,
+                output_path=output,
+                revenue_yen=14017945,
+                detail_rows=detail_rows,
+            )
+
+            pkg = pkg_writer.XlsxPackage.load(output)
+            wb_root = pkg.xml("xl/workbook.xml")
+            calc_pr = wb_root.find(f"{MAIN_NS}calcPr")
+            self.assertEqual(calc_pr.get("fullCalcOnLoad"), "1")
+            self.assertEqual(calc_pr.get("forceFullCalc"), "1")
+            self.assertFalse(pkg.has("xl/calcChain.xml"))
+
+
 class WebPowerQueryMigrationTests(unittest.TestCase):
     """Item 4 of the review: WEB's real official template also carries
     connections.xml/queryTables/DataMashup/table-to-queryTable relationship
@@ -754,17 +1062,33 @@ class WebPowerQueryMigrationTests(unittest.TestCase):
         table = list(ws.tables.values())[0]
         self.assertEqual(table.ref, "A3:D4")
 
-    def test_zentai_f_formula_preserved_through_conversion_and_write(self):
+    def test_zentai_f_calculated_column_formula_preserved_through_conversion(self):
         """Converting to Power-Query-free must not disturb 全体's own F
-        formula either -- it's a completely separate part (worksheet
-        sheetData) from the Power Query metadata this function targets."""
+        calculatedColumnFormula -- it's a completely separate part
+        (xl/tables/tableN.xml's tableColumns) from the Power Query metadata
+        this function targets. The formula lives only in the table
+        definition at this point (see _add_detail_sheet) -- the worksheet's
+        own F4 cell is genuinely blank until a real write materializes it
+        (test_converted_template_works_with_normal_runtime_write_path)."""
         from xlsx_fixtures import WEB_F_FORMULA
 
         self._convert()
-        wb = load_workbook(self.output_path)
-        self.assertEqual(wb["全体"]["F4"].value, WEB_F_FORMULA)
+        pkg = pkg_writer.XlsxPackage.load(self.output_path)
+        ns = pkg_writer.NS
+        for name in pkg.part_names():
+            if name.startswith("xl/tables/table") and name.endswith(".xml"):
+                root = pkg.xml(name)
+                for col in root.iter(f"{{{ns['main']}}}tableColumn"):
+                    if col.get("name") == "広告売上":
+                        calc = col.find(f"{{{ns['main']}}}calculatedColumnFormula")
+                        self.assertIsNotNone(calc)
+                        self.assertEqual(calc.text, WEB_F_FORMULA.lstrip("="))
+                        return
+        self.fail("広告売上 tableColumn not found")
 
     def test_converted_template_works_with_normal_runtime_write_path(self):
+        from xlsx_fixtures import WEB_F_FORMULA
+
         self._convert()
         zentai_rows = [
             {
@@ -784,14 +1108,17 @@ class WebPowerQueryMigrationTests(unittest.TestCase):
         detail_rows = report.add_work_summary_rows(
             report_type="web", revenue_yen=734139, detail_rows=detail_rows
         )
+        final_path = Path(self.tmp_dir.name) / "final.xlsx"
         result = report.create_ad_revenue_workbook(
             report_type="web",
             template_path=self.output_path,
-            output_path=Path(self.tmp_dir.name) / "final.xlsx",
+            output_path=final_path,
             revenue_yen=734139,
             detail_rows=detail_rows,
         )
         self.assertEqual(result["detail_row_count"], 1)
+        wb = load_workbook(final_path)
+        self.assertEqual(wb["全体"]["F4"].value, WEB_F_FORMULA)
 
 
 class RemovePowerQueryDependencyTests(unittest.TestCase):

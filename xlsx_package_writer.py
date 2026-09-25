@@ -351,6 +351,47 @@ def _set_cell_value(row_el: etree._Element, col_idx: int, row_num: int, value: A
         t_el.text = str(value)
 
 
+def _set_formula_cell(
+    row_el: etree._Element,
+    col_idx: int,
+    row_num: int,
+    formula_text: str,
+    cached_value: Any = None,
+) -> None:
+    """Materializes an Excel Table calculated-column formula into an actual
+    worksheet cell: `<f>formula</f>`, plus a cached `<v>` when the caller
+    already has the same value computed in Python. `formula_text` is a
+    structured-reference formula (e.g. `...[[#This Row],[コイン消費数]]/SUM(...)`)
+    -- row-relative, so the identical text is correct for every data row
+    unchanged. Never called for a column this module writes a plain Python
+    value to (see replace_detail_rows) -- the formula is never overwritten
+    by a hardcoded value, only the reverse never happens either."""
+    col_letter = _index_to_col_letter(col_idx)
+    ref = f"{col_letter}{row_num}"
+    cell_el = _find_cell(row_el, ref)
+    if cell_el is None:
+        cell_el = etree.SubElement(row_el, _qn("main", "c"))
+        cell_el.set("r", ref)
+        _reorder_row_cells(row_el)
+
+    style = cell_el.get("s")
+    for attr in list(cell_el.attrib):
+        del cell_el.attrib[attr]
+    cell_el.set("r", ref)
+    if style is not None:
+        cell_el.set("s", style)
+    for child in list(cell_el):
+        cell_el.remove(child)
+
+    f_el = etree.SubElement(cell_el, _qn("main", "f"))
+    f_el.text = formula_text
+
+    if isinstance(cached_value, (int, float, Decimal)) and not isinstance(cached_value, bool):
+        if not _is_non_finite_number(cached_value):
+            v_el = etree.SubElement(cell_el, _qn("main", "v"))
+            v_el.text = _format_number(cached_value)
+
+
 def _clone_row_as(source_row_el: etree._Element | None, new_row_num: int, min_col: int, max_col: int) -> etree._Element:
     new_row_el = etree.Element(_qn("main", "row"))
     if source_row_el is not None:
@@ -490,6 +531,30 @@ def replace_detail_rows(
 
     write_columns = {h: header_map[h] for h in headers if h in header_map}
 
+    # Columns this call doesn't write a plain value to, but that the table
+    # itself declares as an Excel calculated column (APP_2/WEB 全体's
+    # 広告売上(_原資50), video-reward 作品別's コイン消費割合/広告還元額): a
+    # calculatedColumnFormula in the table part only tells Excel what a row a
+    # *person* types in should compute -- it is not itself a worksheet cell,
+    # so cloning the template's already-blank row (see _clone_row_as below)
+    # never materializes one, and Excel Desktop showed blank C/D cells for
+    # every row this module ever wrote until a person forced a recalc by
+    # hand (see docs/jumpplus-ad-revenue-report.md, "Excel Desktop
+    # acceptance: blank calculated columns"). Materialize the real <f> (and,
+    # when this call's caller already computed the same value in Python, a
+    # cached <v> alongside it) instead of leaving the cell blank.
+    written_col_idxs = set(write_columns.values())
+    formula_columns: dict[int, tuple[str, str]] = {}
+    table_columns_el = table_root.find(_qn("main", "tableColumns"))
+    if table_columns_el is not None:
+        for col_offset, col_el in enumerate(table_columns_el.findall(_qn("main", "tableColumn"))):
+            col_idx = min_col + col_offset
+            if col_idx in written_col_idxs:
+                continue
+            calc_el = col_el.find(_qn("main", "calculatedColumnFormula"))
+            if calc_el is not None and calc_el.text:
+                formula_columns[col_idx] = (col_el.get("name", ""), calc_el.text)
+
     style_source_row_num = last_data_row if current_data_row_count >= 1 else header_row
     style_source_row_el = row_index.get(style_source_row_num)
 
@@ -502,6 +567,8 @@ def replace_detail_rows(
         new_row_el = _clone_row_as(style_source_row_el, new_row_num, min_col, max_col)
         for header, col_idx in write_columns.items():
             _set_cell_value(new_row_el, col_idx, new_row_num, row_values.get(header))
+        for col_idx, (col_name, formula_text) in formula_columns.items():
+            _set_formula_cell(new_row_el, col_idx, new_row_num, formula_text, row_values.get(col_name))
         new_rows.append(new_row_el)
 
     new_last_data_row = header_row + target_row_count
@@ -547,6 +614,37 @@ def replace_detail_rows(
     if autofilter_el is not None:
         autofilter_el.set("ref", f"{min_col_letter}{header_row}:{max_col_letter}{new_last_data_row}")
     pkg.set_xml(table_part, table_root)
+
+
+def force_recalculation_on_load(pkg: "XlsxPackage") -> None:
+    """Forces Excel to fully recompute every formula when the generated
+    workbook is opened, instead of showing the template's stale cached <v>
+    values. This module never writes to a sheet's own Excel-native SUM/
+    SUBTOTAL/IFERROR formulas (e.g. サマリ's per-platform totals, 著者還元額)
+    -- by design, see replace_detail_rows -- so their cached values are
+    still whatever the pristine (near-empty) template had, typically 0,
+    until something forces Excel to recalculate. Also drops
+    xl/calcChain.xml: this module can grow a table from a handful of
+    template rows to tens of thousands (replace_detail_rows), so the
+    template's calc chain -- built for the pristine template -- is stale
+    and incomplete for the workbook this produces. Removing it is the
+    standard, spec-compliant way to have Excel rebuild it from scratch on
+    load rather than risk it skipping a formula cell it never knew about.
+    Idempotent and safe to call unconditionally, even if nothing in the
+    workbook actually changed."""
+    if pkg.has("xl/workbook.xml"):
+        root = pkg.xml("xl/workbook.xml")
+        calc_pr = root.find(_qn("main", "calcPr"))
+        if calc_pr is None:
+            calc_pr = etree.SubElement(root, _qn("main", "calcPr"))
+        calc_pr.set("fullCalcOnLoad", "1")
+        calc_pr.set("forceFullCalc", "1")
+        pkg.set_xml("xl/workbook.xml", root)
+
+    if pkg.has("xl/calcChain.xml"):
+        pkg.remove_part("xl/calcChain.xml")
+        _remove_content_types_override(pkg, "/xl/calcChain.xml")
+        _remove_relationships_by_target_suffix(pkg, "xl/_rels/workbook.xml.rels", "calcChain.xml")
 
 
 _CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
