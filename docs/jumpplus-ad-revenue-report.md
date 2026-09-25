@@ -914,7 +914,25 @@ image rollback不要にロールバックできる。
 
 ## Status / open items(未解決事項)
 
-本番化に向けて残っているのは、コード側の問題ではなく外部設定(IAM・共有・Scheduler・deploy)のみ。
+2026-09-25時点で残っているのは外部設定だけではない。少なくとも以下が未完了:
+
+- **AuthorizedSession uploaderのProduction完走検証**(PR #142): Production診断(CASE C)は
+  session initiation + first chunk PUTの1回のみの成功を確認したものであり、実際の
+  video-reward(~10MB)を最後まで完走できるかは未検証。ローカル統合テストでも
+  1回目は実HTTP 502を4回連続で受けて(bounded recoveryが正しく機能して)クリーンに
+  失敗、2回目は成功、という結果で、intermittentな挙動である可能性が高いが確証はない。
+  `DRIVE_UPLOAD_TRANSPORT=authorized_session`でのProduction試験生成がまだ実施されていない。
+- **video-rewardのformula/recalcation machine validation**(PR #140の効果測定): PR #140で
+  実装したcalculatedColumnFormula materialize・fullCalcOnLoad/forceFullCalcが、
+  Drive uploadが完走した実際のProduction生成物に対して機能しているかは、
+  upload自体が完走していないため未確認。
+- **video-rewardのExcel Desktop acceptance**: 上記2点が解決した生成物に対して、
+  作品別C/D列・サマリ数値・修復ダイアログ有無をユーザーが実機で確認する工程が未実施。
+- **app2/webのProduction E2E・Excel Desktop acceptance**: video-reward PASS後にのみ着手する
+  方針のため、video-rewardが確定するまで着手できない。
+- **Scheduler**: 3帳票すべてのExcel Desktop acceptanceがPASSするまでBLOCKED。
+
+このほか、外部設定(IAM・共有・deploy)に関する既知事項は以下の通り。
 
 1. **Sheets OAuth認証情報・API有効化が未整備**: `ice-report-runner` への共有は行わない方針(確定、上記
    「Sheets認証」参照)。代わりに `sinohara@impress.co.jp` のユーザーOAuth(`SHEETS_AUTH_MODE=oauth`、

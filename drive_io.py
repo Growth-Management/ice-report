@@ -777,7 +777,7 @@ def _query_upload_status(session, session_url: str, total_size_bytes: int) -> tu
     try:
         response = session.put(
             session_url,
-            headers={"Content-Range": f"bytes */{total_size_bytes}"},
+            headers={"Content-Length": "0", "Content-Range": f"bytes */{total_size_bytes}"},
             timeout=_UPLOAD_STATUS_QUERY_TIMEOUT_S,
             allow_redirects=False,
         )
@@ -961,21 +961,67 @@ def _upload_xlsx_authorized_session(
                 return result
 
             if status_code == 308:
+                range_header = response.headers.get("Range")
                 response.close()
-                logging.info(
+                next_offset = _parse_range_header(range_header)
+
+                if next_offset is not None:
+                    logging.info(
+                        "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_chunk "
+                        "report_type=%s chunk_index=%d offset_start=%d offset_end=%d elapsed_ms=%d "
+                        "http_status=308 status=success",
+                        report_type or "",
+                        chunk_index,
+                        offset,
+                        end,
+                        elapsed_ms,
+                    )
+                    offset = next_offset
+                    recover_attempts = 0
+                    continue
+
+                # Drive's 308 doesn't by itself say how much of this chunk
+                # actually landed when the Range header is missing or
+                # unparseable -- assuming "all of it" (end + 1) risks
+                # silently skipping bytes Drive never received and
+                # completing a corrupt file. Never guess; ask the session
+                # what it actually has (same bounded recovery as a
+                # transport error/unexpected status below).
+                logging.error(
                     "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_chunk "
                     "report_type=%s chunk_index=%d offset_start=%d offset_end=%d elapsed_ms=%d "
-                    "http_status=308 status=success",
+                    "http_status=308 status=failure reason=range_missing_or_unparseable",
                     report_type or "",
                     chunk_index,
                     offset,
                     end,
                     elapsed_ms,
                 )
-                next_offset = _parse_range_header(response.headers.get("Range"))
-                offset = next_offset if next_offset is not None else (end + 1)
-                recover_attempts = 0
-                continue
+                recover_attempts += 1
+                if recover_attempts > _UPLOAD_MAX_RECOVER_ATTEMPTS:
+                    raise DriveOperationError("drive_api_error", status_code=308)
+                outcome, payload, session_url, session_restarts = _recover_upload(
+                    session,
+                    session_url,
+                    file_size_bytes,
+                    session_restarts,
+                    file_name=file_name,
+                    folder_id=folder_id,
+                    report_type=report_type,
+                )
+                if outcome == "resume":
+                    offset = payload
+                    continue
+                if outcome == "complete":
+                    logging.info(
+                        "ICE_REPORT_DRIVE_UPLOAD transport=authorized_session operation=upload_xlsx "
+                        "report_type=%s file_size_bytes=%d chunk_count=%d status=success",
+                        report_type or "",
+                        file_size_bytes,
+                        chunk_index,
+                    )
+                    return payload
+                raise DriveOperationError("drive_api_error", status_code=308)
 
             response.close()
             logging.error(

@@ -283,19 +283,135 @@ class UploadXlsxAuthorizedSessionTests(unittest.TestCase):
         self.assertEqual(last_kwargs["headers"]["Content-Range"], "bytes 200-249/250")
         self.assertEqual(len(last_kwargs["data"]), 50)
 
-    def test_308_without_range_falls_back_to_chunk_boundary(self):
+    def test_308_with_valid_range_resumes_from_confirmed_offset(self):
         path = _write_temp_file(200)
         self.addCleanup(path.unlink, missing_ok=True)
         session = _QueueSession(
             post_queue=[_FakeResponse(200, headers={"Location": _LOCATION})],
             put_queue=[
-                _FakeResponse(308, headers={}),
+                _FakeResponse(308, headers={"Range": "bytes=0-99"}),
                 _FakeResponse(200, json_body={"id": "f1"}),
             ],
         )
         self._run(path, session=session, chunk_size=100)
         second_kwargs = session.put_calls[1][1]
         self.assertEqual(second_kwargs["headers"]["Content-Range"], "bytes 100-199/200")
+
+    def test_308_without_range_never_guesses_end_plus_one_queries_status_instead(self):
+        """Regression: a 308 with no Range header does NOT mean "all of this
+        chunk was received" -- assuming end+1 risks silently skipping bytes
+        Drive never got and completing a corrupt file. The chunk PUT's own
+        308-without-Range must trigger a status query, never an assumed
+        offset advance."""
+        path = _write_temp_file(200)
+        self.addCleanup(path.unlink, missing_ok=True)
+        session = _QueueSession(
+            post_queue=[_FakeResponse(200, headers={"Location": _LOCATION})],
+            put_queue=[
+                _FakeResponse(308, headers={}),  # chunk 1 PUT: 308, no Range
+                _FakeResponse(308, headers={}),  # status query: also no Range -> offset 0
+                _FakeResponse(200, json_body={"id": "f1"}),  # chunk PUT retried from offset 0
+            ],
+        )
+        self._run(path, session=session, chunk_size=100)
+        # must NOT have jumped to bytes 100-199/200 -- offset 0 was re-sent
+        retried_kwargs = session.put_calls[-1][1]
+        self.assertEqual(retried_kwargs["headers"]["Content-Range"], "bytes 0-99/200")
+
+    def test_308_without_range_then_status_query_reports_confirmed_offset(self):
+        path = _write_temp_file(200)
+        self.addCleanup(path.unlink, missing_ok=True)
+        session = _QueueSession(
+            post_queue=[_FakeResponse(200, headers={"Location": _LOCATION})],
+            put_queue=[
+                _FakeResponse(308, headers={}),  # chunk 1 PUT: 308, no Range
+                _FakeResponse(308, headers={"Range": "bytes=0-49"}),  # status query: partial receipt
+                _FakeResponse(200, json_body={"id": "f1"}),  # resumes from byte 50
+            ],
+        )
+        self._run(path, session=session, chunk_size=100)
+        resumed_kwargs = session.put_calls[-1][1]
+        self.assertEqual(resumed_kwargs["headers"]["Content-Range"], "bytes 50-149/200")
+
+    def test_308_without_range_then_status_query_reports_already_complete(self):
+        path = _write_temp_file(200)
+        self.addCleanup(path.unlink, missing_ok=True)
+        session = _QueueSession(
+            post_queue=[_FakeResponse(200, headers={"Location": _LOCATION})],
+            put_queue=[
+                _FakeResponse(308, headers={}),
+                _FakeResponse(200, json_body={"id": "already-done"}),
+            ],
+        )
+        result = self._run(path, session=session, chunk_size=100)
+        self.assertEqual(result["id"], "already-done")
+        self.assertEqual(len(session.put_calls), 2)
+
+    def test_308_without_range_then_status_query_reports_expired_session(self):
+        path = _write_temp_file(200)
+        self.addCleanup(path.unlink, missing_ok=True)
+        session = _QueueSession(
+            post_queue=[
+                _FakeResponse(200, headers={"Location": _LOCATION}),
+                _FakeResponse(200, headers={"Location": _LOCATION + "-restarted"}),
+            ],
+            put_queue=[
+                _FakeResponse(308, headers={}),  # chunk 1 PUT: 308, no Range
+                _FakeResponse(404),  # status query: session expired
+                _FakeResponse(200, json_body={"id": "f1"}),  # full re-upload on the new session
+            ],
+        )
+        result = self._run(path, session=session, chunk_size=100)
+        self.assertEqual(result["id"], "f1")
+        self.assertEqual(len(session.post_calls), 2)
+
+    def test_malformed_range_is_treated_the_same_as_missing(self):
+        path = _write_temp_file(200)
+        self.addCleanup(path.unlink, missing_ok=True)
+        session = _QueueSession(
+            post_queue=[_FakeResponse(200, headers={"Location": _LOCATION})],
+            put_queue=[
+                _FakeResponse(308, headers={"Range": "not-a-valid-range"}),
+                _FakeResponse(308, headers={"Range": "bytes=0-99"}),  # status query: valid this time
+                _FakeResponse(200, json_body={"id": "f1"}),
+            ],
+        )
+        self._run(path, session=session, chunk_size=100)
+        # must have gone through the status-query path (3 put calls), not
+        # trusted the malformed header or guessed end+1
+        self.assertEqual(len(session.put_calls), 3)
+        resumed_kwargs = session.put_calls[-1][1]
+        self.assertEqual(resumed_kwargs["headers"]["Content-Range"], "bytes 100-199/200")
+
+    def test_range_missing_recovery_is_bounded(self):
+        path = _write_temp_file(200)
+        self.addCleanup(path.unlink, missing_ok=True)
+        put_queue = [_FakeResponse(308, headers={}) for _ in range(10)]  # never resolves
+        session = _QueueSession(
+            post_queue=[_FakeResponse(200, headers={"Location": _LOCATION})],
+            put_queue=put_queue,
+        )
+        with self.assertRaises(drive_io.DriveOperationError):
+            self._run(path, session=session, chunk_size=100)
+        self.assertLessEqual(len(session.put_calls), 2 * (drive_io._UPLOAD_MAX_RECOVER_ATTEMPTS + 1))
+
+    def test_range_missing_recovery_never_logs_secrets(self):
+        path = _write_temp_file(200)
+        self.addCleanup(path.unlink, missing_ok=True)
+        secret_url = "https://secret-session-url.example/abc?upload_id=SECRET_TOKEN"
+        session = _QueueSession(
+            post_queue=[_FakeResponse(200, headers={"Location": secret_url})],
+            put_queue=[
+                _FakeResponse(308, headers={}),
+                _FakeResponse(308, headers={"Range": "bytes=0-99"}),
+                _FakeResponse(200, json_body={"id": "f1"}),
+            ],
+        )
+        with self.assertLogs(level="INFO") as logs:
+            self._run(path, session=session, chunk_size=100)
+        joined = "\n".join(logs.output)
+        self.assertNotIn(secret_url, joined)
+        self.assertNotIn("SECRET_TOKEN", joined)
 
     def test_timeout_then_status_query_resumes_from_confirmed_offset(self):
         path = _write_temp_file(200)
