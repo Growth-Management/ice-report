@@ -3577,6 +3577,99 @@ def drive_resumable_upload_diagnostic():
     return jsonify(result)
 
 
+_FULL_DIAGNOSTIC_CHUNK_SIZE_UNIT = 256 * 1024
+
+
+def _validate_strict_positive_int(value, *, max_value=None):
+    """Rejects bool (int subclass -- int(True)==1 would otherwise silently
+    pass), non-int-parseable values, and anything <= 0 or over max_value.
+    Returns the parsed int, or None if invalid."""
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    if max_value is not None and parsed > max_value:
+        return None
+    return parsed
+
+
+@app.post("/admin/drive/resumable-full-diagnostic")
+def drive_resumable_full_diagnostic():
+    """Diagnostic-only: runs a full resumable upload of deterministic
+    filler bytes (never real report data) to isolate what's behind the
+    repeated real HTTP 502s the Production AuthorizedSession uploader trial
+    saw at a fixed byte offset. Never touches the normal report-generation
+    upload path (drive_io.upload_xlsx_to_drive, unchanged) or accepts a
+    folder/URL from the caller -- the target folder is this server's own
+    ad-revenue output folder config."""
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+
+    if "file_size_bytes" not in payload:
+        return jsonify({"error": "invalid_file_size_bytes"}), 400
+    file_size_bytes = _validate_strict_positive_int(
+        payload["file_size_bytes"], max_value=_DRIVE_DIAGNOSTIC_MAX_FILE_SIZE_BYTES
+    )
+    if file_size_bytes is None:
+        return jsonify({"error": "invalid_file_size_bytes"}), 400
+
+    if "chunk_size_bytes" not in payload:
+        return jsonify({"error": "invalid_chunk_size_bytes"}), 400
+    chunk_size_bytes = _validate_strict_positive_int(payload["chunk_size_bytes"])
+    if chunk_size_bytes is None or chunk_size_bytes % _FULL_DIAGNOSTIC_CHUNK_SIZE_UNIT != 0:
+        return jsonify({"error": "invalid_chunk_size_bytes"}), 400
+
+    connection_mode = payload.get("connection_mode")
+    if not isinstance(connection_mode, str) or connection_mode not in (
+        "reuse",
+        "fresh_per_request",
+    ):
+        return jsonify({"error": "invalid_connection_mode"}), 400
+
+    try:
+        import drive_io
+        from jumpplus_ad_revenue_report import default_output_folder_id
+
+        result = drive_io.run_full_resumable_diagnostic(
+            file_size_bytes=file_size_bytes,
+            chunk_size_bytes=chunk_size_bytes,
+            connection_mode=connection_mode,
+            folder_id=default_output_folder_id(),
+        )
+    except Exception as exc:
+        logging.error("ICE_REPORT_DRIVE_FULL_DIAGNOSTIC_FAILED reason=%s", type(exc).__name__)
+        _log_admin_audit_event(
+            action="drive_resumable_full_diagnostic",
+            result="failure",
+            target_type="admin_api",
+            target_id="drive_resumable_full_diagnostic",
+            status_code=500,
+            reason=type(exc).__name__,
+        )
+        return jsonify({"error": "diagnostic_failed"}), 500
+
+    _log_admin_audit_event(
+        action="drive_resumable_full_diagnostic",
+        result=result.get("status", "unknown"),
+        target_type="admin_api",
+        target_id="drive_resumable_full_diagnostic",
+        status_code=200,
+        detail={
+            "connection_mode": connection_mode,
+            "confirmed_offset": result.get("confirmed_offset"),
+            "request_count": len(result.get("requests", [])),
+        },
+    )
+    return jsonify(result)
+
+
 @app.post("/admin/ad-revenue/scheduled-sync")
 def scheduled_sync_jumpplus_ad_revenue():
     ok, reason = _check_ad_revenue_sync_scheduler_auth()
