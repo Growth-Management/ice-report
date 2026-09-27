@@ -89,8 +89,6 @@ def _run_with_scripted_responses(responses, *, connection_mode="reuse", file_siz
             self._responses = remaining  # shared, mutated in place
 
     with mock.patch.object(drive_io, "_drive_credentials", return_value=object()), mock.patch.object(
-        drive_io, "_authorized_session", side_effect=lambda: _Shared()
-    ), mock.patch.object(
         drive_io, "_new_authorized_session", side_effect=lambda creds: _Shared()
     ):
         return drive_io.run_full_resumable_diagnostic(
@@ -99,6 +97,86 @@ def _run_with_scripted_responses(responses, *, connection_mode="reuse", file_siz
             connection_mode=connection_mode,
             folder_id="folder-1",
         )
+
+
+class CredentialAndSessionConstructionTests(unittest.TestCase):
+    """Both connection_mode values must build their AuthorizedSession(s)
+    from the exact same credentials object, fetched exactly once -- the
+    only variable this diagnostic isolates is HTTP session/connection
+    reuse, never how credentials happen to be obtained."""
+
+    def _run(self, responses, *, connection_mode, file_size_bytes=300, chunk_size_bytes=100):
+        _FakeSession._all_instances = []
+        remaining = list(responses)
+        sentinel_credentials = object()
+
+        class _Shared(_FakeSession):
+            def __init__(self, _creds=None):
+                super().__init__([])
+                self._responses = remaining
+
+        with mock.patch.object(
+            drive_io, "_drive_credentials", return_value=sentinel_credentials
+        ) as creds_mock, mock.patch.object(
+            drive_io, "_new_authorized_session", side_effect=lambda creds: _Shared(creds)
+        ) as session_mock:
+            result = drive_io.run_full_resumable_diagnostic(
+                file_size_bytes=file_size_bytes,
+                chunk_size_bytes=chunk_size_bytes,
+                connection_mode=connection_mode,
+                folder_id="folder-1",
+            )
+        return result, creds_mock, session_mock, sentinel_credentials
+
+    def test_drive_credentials_fetched_exactly_once_per_run(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(200, json_body={"id": "f1"}),
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            _, creds_mock, _, _ = self._run(
+                responses, connection_mode="reuse", file_size_bytes=50, chunk_size_bytes=1000
+            )
+        creds_mock.assert_called_once()
+
+    def test_reuse_mode_constructs_new_authorized_session_exactly_once(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),
+            _FakeResponse(200, json_body={"id": "f1"}),
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            _, _, session_mock, _ = self._run(responses, connection_mode="reuse")
+        session_mock.assert_called_once()
+
+    def test_fresh_per_request_constructs_new_authorized_session_per_http_request(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),
+            _FakeResponse(200, json_body={"id": "f1"}),
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            _, _, session_mock, _ = self._run(responses, connection_mode="fresh_per_request")
+        # init + chunk1 (308) + chunk2 (200, completes) = 3 HTTP requests
+        self.assertEqual(session_mock.call_count, 3)
+
+    def test_all_authorized_sessions_built_from_the_same_credentials_object(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),
+            _FakeResponse(200, json_body={"id": "f1"}),
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            _, _, session_mock, sentinel_credentials = self._run(
+                responses, connection_mode="fresh_per_request"
+            )
+        self.assertGreater(len(session_mock.call_args_list), 1)
+        for call in session_mock.call_args_list:
+            self.assertIs(call.args[0], sentinel_credentials)
 
 
 class ConnectionModeTests(unittest.TestCase):
@@ -133,7 +211,10 @@ class ConnectionModeTests(unittest.TestCase):
         for inst in instances:
             self.assertTrue(inst.closed, "each fresh_per_request session must be closed after its request")
 
-    def test_reuse_mode_session_is_not_closed_between_requests(self):
+    def test_reuse_session_is_closed_exactly_once_at_diagnostic_end(self):
+        # The single reused session must survive across every request
+        # (never closed mid-run, which would break connection reuse) and
+        # be closed exactly once, at the very end of the diagnostic.
         responses = [
             _FakeResponse(200, headers={"Location": _LOCATION}),
             _FakeResponse(200, json_body={"id": "f1"}),
@@ -145,7 +226,20 @@ class ConnectionModeTests(unittest.TestCase):
             )
         instances = _FakeSession._all_instances
         self.assertEqual(len(instances), 1)
-        self.assertFalse(instances[0].closed)
+        self.assertTrue(instances[0].closed)
+
+    def test_reuse_session_is_closed_even_on_failure(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(404),  # init succeeds but chunk PUT gets an unexpected status
+        ]
+        with mock.patch.object(drive_io, "get_drive_service"):
+            _run_with_scripted_responses(
+                responses, connection_mode="reuse", file_size_bytes=50, chunk_size_bytes=1000
+            )
+        instances = _FakeSession._all_instances
+        self.assertEqual(len(instances), 1)
+        self.assertTrue(instances[0].closed)
 
     def test_resumable_session_url_is_identical_across_requests_in_both_modes(self):
         for mode in ("reuse", "fresh_per_request"):
@@ -253,6 +347,82 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(init_entries), 1)
 
 
+class TerminalObservationOnRecoverExhaustionTests(unittest.TestCase):
+    """Once the bounded recover budget (_UPLOAD_MAX_RECOVER_ATTEMPTS) is
+    exhausted, the diagnostic must run exactly one more status query
+    purely to observe Drive's actual final state -- never to resume the
+    upload, restart the resumable session, or spend additional recover
+    budget. A client-side 502 does not guarantee Drive never received
+    the bytes."""
+
+    FILE_SIZE = 10 * 1024 * 1024  # 10 MiB
+    CHUNK_SIZE = 2 * 1024 * 1024  # 2 MiB
+
+    @staticmethod
+    def _responses_stuck_at_2mib(terminal_response):
+        return [
+            _FakeResponse(200, headers={"Location": _LOCATION}),  # init
+            _FakeResponse(308, headers={"Range": "bytes=0-2097151"}),  # chunk 1: advances to 2 MiB
+            _FakeResponse(502),  # chunk 2 attempt 1 fails
+            _FakeResponse(308, headers={"Range": "bytes=0-2097151"}),  # in-budget status query: no progress
+            _FakeResponse(502),  # chunk 2 attempt 2 fails
+            _FakeResponse(308, headers={"Range": "bytes=0-2097151"}),  # in-budget status query: no progress
+            _FakeResponse(502),  # chunk 2 attempt 3 fails
+            _FakeResponse(308, headers={"Range": "bytes=0-2097151"}),  # in-budget status query: no progress
+            _FakeResponse(502),  # chunk 2 attempt 4 fails -- recover budget now exhausted
+            terminal_response,  # the ONE terminal observation query
+        ]
+
+    def test_case_a_terminal_query_confirms_no_further_progress(self):
+        responses = self._responses_stuck_at_2mib(_FakeResponse(308, headers={"Range": "bytes=0-2097151"}))
+        with mock.patch.object(drive_io, "get_drive_service"):
+            result = _run_with_scripted_responses(
+                responses, chunk_size_bytes=self.CHUNK_SIZE, file_size_bytes=self.FILE_SIZE
+            )
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["confirmed_offset"], 2097152)
+
+    def test_case_b_terminal_query_reveals_drive_actually_progressed_further(self):
+        responses = self._responses_stuck_at_2mib(_FakeResponse(308, headers={"Range": "bytes=0-3145727"}))
+        with mock.patch.object(drive_io, "get_drive_service"):
+            result = _run_with_scripted_responses(
+                responses, chunk_size_bytes=self.CHUNK_SIZE, file_size_bytes=self.FILE_SIZE
+            )
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["confirmed_offset"], 3145728)
+
+    def test_case_c_terminal_query_reveals_upload_actually_completed(self):
+        responses = self._responses_stuck_at_2mib(_FakeResponse(200, json_body={"id": "f1"}))
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            result = _run_with_scripted_responses(
+                responses, chunk_size_bytes=self.CHUNK_SIZE, file_size_bytes=self.FILE_SIZE
+            )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["confirmed_offset"], self.FILE_SIZE)
+        self.assertEqual(result["cleanup"], "trashed")
+
+    def test_case_d_terminal_query_itself_fails_reports_last_known_offset(self):
+        responses = self._responses_stuck_at_2mib(TimeoutError("terminal query boom"))
+        with mock.patch.object(drive_io, "get_drive_service"):
+            result = _run_with_scripted_responses(
+                responses, chunk_size_bytes=self.CHUNK_SIZE, file_size_bytes=self.FILE_SIZE
+            )
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["confirmed_offset"], 2097152)
+
+    def test_terminal_observation_never_retries_chunk_or_opens_new_session(self):
+        responses = self._responses_stuck_at_2mib(_FakeResponse(308, headers={"Range": "bytes=0-2097151"}))
+        with mock.patch.object(drive_io, "get_drive_service"):
+            result = _run_with_scripted_responses(
+                responses, chunk_size_bytes=self.CHUNK_SIZE, file_size_bytes=self.FILE_SIZE
+            )
+        init_entries = [r for r in result["requests"] if r["kind"] == "init"]
+        self.assertEqual(len(init_entries), 1, "no new resumable session may be opened")
+        # init(1) + chunk1(1) + 3x(chunk-fail + in-budget status query)(6) + chunk-fail#4(1) + terminal query(1) = 10
+        self.assertEqual(len(result["requests"]), 10)
+
+
 class ConfirmedOffsetOnStatusQueryCompleteTests(unittest.TestCase):
     """A status query reporting 200/201 means Drive considers the upload
     fully complete -- confirmed_offset must always be file_size_bytes in
@@ -326,6 +496,32 @@ class SecurityTests(unittest.TestCase):
             get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
             with self.assertLogs(level="WARNING") as logs:
                 result = _run_with_scripted_responses(responses)
+        joined = "\n".join(logs.output)
+        self.assertNotIn(secret_location, joined)
+        self.assertNotIn("SECRET_TOKEN", joined)
+        self.assertNotIn("LEAKED_SECRET", joined)
+        self.assertNotIn(secret_location, str(result))
+        self.assertNotIn("SECRET_TOKEN", str(result))
+
+    def test_terminal_observation_never_leaks_session_url_or_secrets(self):
+        secret_location = "https://secret-session-url.example/abc?upload_id=SECRET_TOKEN"
+        responses = [
+            _FakeResponse(200, headers={"Location": secret_location}),  # init
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),  # chunk 1: advances to offset 100
+            _FakeResponse(502),  # chunk 2 attempt 1 fails
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),  # in-budget status query: no progress
+            _FakeResponse(502),  # chunk 2 attempt 2 fails
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),  # in-budget status query: no progress
+            _FakeResponse(502),  # chunk 2 attempt 3 fails
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),  # in-budget status query: no progress
+            _FakeResponse(502),  # chunk 2 attempt 4 fails -- recover budget exhausted
+            TimeoutError("terminal query boom access_token=LEAKED_SECRET"),  # terminal observation query fails
+        ]
+        with mock.patch.object(drive_io, "get_drive_service"):
+            with self.assertLogs(level="WARNING") as logs:
+                result = _run_with_scripted_responses(responses, chunk_size_bytes=100, file_size_bytes=300)
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["confirmed_offset"], 100)
         joined = "\n".join(logs.output)
         self.assertNotIn(secret_location, joined)
         self.assertNotIn("SECRET_TOKEN", joined)

@@ -1134,11 +1134,21 @@ def run_full_resumable_diagnostic(
                               request, while the Drive resumable session
                               URL itself is unchanged throughout.
 
+    Both modes build their AuthorizedSession(s) from the exact same
+    credentials object (fetched once, up front, via _drive_credentials())
+    -- the only variable this diagnostic isolates is whether the HTTP
+    session/connection pool is reused across requests, not how
+    credentials happen to be obtained.
+
     Deliberately does not restart the resumable session on an expired/404
     response in this first diagnostic pass -- silently working around a
     stuck session would hide exactly the behavior this exists to observe.
     Bounded recovery (status-query-then-resume, never a blind resend)
-    still applies, same bound as the production uploader.
+    still applies, same bound as the production uploader. Once that bound
+    is exhausted, a single terminal status query (never a retry, never a
+    new resumable session, never additional recover budget) observes
+    Drive's actual final state before reporting failure -- see
+    _full_diagnostic_terminal_observation.
     """
     if connection_mode not in _FULL_DIAGNOSTIC_CONNECTION_MODES:
         raise ValueError(f"invalid connection_mode: {connection_mode!r}")
@@ -1154,11 +1164,20 @@ def run_full_resumable_diagnostic(
         nonlocal reused_session
         if connection_mode == FULL_DIAGNOSTIC_CONNECTION_MODE_REUSE:
             if reused_session is None:
-                reused_session = _authorized_session()
+                reused_session = _new_authorized_session(credentials)
             return reused_session, False
         return _new_authorized_session(credentials), True
 
-    def _record(kind: str, *, offset_start=None, offset_end=None, http_status=None, elapsed_ms=None, exc=None) -> dict:
+    def _record(
+        kind: str,
+        *,
+        offset_start=None,
+        offset_end=None,
+        http_status=None,
+        elapsed_ms=None,
+        exc=None,
+        confirmed_offset=None,
+    ) -> dict:
         nonlocal request_index
         request_index += 1
         entry: dict = {"kind": kind, "request_index": request_index}
@@ -1170,6 +1189,8 @@ def run_full_resumable_diagnostic(
             entry["http_status"] = http_status
         if elapsed_ms is not None:
             entry["elapsed_ms"] = elapsed_ms
+        if confirmed_offset is not None:
+            entry["confirmed_offset"] = confirmed_offset
         module = type_name = errno = None
         if exc is not None:
             module, type_name, errno = _sanitized_exception_fields(exc)
@@ -1179,8 +1200,8 @@ def run_full_resumable_diagnostic(
         requests_log.append(entry)
         logging.warning(
             "ICE_REPORT_DRIVE_FULL_DIAGNOSTIC connection_mode=%s kind=%s request_index=%d "
-            "offset_start=%s offset_end=%s http_status=%s elapsed_ms=%s recover_count=%d "
-            "exception_module=%s exception_type=%s errno=%s",
+            "offset_start=%s offset_end=%s http_status=%s elapsed_ms=%s confirmed_offset=%s "
+            "recover_count=%d exception_module=%s exception_type=%s errno=%s",
             connection_mode,
             kind,
             request_index,
@@ -1188,6 +1209,7 @@ def run_full_resumable_diagnostic(
             offset_end,
             http_status,
             elapsed_ms,
+            confirmed_offset,
             recover_count,
             module,
             type_name,
@@ -1208,113 +1230,149 @@ def run_full_resumable_diagnostic(
             result["cleanup"] = cleanup
         return result
 
-    # -- session init --
-    session, should_close = _session_for_request()
-    started = time.monotonic()
     try:
-        response = session.post(
-            DRIVE_UPLOAD_ENDPOINT,
-            params={
-                "uploadType": "resumable",
-                "supportsAllDrives": "true",
-                "fields": "id,name,webViewLink",
-            },
-            headers={
-                "Content-Type": "application/json; charset=UTF-8",
-                "X-Upload-Content-Type": DRIVE_XLSX_MIME_TYPE,
-                "X-Upload-Content-Length": str(file_size_bytes),
-            },
-            json={"name": file_name, "parents": [folder_id]},
-            timeout=_DIAGNOSTIC_INIT_TIMEOUT_S,
-            allow_redirects=False,
-        )
-    except Exception as exc:
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        _record("init", elapsed_ms=elapsed_ms, exc=exc)
-        if should_close:
-            session.close()
-        return _finalize("failure", 0)
-
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    session_url = response.headers.get("Location")
-    status_code = response.status_code
-    response.close()
-    _record("init", http_status=status_code, elapsed_ms=elapsed_ms)
-    if should_close:
-        session.close()
-
-    if not (200 <= status_code < 300 and session_url):
-        return _finalize("failure", 0)
-
-    offset = 0
-    chunk_index = 0
-
-    while offset < file_size_bytes:
-        chunk_index += 1
-        chunk_len = min(chunk_size_bytes, file_size_bytes - offset)
-        end = offset + chunk_len - 1
-        data = b"D" * chunk_len
-
+        # -- session init --
         session, should_close = _session_for_request()
         started = time.monotonic()
         try:
-            response = session.put(
-                session_url,
-                data=data,
-                headers={
-                    "Content-Length": str(chunk_len),
-                    "Content-Range": f"bytes {offset}-{end}/{file_size_bytes}",
+            response = session.post(
+                DRIVE_UPLOAD_ENDPOINT,
+                params={
+                    "uploadType": "resumable",
+                    "supportsAllDrives": "true",
+                    "fields": "id,name,webViewLink",
                 },
-                timeout=_DIAGNOSTIC_PUT_TIMEOUT_S,
+                headers={
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Type": DRIVE_XLSX_MIME_TYPE,
+                    "X-Upload-Content-Length": str(file_size_bytes),
+                },
+                json={"name": file_name, "parents": [folder_id]},
+                timeout=_DIAGNOSTIC_INIT_TIMEOUT_S,
                 allow_redirects=False,
             )
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            _record("chunk", offset_start=offset, offset_end=end, elapsed_ms=elapsed_ms, exc=exc)
+            _record("init", elapsed_ms=elapsed_ms, exc=exc)
             if should_close:
                 session.close()
-            recover_count += 1
-            if recover_count > _UPLOAD_MAX_RECOVER_ATTEMPTS:
-                return _finalize("failure", offset)
-            outcome, payload = _full_diagnostic_query_status(
-                _session_for_request, _record, session_url, file_size_bytes
-            )
-            if outcome == "resume":
-                offset = payload
-                continue
-            if outcome == "complete":
-                return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
-            return _finalize("failure", offset)
+            return _finalize("failure", 0)
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        session_url = response.headers.get("Location")
         status_code = response.status_code
+        response.close()
+        _record("init", http_status=status_code, elapsed_ms=elapsed_ms)
+        if should_close:
+            session.close()
 
-        if status_code in (200, 201):
-            result = response.json()
+        if not (200 <= status_code < 300 and session_url):
+            return _finalize("failure", 0)
+
+        offset = 0
+        chunk_index = 0
+
+        while offset < file_size_bytes:
+            chunk_index += 1
+            chunk_len = min(chunk_size_bytes, file_size_bytes - offset)
+            end = offset + chunk_len - 1
+            data = b"D" * chunk_len
+
+            session, should_close = _session_for_request()
+            started = time.monotonic()
+            try:
+                response = session.put(
+                    session_url,
+                    data=data,
+                    headers={
+                        "Content-Length": str(chunk_len),
+                        "Content-Range": f"bytes {offset}-{end}/{file_size_bytes}",
+                    },
+                    timeout=_DIAGNOSTIC_PUT_TIMEOUT_S,
+                    allow_redirects=False,
+                )
+            except Exception as exc:
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                _record("chunk", offset_start=offset, offset_end=end, elapsed_ms=elapsed_ms, exc=exc)
+                if should_close:
+                    session.close()
+                recover_count += 1
+                if recover_count > _UPLOAD_MAX_RECOVER_ATTEMPTS:
+                    return _full_diagnostic_terminal_observation(
+                        _session_for_request, _record, session_url, file_size_bytes, offset, _finalize
+                    )
+                outcome, payload = _full_diagnostic_query_status(
+                    _session_for_request, _record, session_url, file_size_bytes
+                )
+                if outcome == "resume":
+                    offset = payload
+                    continue
+                if outcome == "complete":
+                    return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
+                return _finalize("failure", offset)
+
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            status_code = response.status_code
+
+            if status_code in (200, 201):
+                result = response.json()
+                response.close()
+                if should_close:
+                    session.close()
+                _record(
+                    "chunk",
+                    offset_start=offset,
+                    offset_end=end,
+                    http_status=status_code,
+                    elapsed_ms=elapsed_ms,
+                    confirmed_offset=file_size_bytes,
+                )
+                return _full_diagnostic_cleanup_and_finalize(_finalize, result, file_size_bytes)
+
+            if status_code == 308:
+                range_header = response.headers.get("Range")
+                response.close()
+                if should_close:
+                    session.close()
+                next_offset = _parse_range_header(range_header)
+                _record(
+                    "chunk",
+                    offset_start=offset,
+                    offset_end=end,
+                    http_status=status_code,
+                    elapsed_ms=elapsed_ms,
+                    confirmed_offset=next_offset,
+                )
+                if next_offset is not None:
+                    offset = next_offset
+                    recover_count = 0
+                    continue
+                # Range missing/unparseable -- never guess end+1, query status.
+                recover_count += 1
+                if recover_count > _UPLOAD_MAX_RECOVER_ATTEMPTS:
+                    return _full_diagnostic_terminal_observation(
+                        _session_for_request, _record, session_url, file_size_bytes, offset, _finalize
+                    )
+                outcome, payload = _full_diagnostic_query_status(
+                    _session_for_request, _record, session_url, file_size_bytes
+                )
+                if outcome == "resume":
+                    offset = payload
+                    continue
+                if outcome == "complete":
+                    return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
+                return _finalize("failure", offset)
+
             response.close()
             if should_close:
                 session.close()
             _record("chunk", offset_start=offset, offset_end=end, http_status=status_code, elapsed_ms=elapsed_ms)
-            return _full_diagnostic_cleanup_and_finalize(_finalize, result, file_size_bytes)
-
-        if status_code == 308:
-            range_header = response.headers.get("Range")
-            response.close()
-            if should_close:
-                session.close()
-            _record("chunk", offset_start=offset, offset_end=end, http_status=status_code, elapsed_ms=elapsed_ms)
-            next_offset = _parse_range_header(range_header)
-            if next_offset is not None:
-                offset = next_offset
-                recover_count = 0
-                continue
-            # Range missing/unparseable -- never guess end+1, query status.
             recover_count += 1
             if recover_count > _UPLOAD_MAX_RECOVER_ATTEMPTS:
-                return _finalize("failure", offset)
-            outcome, payload = _full_diagnostic_query_status(
-                _session_for_request, _record, session_url, file_size_bytes
-            )
+                return _full_diagnostic_terminal_observation(
+                    _session_for_request, _record, session_url, file_size_bytes, offset, _finalize
+                )
+            outcome, payload = _full_diagnostic_query_status(_session_for_request, _record, session_url, file_size_bytes)
             if outcome == "resume":
                 offset = payload
                 continue
@@ -1322,22 +1380,16 @@ def run_full_resumable_diagnostic(
                 return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
             return _finalize("failure", offset)
 
-        response.close()
-        if should_close:
-            session.close()
-        _record("chunk", offset_start=offset, offset_end=end, http_status=status_code, elapsed_ms=elapsed_ms)
-        recover_count += 1
-        if recover_count > _UPLOAD_MAX_RECOVER_ATTEMPTS:
-            return _finalize("failure", offset)
-        outcome, payload = _full_diagnostic_query_status(_session_for_request, _record, session_url, file_size_bytes)
-        if outcome == "resume":
-            offset = payload
-            continue
-        if outcome == "complete":
-            return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
         return _finalize("failure", offset)
-
-    return _finalize("failure", offset)
+    finally:
+        # Close the diagnostic's own reused HTTP session exactly once, at
+        # the very end, regardless of how the diagnostic exits (success,
+        # failure, or an uncaught error) -- never mid-run, so TEST 1's
+        # connection-reuse condition (one session serving every request)
+        # is not disturbed. fresh_per_request already closes its session
+        # after each individual request.
+        if connection_mode == FULL_DIAGNOSTIC_CONNECTION_MODE_REUSE and reused_session is not None:
+            reused_session.close()
 
 
 def _full_diagnostic_query_status(session_for_request, record, session_url: str, total_size_bytes: int):
@@ -1372,8 +1424,9 @@ def _full_diagnostic_query_status(session_for_request, record, session_url: str,
         response.close()
         if should_close:
             session.close()
-        record("status_query", http_status=status_code, elapsed_ms=elapsed_ms)
-        return "resume", (next_offset if next_offset is not None else 0)
+        confirmed_offset = next_offset if next_offset is not None else 0
+        record("status_query", http_status=status_code, elapsed_ms=elapsed_ms, confirmed_offset=confirmed_offset)
+        return "resume", confirmed_offset
     if status_code in (200, 201):
         try:
             result = response.json()
@@ -1382,13 +1435,35 @@ def _full_diagnostic_query_status(session_for_request, record, session_url: str,
         response.close()
         if should_close:
             session.close()
-        record("status_query", http_status=status_code, elapsed_ms=elapsed_ms)
+        record(
+            "status_query", http_status=status_code, elapsed_ms=elapsed_ms, confirmed_offset=total_size_bytes
+        )
         return "complete", result
     response.close()
     if should_close:
         session.close()
     record("status_query", http_status=status_code, elapsed_ms=elapsed_ms)
     return "expired" if status_code == 404 else "unknown", None
+
+
+def _full_diagnostic_terminal_observation(
+    session_for_request, record, session_url: str, total_size_bytes: int, current_offset: int, finalize
+) -> dict:
+    """Runs exactly one status query once run_full_resumable_diagnostic's
+    bounded recover budget is exhausted, purely to observe Drive's actual
+    final state -- never to resume the upload, never to restart the
+    resumable session, never to spend additional recover budget. A
+    client-side chunk failure (502, a dropped connection, an unparseable
+    308) does not guarantee Drive never received those bytes, so the
+    reported confirmed_offset must reflect Drive's own view whenever this
+    query resolves it, rather than the last byte offset the client
+    happened to attempt."""
+    outcome, payload = _full_diagnostic_query_status(session_for_request, record, session_url, total_size_bytes)
+    if outcome == "complete":
+        return _full_diagnostic_cleanup_and_finalize(finalize, payload, total_size_bytes)
+    if outcome == "resume":
+        return finalize("failure", payload)
+    return finalize("failure", current_offset)
 
 
 def _full_diagnostic_cleanup_and_finalize(finalize, result: dict | None, confirmed_offset: int) -> dict:
