@@ -1283,7 +1283,7 @@ def run_full_resumable_diagnostic(
                 offset = payload
                 continue
             if outcome == "complete":
-                return _full_diagnostic_cleanup_and_finalize(_finalize, payload, offset)
+                return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
             return _finalize("failure", offset)
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1319,7 +1319,7 @@ def run_full_resumable_diagnostic(
                 offset = payload
                 continue
             if outcome == "complete":
-                return _full_diagnostic_cleanup_and_finalize(_finalize, payload, offset)
+                return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
             return _finalize("failure", offset)
 
         response.close()
@@ -1334,7 +1334,7 @@ def run_full_resumable_diagnostic(
             offset = payload
             continue
         if outcome == "complete":
-            return _full_diagnostic_cleanup_and_finalize(_finalize, payload, offset)
+            return _full_diagnostic_cleanup_and_finalize(_finalize, payload, file_size_bytes)
         return _finalize("failure", offset)
 
     return _finalize("failure", offset)

@@ -253,6 +253,66 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(init_entries), 1)
 
 
+class ConfirmedOffsetOnStatusQueryCompleteTests(unittest.TestCase):
+    """A status query reporting 200/201 means Drive considers the upload
+    fully complete -- confirmed_offset must always be file_size_bytes in
+    that case, never whatever byte offset was last attempted/confirmed
+    before the status query ran. Reporting the stale offset would make a
+    healthy upload look like it got stuck partway through."""
+
+    def test_case_a_stale_offset_after_partial_progress_then_complete(self):
+        # chunk 1 advances via 308 to offset 100, chunk 2 fails outright,
+        # and the status query says the whole 300-byte upload is done.
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(308, headers={"Range": "bytes=0-99"}),  # chunk 1
+            _FakeResponse(502),  # chunk 2 (offset 100) fails outright
+            _FakeResponse(200, json_body={"id": "f1"}),  # status query: complete
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            result = _run_with_scripted_responses(responses, chunk_size_bytes=100, file_size_bytes=300)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["confirmed_offset"], 300)
+        self.assertEqual(result["cleanup"], "trashed")
+
+    def test_transport_exception_then_status_query_complete(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            TimeoutError("boom"),  # chunk 1 raises
+            _FakeResponse(200, json_body={"id": "f1"}),  # status query: complete
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            result = _run_with_scripted_responses(responses, chunk_size_bytes=100, file_size_bytes=300)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["confirmed_offset"], 300)
+
+    def test_missing_range_then_status_query_complete(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(308, headers={}),  # chunk 1: 308, no Range
+            _FakeResponse(200, json_body={"id": "f1"}),  # status query: complete
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            result = _run_with_scripted_responses(responses, chunk_size_bytes=100, file_size_bytes=300)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["confirmed_offset"], 300)
+
+    def test_unexpected_http_status_then_status_query_complete(self):
+        responses = [
+            _FakeResponse(200, headers={"Location": _LOCATION}),
+            _FakeResponse(502),  # chunk 1: unexpected status
+            _FakeResponse(200, json_body={"id": "f1"}),  # status query: complete
+        ]
+        with mock.patch.object(drive_io, "get_drive_service") as get_service:
+            get_service.return_value.files.return_value.update.return_value.execute.return_value = {}
+            result = _run_with_scripted_responses(responses, chunk_size_bytes=100, file_size_bytes=300)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["confirmed_offset"], 300)
+
+
 class SecurityTests(unittest.TestCase):
     def test_session_url_and_secrets_never_logged_or_returned(self):
         secret_location = "https://secret-session-url.example/abc?upload_id=SECRET_TOKEN"
@@ -373,6 +433,28 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         run_mock.assert_not_called()
 
+    def test_file_size_bytes_numeric_string_rejected(self):
+        # no implicit coercion -- "10143332" must not silently become 10143332
+        resp, run_mock = self._post(
+            {"file_size_bytes": "10143332", "chunk_size_bytes": 1048576, "connection_mode": "reuse"}
+        )
+        self.assertEqual(resp.status_code, 400)
+        run_mock.assert_not_called()
+
+    def test_file_size_bytes_float_rejected(self):
+        resp, run_mock = self._post(
+            {"file_size_bytes": 10143332.9, "chunk_size_bytes": 1048576, "connection_mode": "reuse"}
+        )
+        self.assertEqual(resp.status_code, 400)
+        run_mock.assert_not_called()
+
+    def test_file_size_bytes_null_rejected(self):
+        resp, run_mock = self._post(
+            {"file_size_bytes": None, "chunk_size_bytes": 1048576, "connection_mode": "reuse"}
+        )
+        self.assertEqual(resp.status_code, 400)
+        run_mock.assert_not_called()
+
     def test_chunk_size_not_multiple_of_256kib_rejected(self):
         resp, run_mock = self._post(
             {"file_size_bytes": 1000, "chunk_size_bytes": 100, "connection_mode": "reuse"}
@@ -383,6 +465,20 @@ class EndpointTests(unittest.TestCase):
     def test_chunk_size_bool_rejected(self):
         resp, run_mock = self._post(
             {"file_size_bytes": 1000, "chunk_size_bytes": True, "connection_mode": "reuse"}
+        )
+        self.assertEqual(resp.status_code, 400)
+        run_mock.assert_not_called()
+
+    def test_chunk_size_numeric_string_rejected(self):
+        resp, run_mock = self._post(
+            {"file_size_bytes": 1000, "chunk_size_bytes": "1048576", "connection_mode": "reuse"}
+        )
+        self.assertEqual(resp.status_code, 400)
+        run_mock.assert_not_called()
+
+    def test_chunk_size_float_rejected(self):
+        resp, run_mock = self._post(
+            {"file_size_bytes": 1000, "chunk_size_bytes": 1048576.0, "connection_mode": "reuse"}
         )
         self.assertEqual(resp.status_code, 400)
         run_mock.assert_not_called()

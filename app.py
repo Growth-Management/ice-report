@@ -3581,20 +3581,20 @@ _FULL_DIAGNOSTIC_CHUNK_SIZE_UNIT = 256 * 1024
 
 
 def _validate_strict_positive_int(value, *, max_value=None):
-    """Rejects bool (int subclass -- int(True)==1 would otherwise silently
-    pass), non-int-parseable values, and anything <= 0 or over max_value.
-    Returns the parsed int, or None if invalid."""
-    if isinstance(value, bool):
+    """Accepts only an actual JSON integer (Python int, excluding bool --
+    an int subclass where int(True)==1 would otherwise silently pass) that
+    is > 0 and, if given, <= max_value. Deliberately does not coerce
+    numeric strings ("1048576") or floats (1048576.9, 1048576.0) -- this
+    diagnostic endpoint's observations must reflect exactly what the
+    caller sent, not an implicit type conversion. Returns the int, or
+    None if invalid."""
+    if not isinstance(value, int) or isinstance(value, bool):
         return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
+    if value <= 0:
         return None
-    if parsed <= 0:
+    if max_value is not None and value > max_value:
         return None
-    if max_value is not None and parsed > max_value:
-        return None
-    return parsed
+    return value
 
 
 @app.post("/admin/drive/resumable-full-diagnostic")
