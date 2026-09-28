@@ -695,23 +695,31 @@ IAM・Sheets OAuth整備・deployが完了した後、Cloud Scheduler有効化�
 本番手動受入での実ファイルによるend-to-endの生成確認を必須項目として残す**(動画リワード/APP_2は
 このセッションでローカル生成テスト済みだが、それでも本番相当環境での最終確認として同様に実施する):
 
-- [ ] `video-reward`: `target_month=2026-08-01` で手動生成し、Driveに出力ファイルが作成されることを確認
-- [ ] `video-reward`: 生成物を**Excel Desktopで実際に開き**、修復ダイアログが一切表示されないことを確認
+- [x] `video-reward`: `target_month=2026-08-01` で手動生成し、Driveに出力ファイルが作成されることを確認
+      **(2026-09-28 PASS: `DRIVE_UPLOAD_TRANSPORT=authorized_session` でのProduction生成完走、
+      file ID `1TTQJiOJd7jjBBV5b4GRftrQ12bgH7Wi-`)**
+- [x] `video-reward`: 生成物を**Excel Desktopで実際に開き**、修復ダイアログが一切表示されないことを確認
       (最終PASS条件はこれのみ -- openpyxl reopen成功/ZIP testzip成功/XML parse成功は補助確認に過ぎない)。
       サマリC4=14,017,945円、iOS/Android/全体シートのコイン消費数、数式(`=SUM(話データ_iOS[コイン消費数])`
-      等)が壊れていないことも確認
-- [ ] `app2`: `target_month=2026-08-01` で手動生成し、**Excel Desktopで修復ダイアログが出ないこと**、
+      等)が壊れていないことも確認 **(2026-09-28 PASS)**
+- [x] `app2`: `target_month=2026-08-01` で手動生成し、**Excel Desktopで修復ダイアログが出ないこと**、
       サマリC4=9,789,547円、iOS/Android/全体シートの広告表示数、`connections.xml`/`queryTables/*`が
-      Power Query機能ごと正常に開けること(作品別/作品別_2シート)を確認
-- [ ] `web`: `target_month=2026-08-01` で手動生成し、**Excel Desktopで修復ダイアログが出ないこと**、
+      Power Query機能ごと正常に開けること(作品別/作品別_2シート)を確認 **(2026-09-28 PASS。初回確認で
+      「作品別_2」列A(作品ID)が列幅8.25では`1E+08`等の指数表示になる不具合を発見し、APP_2 PQFREE
+      テンプレート(Drive file ID `1IsZCv8COFLAyPlo-FxOD7_dmKUbGO5GM`)の当該列幅を8.25→14に修正のうえ
+      再生成し、再度Excel Desktop確認してPASS)**
+- [x] `web`: `target_month=2026-08-01` で手動生成し、**Excel Desktopで修復ダイアログが出ないこと**、
       サマリの総計セル=734,139円、全体シートの広告表示数・書式・数式列(`広告売上`)が壊れていないことを確認
-- [ ] 3帳票とも、生成物のシート名・結合セルなし・印刷設定・列幅が元テンプレートと変わっていないことを
-      目視確認
-- [ ] スケジュール実行エンドポイントへ実際にOIDCトークン付きでリクエストし、`waiting`(未確定時)と
+      **(2026-09-28 PASS、file ID `12MbEUgQ3U0vrEDgVl8pOplHzS-ERUPXq`)**
+- [x] 3帳票とも、生成物のシート名・結合セルなし・印刷設定・列幅が元テンプレートと変わっていないことを
+      目視確認 **(2026-09-28 PASS)**
+- [x] スケジュール実行エンドポイントへ実際にOIDCトークン付きでリクエストし、`waiting`(未確定時)と
       `duplicate_scheduled_run`(重複時)の両方の応答を確認してから、Cloud Schedulerを有効化する
+      **(Scheduler有効化前のpreflightで実施、詳細は「Scheduler有効化」セクション参照)**
 
-**Scheduler有効化は、上記3帳票すべてがExcel Desktopで「修復なし」で開けることを確認するまでBLOCKED**
-(package-preserving writer導入PRの受け入れ条件、詳細はPR本文参照)。
+**3帳票すべてのExcel Desktop acceptanceがPASSしたため、上記によるScheduler有効化ブロックは解除**
+(package-preserving writer導入PRの受け入れ条件を満たした)。Scheduler有効化の可否は「Scheduler有効化」
+セクションの追加preflight(OIDC・並行実行・observability)に従う。
 
 ## Production OOM investigation(2026-09-25、report-generator-00124-zqp)
 
@@ -914,46 +922,48 @@ image rollback不要にロールバックできる。
 
 ## Status / open items(未解決事項)
 
-2026-09-25時点で残っているのは外部設定だけではない。少なくとも以下が未完了:
+### 2026-09-28時点で完了した項目
 
-- **AuthorizedSession uploaderのProduction完走検証**(PR #142): Production診断(CASE C)は
-  session initiation + first chunk PUTの1回のみの成功を確認したものであり、実際の
-  video-reward(~10MB)を最後まで完走できるかは未検証。ローカル統合テストでも
-  1回目は実HTTP 502を4回連続で受けて(bounded recoveryが正しく機能して)クリーンに
-  失敗、2回目は成功、という結果で、intermittentな挙動である可能性が高いが確証はない。
-  `DRIVE_UPLOAD_TRANSPORT=authorized_session`でのProduction試験生成がまだ実施されていない。
-- **video-rewardのformula/recalcation machine validation**(PR #140の効果測定): PR #140で
-  実装したcalculatedColumnFormula materialize・fullCalcOnLoad/forceFullCalcが、
-  Drive uploadが完走した実際のProduction生成物に対して機能しているかは、
-  upload自体が完走していないため未確認。
-- **video-rewardのExcel Desktop acceptance**: 上記2点が解決した生成物に対して、
-  作品別C/D列・サマリ数値・修復ダイアログ有無をユーザーが実機で確認する工程が未実施。
-- **app2/webのProduction E2E・Excel Desktop acceptance**: video-reward PASS後にのみ着手する
-  方針のため、video-rewardが確定するまで着手できない。
-- **Scheduler**: 3帳票すべてのExcel Desktop acceptanceがPASSするまでBLOCKED。
+- **AuthorizedSession uploaderのProduction完走検証**: `DRIVE_UPLOAD_TRANSPORT=authorized_session`
+  を有効化したうえで、full resumable diagnostic(PR #143、`POST /admin/drive/resumable-full-diagnostic`)
+  をreuseモードで実行し、10,143,332 bytes/1MiB chunkをrecoverなしで完走(status=success、
+  confirmed_offset=file_size、cleanup=trashed)。続けて実際のvideo-reward 2026-08生成をProductionで
+  1回実行し、Drive uploadが正常に完走することを確認。以前PR #142のtrialで観測された固定2MiBオフセット
+  での連続502は、この回では再現しなかった(intermittentの可能性が高いという既存の見立てのまま)。
+- **video-rewardのformula/recalculation machine validation**: 実際にDrive uploadが完走した
+  Production生成物(file ID `1TTQJiOJd7jjBBV5b4GRftrQ12bgH7Wi-`)に対し、作品別C/D列の
+  formula/cached value(798/798、欠損0)、`fullCalcOnLoad`/`forceFullCalc`、`calcChain.xml`不在、
+  PQ-free、package整合性をmachine validationで確認。全PASS。
+- **video-reward / APP_2 / WEBのExcel Desktop acceptance**: 3帳票ともユーザーが実機Excelで開き、
+  修復ダイアログなし・Power Query警告なし・サマリ数値/全体シートformula列に異常なしを確認してPASS。
+  APP_2確認時に「作品別_2」列A(作品ID)の列幅不足による`1E+08`等の指数表示を発見し、APP_2 PQFREE
+  テンプレート(Drive file ID `1IsZCv8COFLAyPlo-FxOD7_dmKUbGO5GM`)の列A幅を8.25→14へ修正・再生成の
+  うえ再確認してPASS(他の帳票仕様・数値・数式は無変更)。
+- **Scheduler acceptance gate**: 3帳票すべてのExcel Desktop acceptanceがPASSしたため解除。
+  Scheduler有効化自体は別途のOIDC/並行実行/observability preflightに従う(下記参照)。
+- **production deploy**: `report-generator`(image `ecb6233...`、`DRIVE_UPLOAD_TRANSPORT=authorized_session`
+  有効)・`report-generator-admin`(同imageへ同期、env/IAM/リソース設定は不変)ともに完了。
+- **Drive出力フォルダのruntime SAアクセス**: 3帳票とも実際に「広告売上」フォルダ
+  (`1jxC2AZ6eeDKx1wVr86kf4Ilw86FWTART`)へ正常にアップロードできたことを確認済み(実運用で解消)。
 
-このほか、外部設定(IAM・共有・deploy)に関する既知事項は以下の通り。
+### 残っている既知事項
 
-1. **Sheets OAuth認証情報・API有効化が未整備**: `ice-report-runner` への共有は行わない方針(確定、上記
+1. **Sheets OAuth認証情報・API有効化**: `ice-report-runner` への共有は行わない方針(確定、上記
    「Sheets認証」参照)。代わりに `sinohara@impress.co.jp` のユーザーOAuth(`SHEETS_AUTH_MODE=oauth`、
-   Drive OAuthと同じ方式)で読み取る。未実施なのは (a) 既存Drive OAuth credentialへの
-   `spreadsheets.readonly` スコープ追加、またはSheets専用credentialの発行、(b) Secret Manager登録、
-   (c) `ice-sh` プロジェクトでのSheets API有効化、(d) OAuth経由での実読み取り確認。
-2. **`dataset_exdata_tables` への書き込みIAM未付与**: 上記「BigQueryへの新規テーブルと権限」参照。
-   明示承認のうえ付与が必要。付与前は `ad_revenue_confirmed_monthly` が作成できず、同期は
-   `PermissionDenied` 系のエラーで失敗する(フェイルクローズ、想定通り)。
-3. **Drive出力フォルダのruntime SAアクセス未検証**: 「広告売上」フォルダがどのShared Drive配下にあり、
-   runtime SAがメンバーかどうかは未確認。PLUS point-sales レポートの前例と同様、`drive_not_found` に
-   なる場合はShared Drive共有設定の見直しが必要。
-4. **Cloud Scheduler未作成**: 上記の設定例は未実施(コマンド例のみ)。
-5. **production deploy未実施**: `app.py` を変更しているため `report-generator` / `report-generator-admin`
-   両方のdeployが必要(未実施)。
-6. **WEBテンプレートの実バイナリ再確認が本セッションでは不完全**: 上記「検証済み事項」参照。以前の
-   セッションで完成済みファイルを完全解析済みであり、今回のDriveメタデータのスニペットとも一致しているが、
-   公式テンプレートそのものを開いた実バイナリ確認・生成テストは本セッションでは未実施。そのため
-   「本番手動受入チェックリスト」でWEB帳票のend-to-end生成確認を必須項目としている -- Scheduler
-   有効化前に必ず実施すること。
-7. **動画リワードのF/G列相当(著者還元額・作品別ロールアップ)は自動計算されない**: 「作品別」シートの
+   Drive OAuthと同じ方式)で読み取る。Scheduler有効化前のOIDC smokeで `ad-revenue-sync`
+   (確定値同期)の実行結果とあわせて確認する。
+2. **`dataset_exdata_tables` への書き込みIAM**: 上記「BigQueryへの新規テーブルと権限」参照。
+   `ad_revenue_confirmed_monthly` への書き込みが必要になった時点で権限不足が判明する設計
+   (フェイルクローズ)。`ad-revenue-sync` の実行結果で確認する。
+3. **Cloud Scheduler**: 4ジョブ(sync 1件 + report generation 3件)の作成状況は本ドキュメントの
+   「Scheduler有効化」セクションを正とする(作成日・state・preflight結果を記録)。
+4. **observability**: Python root loggerがデフォルトWARNINGのため、`logging.info()` は
+   Cloud Loggingに一切出ない(Scheduler運用に必要な `ICE_REPORT_AD_REVENUE_READINESS` /
+   `ICE_REPORT_AD_REVENUE_SCHEDULE_SKIPPED` / `ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_COMPLETED`
+   がこれに該当していた)。PR `fix/ad-revenue-scheduler-observability` でこの3行のみ
+   `logging.warning()` へ変更(通常の帳票生成ロジック・BigQueryクエリ・Drive転送は無変更)。
+   グローバルなroot logger levelのINFO化は既存全サービスのログ量増加リスクがあるため見送り。
+5. **動画リワードのF/G列相当(著者還元額・作品別ロールアップ)は自動計算されない**: 「作品別」シートの
    `コイン消費割合`/`広告還元額`列や、サマリの「著者還元額」ブロックは、明細データだけからは計算できない
    追加のビジネスロジック(単価・還元率など)が必要と見られ、本実装のスコープ外(受入条件である
    総計金額・明細のコイン消費数/広告表示数には影響しない)。運用上必要であれば、情シス側で別途手動計算・
