@@ -64,6 +64,8 @@ ICE Report Generator(Flask on Cloud Run。BigQueryからExcelを生成し、Driv
 1. 専用service account作成(例: `<report-name>-scheduler@ice-sh.iam.gserviceaccount.com`)
 2. Cloud Runへ `<PREFIX>_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS` / `<PREFIX>_SCHEDULER_AUDIENCE` を設定
 3. Cloud Scheduler jobを作成し、上記service accountのOIDC tokenで呼び出す
+4. `report_schedules.py` の `REPORT_SCHEDULE_SPECS` へ `ScheduledReportSpec` を追加する(expected値はdocsの記録を正とし、live jobからコピーしない。UIへのレポート個別コードは追加しない)
+5. 管理画面 Schedules タブで対象行が `OK`(job作成前は `NOT_CREATED`)になることを確認する
 
 ## Step 7 — 完了前のチェックリスト
 
@@ -73,6 +75,7 @@ ICE Report Generator(Flask on Cloud Run。BigQueryからExcelを生成し、Driv
 - [ ] Drive/GCSの権限を確認した(Shared Drive制約は `docs/drive-domain-wide-delegation.md` 参照)
 - [ ] 手動生成エンドポイントのsmokeを実施した
 - [ ] スケジュール実行が必要な場合: 専用SA作成・env設定・Cloud Scheduler job作成・OIDC smoke・重複実行(409)smokeを実施した
+- [ ] スケジュール実行が必要な場合: endpoint / Scheduler job / `REPORT_SCHEDULE_SPECS` 登録 / Schedules タブ確認 / expected・live drift なし(`OK`) を完了条件に含めた
 - [ ] `docs/<report-name>-report.md` を作成した(`docs/thermae-romae-report.md` を参考に)
 - [ ] 監査ログ・Slack通知に secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL、SQL本文、Excelセル値が出ていないことを確認した
 - [ ] 本番反映は `docs/deploy.md` の手順(build --no-cache → push → deploy → smoke)に従い、`app.py` 変更のため `report-generator` と `report-generator-admin` の両方をdeployした

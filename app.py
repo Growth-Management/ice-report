@@ -15,6 +15,9 @@ from google.cloud import firestore, storage
 
 from create_report import DEFAULT_TEMPLATE, generate_report, preview_default_query_mapping, previous_month_base
 from distribution import (
+    DELIVERY_KIND_MULTI_FILE,
+    FIRESTORE_COLLECTION_DELIVERIES,
+    MultiFileDeliveryError,
     REPORT_DEFINITION_SCHEDULE_DELIVERY_CONFIRMATION,
     REPORT_DEFINITION_SCHEDULE_GENERATION_CONFIRMATION,
     REPORT_DEFINITION_SCHEDULE_RUN_CONFIRMATION,
@@ -25,6 +28,7 @@ from distribution import (
     create_report_definition,
     download_report_definition_template,
     find_delivery_by_token,
+    find_multi_file_version_by_idempotency_key,
     get_current_version,
     get_delivery_record,
     get_report_definition,
@@ -44,6 +48,8 @@ from distribution import (
     set_report_definition_delivery_allowlist,
     set_report_definition_schedule,
     update_report_definition,
+    upsert_multi_file_delivery,
+    is_multi_file_version,
     render_download_form,
     set_delivery_active,
     validate_delivery_access,
@@ -66,6 +72,10 @@ PLUS_POINT_SALES_SCHEDULED_RUNS_COLLECTION = os.environ.get(
 AD_REVENUE_SCHEDULED_RUNS_COLLECTION = os.environ.get(
     "AD_REVENUE_SCHEDULED_RUNS_COLLECTION",
     "ad_revenue_scheduled_runs",
+)
+JUMPPLUS_COIN_LEDGER_SCHEDULED_RUNS_COLLECTION = os.environ.get(
+    "JUMPPLUS_COIN_LEDGER_SCHEDULED_RUNS_COLLECTION",
+    "jumpplus_coin_ledger_scheduled_runs",
 )
 
 
@@ -931,6 +941,7 @@ def render_admin_ui() -> str:
     <button class="secondary" id="tabBtnLogs" onclick="showAdminTab('logs')">ダウンロードログ</button>
     <button class="secondary" id="tabBtnDefinitions" onclick="showAdminTab('definitions')">レポート定義管理</button>
     <button class="secondary" id="tabBtnPlusPointSales" onclick="showAdminTab('plusPointSales')">ポイント売上</button>
+    <button class="secondary" id="tabBtnSchedules" onclick="showAdminTab('schedules')">Schedules</button>
   </div>
 
   <div id="tabPanelDefinitions" class="tab-panel" style="display:none;">
@@ -1098,6 +1109,30 @@ def render_admin_ui() -> str:
         <button class="secondary" onclick="loadPlusPointSalesFiles()">一覧更新</button>
       </div>
       <div id="plusPointSalesFiles" class="notice">loading...</div>
+    </div>
+  </div>
+
+  <div id="tabPanelSchedules" class="tab-panel" style="display:none;">
+    <div class="card">
+      <h2>Schedules</h2>
+      <p class="muted">登録済みの自動実行（専用Cloud Scheduler job）とレポート定義のschedule設定を一覧表示します。読み取り専用です。jobの作成・変更・停止はここからは行いません。</p>
+      <div id="reportSchedulesSummary" class="summary-cards"></div>
+      <div class="toolbar">
+        <input id="reportSchedulesSearch" placeholder="レポート名 / report_id / job名で検索" oninput="renderReportSchedules()">
+        <select id="reportSchedulesStateFilter" onchange="renderReportSchedules()">
+          <option value="">すべてのdrift</option>
+          <option value="OK">OK</option>
+          <option value="CONFIG_DRIFT">CONFIG_DRIFT</option>
+          <option value="NOT_CREATED">NOT_CREATED</option>
+          <option value="UNKNOWN">UNKNOWN</option>
+          <option value="NO_EXPECTED">NO_EXPECTED</option>
+          <option value="UNREGISTERED">UNREGISTERED</option>
+          <option value="N/A">N/A（レポート定義）</option>
+        </select>
+        <button class="secondary" id="reportSchedulesRefreshButton" onclick="loadReportSchedules(true)">更新</button>
+      </div>
+      <div id="reportSchedulesLive" class="muted"></div>
+      <div id="reportSchedules" class="notice">未読み込み</div>
     </div>
   </div>
 </main>
@@ -1890,8 +1925,15 @@ const ADMIN_TAB_SUFFIXES = {
   deliveries: "Deliveries",
   logs: "Logs",
   definitions: "Definitions",
-  plusPointSales: "PlusPointSales"
+  plusPointSales: "PlusPointSales",
+  schedules: "Schedules"
 };
+
+// Tabs whose content is fetched on first open instead of in loadAll().
+const ADMIN_TAB_LAZY_LOADERS = {
+  schedules: () => loadReportSchedules(false)
+};
+const adminTabLoaded = {};
 
 function showAdminTab(tab) {
   Object.keys(ADMIN_TAB_SUFFIXES).forEach(key => {
@@ -1900,6 +1942,10 @@ function showAdminTab(tab) {
     document.getElementById("tabPanel" + suffix).style.display = isActive ? "" : "none";
     document.getElementById("tabBtn" + suffix).className = isActive ? "" : "secondary";
   });
+  if (ADMIN_TAB_LAZY_LOADERS[tab] && !adminTabLoaded[tab]) {
+    adminTabLoaded[tab] = true;
+    ADMIN_TAB_LAZY_LOADERS[tab]();
+  }
 }
 
 function populateCreateReportIdOptions() {
@@ -2511,6 +2557,121 @@ function renderPlusPointSalesFiles(items) {
     "<tbody>" + rows + "</tbody></table></div>";
 }
 
+let reportScheduleItems = [];
+let reportSchedulesInProgress = false;
+
+const REPORT_SCHEDULE_KIND_LABELS = {
+  report_generation: "レポート生成",
+  data_sync: "データ同期",
+  report_definition_executor: "レポート定義executor",
+  maintenance: "メンテナンス",
+  report_definition: "レポート定義",
+  unregistered_job: "未登録job"
+};
+
+const REPORT_SCHEDULE_DRIFT_CLASSES = {
+  "OK": "status-active",
+  "CONFIG_DRIFT": "status-disabled",
+  "UNREGISTERED": "status-disabled",
+  "NOT_CREATED": "status-warning",
+  "UNKNOWN": "status-warning",
+  "NO_EXPECTED": "status-neutral",
+  "N/A": "status-neutral"
+};
+
+async function loadReportSchedules(refresh) {
+  if (reportSchedulesInProgress) {
+    return;
+  }
+  reportSchedulesInProgress = true;
+  const button = document.getElementById("reportSchedulesRefreshButton");
+  button.disabled = true;
+  const el = document.getElementById("reportSchedules");
+  el.innerHTML = "<p class='muted'>loading...</p>";
+  try {
+    const data = await api("/admin/report-schedules" + (refresh ? "?refresh=1" : ""));
+    reportScheduleItems = data.items || [];
+    renderReportSchedulesSummary(data.summary || {}, data.live_lookup || {}, data.report_definitions || {});
+    renderReportSchedules();
+  } catch (e) {
+    el.innerHTML = "<p class='result-error'>" + esc(e.message) + "</p>";
+  } finally {
+    reportSchedulesInProgress = false;
+    button.disabled = false;
+  }
+}
+
+function renderReportSchedulesSummary(summary, live, definitions) {
+  const byDrift = summary.by_drift || {};
+  const cards = [
+    ["合計", summary.total || 0],
+    ["OK", byDrift["OK"] || 0],
+    ["CONFIG_DRIFT", (byDrift["CONFIG_DRIFT"] || 0) + (byDrift["UNREGISTERED"] || 0)],
+    ["NOT_CREATED / UNKNOWN", (byDrift["NOT_CREATED"] || 0) + (byDrift["UNKNOWN"] || 0)]
+  ];
+  document.getElementById("reportSchedulesSummary").innerHTML = cards.map(card =>
+    "<div class='summary-card'><div class='label'>" + esc(card[0]) + "</div><div class='value'>" + esc(card[1]) + "</div></div>"
+  ).join("");
+  const liveText = live.status === "ok"
+    ? "Cloud Scheduler live lookup: ok（" + esc(live.project || "") + " / " + esc(live.location || "") + "、取得 " + esc(formatDateTime(live.fetched_at || "")) + "）"
+    : "Cloud Scheduler live lookup: unavailable（" + esc(live.reason || "unknown") + "）。expected設定のみ表示し、stateはUNKNOWNになります。";
+  const definitionsText = definitions.status === "ok" ? "" : " / レポート定義: 取得できませんでした";
+  document.getElementById("reportSchedulesLive").innerHTML = liveText + definitionsText;
+}
+
+function reportScheduleSearchText(item) {
+  return [
+    item.display_name, item.id, item.report_type, item.kind, item.scheduler_job_name,
+    item.state, item.drift, item.notes, item.target_month_rule
+  ].map(v => String(v || "")).join(" ").toLowerCase();
+}
+
+function renderReportSchedules() {
+  const el = document.getElementById("reportSchedules");
+  const query = (document.getElementById("reportSchedulesSearch").value || "").trim().toLowerCase();
+  const driftFilter = document.getElementById("reportSchedulesStateFilter").value;
+  const items = reportScheduleItems.filter(item =>
+    (!driftFilter || item.drift === driftFilter) &&
+    (!query || reportScheduleSearchText(item).indexOf(query) >= 0)
+  );
+  if (!items.length) {
+    el.innerHTML = "<p class='muted'>該当なし</p>";
+    return;
+  }
+  const rows = items.map(item => {
+    const expected = item.expected || {};
+    const actual = item.actual || {};
+    const scheduleText = expected.schedule_text || actual.schedule_text || "-";
+    const cron = expected.cron || actual.cron || "";
+    const timezone = expected.timezone || actual.timezone || "";
+    const endpoint = expected.endpoint || actual.endpoint || "";
+    const driftFields = (item.drift_fields || []).length ? "<br><span class='muted' style='font-size:11px;'>" + esc(item.drift_fields.join(", ")) + "</span>" : "";
+    const actualNote = item.drift === "CONFIG_DRIFT" && actual.cron !== undefined
+      ? "<br><span class='muted' style='font-size:11px;'>live: " + esc(actual.cron || "-") + " / " + esc(actual.timezone || "-") + " / " + esc(actual.endpoint || "-") + "</span>"
+      : "";
+    const lastAttempt = actual.last_attempt_time ? "<br><span class='muted' style='font-size:11px;'>last: " + esc(formatDateTime(actual.last_attempt_time)) + "</span>" : "";
+    return "<tr>" +
+      "<td>" + esc(item.display_name || "") + "</td>" +
+      "<td><code>" + esc(item.id || "") + "</code><br><span class='muted' style='font-size:11px;'>" + esc(item.report_type || "") + "</span></td>" +
+      "<td>" + esc(REPORT_SCHEDULE_KIND_LABELS[item.kind] || item.kind || "") + "</td>" +
+      "<td><code>" + esc(item.scheduler_job_name || "-") + "</code></td>" +
+      "<td>" + esc(scheduleText) + "</td>" +
+      "<td>" + esc(timezone) + "</td>" +
+      "<td><code>" + esc(cron || "-") + "</code></td>" +
+      "<td>" + esc(item.state || "") + lastAttempt + "</td>" +
+      "<td><code>" + esc(endpoint || "-") + "</code></td>" +
+      "<td>" + esc(item.target_month_rule || "") + "</td>" +
+      "<td><span class='status-pill " + (REPORT_SCHEDULE_DRIFT_CLASSES[item.drift] || "status-neutral") + "'>" + esc(item.drift || "") + "</span>" + driftFields + actualNote + "</td>" +
+      "<td>" + esc(item.notes || "") + "</td>" +
+    "</tr>";
+  }).join("");
+  el.innerHTML =
+    "<p class='muted'>" + items.length + "件</p>" +
+    "<div class='table-wrap'><table>" +
+    "<thead><tr><th>レポート名</th><th>report_id / report_type</th><th>kind</th><th>Scheduler job</th><th>schedule</th><th>timezone</th><th>cron</th><th>state</th><th>endpoint</th><th>対象月ルール</th><th>drift</th><th>備考</th></tr></thead>" +
+    "<tbody>" + rows + "</tbody></table></div>";
+}
+
 async function loadAll() {
   await loadReportDefinitions();
   await loadDeliveries();
@@ -2880,7 +3041,12 @@ def _thermae_scheduled_run_id(target_month: date) -> str:
 
 
 def _claim_scheduled_run(
-    *, collection_name: str, run_id: str, initial_fields: dict[str, Any]
+    *,
+    collection_name: str,
+    run_id: str,
+    initial_fields: dict[str, Any],
+    reclaimable_statuses: tuple[str, ...] = (),
+    stale_running_after: timedelta | None = None,
 ) -> tuple[bool, Any]:
     """Claim a Firestore-backed scheduled-run slot to prevent duplicate execution.
 
@@ -2890,15 +3056,43 @@ def _claim_scheduled_run(
     already claimed. Reuse this for any new scheduled/bespoke report's
     duplicate-run guard instead of writing a new per-report Firestore
     existence check.
+
+    By default any existing record blocks the claim (unchanged behavior for
+    every existing caller). A caller whose Scheduler job relies on retries
+    can additionally pass `reclaimable_statuses` (e.g. "failed") and
+    `stale_running_after` (a "running" record not updated for that long is
+    treated as abandoned, e.g. the instance died mid-run) so a retry can
+    take the slot over instead of being blocked forever. A reclaim keeps
+    the original created_at and increments attempt_count.
     """
     db = firestore.Client()
     run_ref = db.collection(collection_name).document(run_id)
     existing = run_ref.get()
+    now = _now_utc()
     if existing.exists:
         existing_data = existing.to_dict() or {}
-        return False, existing_data.get("status", "")
+        existing_status = existing_data.get("status", "")
+        updated_at = existing_data.get("updated_at")
+        is_stale_running = (
+            existing_status == "running"
+            and stale_running_after is not None
+            and isinstance(updated_at, datetime)
+            and updated_at < now - stale_running_after
+        )
+        if existing_status not in reclaimable_statuses and not is_stale_running:
+            return False, existing_status
+        run_ref.set(
+            {
+                **initial_fields,
+                "status": "running",
+                "created_at": existing_data.get("created_at") or now,
+                "updated_at": now,
+                "attempt_count": int(existing_data.get("attempt_count") or 1) + 1,
+                "previous_status": existing_status,
+            }
+        )
+        return True, run_ref
 
-    now = _now_utc()
     run_ref.set({**initial_fields, "status": "running", "created_at": now, "updated_at": now})
     return True, run_ref
 
@@ -3438,6 +3632,359 @@ def scheduled_generate_jumpplus_ad_revenue(report_type: str):
         report_type,
         safe_result["target_month"],
         safe_result["has_drive_file"],
+    )
+    return jsonify({"result": safe_result, **safe_result})
+
+
+@app.get("/admin/report-schedules")
+def list_report_schedules():
+    """READ ONLY: expected schedule of every registered Scheduler job
+    (report_schedules.REPORT_SCHEDULE_SPECS) next to the live Cloud Scheduler
+    job, plus enabled report_definitions schedule metadata. Live lookup
+    failures (e.g. the runtime SA lacks roles/cloudscheduler.viewer) degrade
+    to state=UNKNOWN instead of failing the request."""
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    import report_schedules
+
+    refresh = str(request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes")
+    live = report_schedules.live_lookup(refresh=refresh)
+    if live.status != report_schedules.LIVE_OK:
+        logging.warning("ICE_REPORT_SCHEDULES_LIVE_LOOKUP_UNAVAILABLE reason=%s", live.reason)
+
+    definitions: list = []
+    definitions_error = ""
+    try:
+        definitions = list_report_definitions(limit=200)
+    except Exception:
+        logging.warning("ICE_REPORT_SCHEDULES_DEFINITIONS_UNAVAILABLE")
+        definitions_error = "report_definitions_unavailable"
+
+    return jsonify(
+        report_schedules.build_schedules_view(live=live, definitions=definitions, definitions_error=definitions_error)
+    )
+
+
+def _check_coin_ledger_scheduler_auth() -> tuple[bool, str]:
+    return _check_scheduler_oidc_auth(
+        env_prefix="JUMPPLUS_COIN_LEDGER_SCHEDULER",
+        log_tag="ICE_REPORT_COIN_LEDGER_SCHEDULE_AUTH",
+    )
+
+
+def _coin_ledger_stale_running_after() -> timedelta:
+    # Longer than gunicorn's 900s request timeout, so a "running" record
+    # this old can only belong to a request that is no longer alive.
+    return timedelta(minutes=_int_env("JUMPPLUS_COIN_LEDGER_STALE_RUNNING_MINUTES", 30))
+
+
+def _is_multi_file_delivery(delivery_id: str) -> bool:
+    snap = firestore.Client().collection(FIRESTORE_COLLECTION_DELIVERIES).document(delivery_id).get()
+    return bool(snap.exists) and (snap.to_dict() or {}).get("delivery_kind") == DELIVERY_KIND_MULTI_FILE
+
+
+def _coin_ledger_deliver(target_month: date, *, note: str, idempotency_key: str | None):
+    from jumpplus_coin_ledger_report import (
+        DELIVERY_CUSTOMER_NAME,
+        REPORT_ID,
+        REPORT_NAME,
+        delivery_allowed_domains,
+    )
+
+    def _deliver(files) -> dict:
+        return upsert_multi_file_delivery(
+            report_key=REPORT_ID,
+            report_title=REPORT_NAME,
+            customer_name=DELIVERY_CUSTOMER_NAME,
+            report_month=target_month.strftime("%Y-%m"),
+            files=[{"file_key": f.file_key, "label": f.label, "gcs_uri": f.gcs_uri} for f in files],
+            allowed_domains=delivery_allowed_domains(),
+            note=note,
+            idempotency_key=idempotency_key,
+        )
+
+    return _deliver
+
+
+def _safe_coin_ledger_result(result: dict, *, include_download_url: bool) -> dict:
+    delivery = result.get("delivery") or None
+    safe_delivery = None
+    if delivery:
+        safe_delivery = {
+            key: delivery.get(key)
+            for key in ("delivery_id", "action", "version", "current_version", "active", "expires_at", "file_count")
+        }
+        if include_download_url and delivery.get("public_download_url"):
+            safe_delivery["public_download_url"] = delivery.get("public_download_url")
+    return {
+        "status": str(result.get("status") or "ok"),
+        "report": str(result.get("report") or "jumpplus-coin-ledger"),
+        "target_month": str(result.get("target_month") or ""),
+        "generated_date": str(result.get("generated_date") or ""),
+        "trigger": str(result.get("trigger") or ""),
+        "readiness": result.get("readiness") or {},
+        "files": [
+            {
+                "file_key": f.get("file_key"),
+                "label": f.get("label"),
+                "file_name": f.get("file_name"),
+                "has_drive_file": bool(f.get("drive_file_id")),
+                "drive_file_id": f.get("drive_file_id"),
+                "has_gcs_object": bool(f.get("has_gcs_object")),
+                "row_counts": f.get("row_counts") or {},
+            }
+            for f in result.get("files") or []
+        ],
+        "delivery": safe_delivery,
+        "elapsed_seconds": result.get("elapsed_seconds"),
+    }
+
+
+def _coin_ledger_error_body(exc: Exception) -> dict:
+    body = {"error": getattr(exc, "code", "coin_ledger_generate_failed")}
+    if getattr(exc, "retryable", False):
+        body["retryable"] = True
+    details = getattr(exc, "details", None) or {}
+    if details.get("reasons"):
+        body["reasons"] = list(details["reasons"])
+    return body
+
+
+@app.post("/admin/reports/jumpplus-coin-ledger/generate")
+def generate_jumpplus_coin_ledger():
+    ok, error_response = _check_admin()
+    if not ok:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+    create_delivery = payload.get("create_delivery", True)
+    if not isinstance(create_delivery, bool):
+        return jsonify({"error": "create_delivery must be boolean"}), 400
+
+    try:
+        from jumpplus_coin_ledger_report import (
+            CoinLedgerReportError,
+            REPORT_ID,
+            generate_coin_ledger_report,
+            parse_target_month,
+            tokyo_today,
+        )
+    except ImportError:
+        logging.error("ICE_REPORT_COIN_LEDGER_DEPENDENCY_MISSING")
+        return jsonify({"error": "dependency_missing"}), 500
+
+    generated_date = tokyo_today()
+    target_month_text = str(payload.get("target_month") or "").strip()
+    try:
+        target_month = parse_target_month(target_month_text, today=generated_date, required=True)
+    except CoinLedgerReportError as exc:
+        _log_admin_audit_event(
+            action="coin_ledger_generate",
+            result="failure",
+            target_type="report",
+            target_id=REPORT_ID,
+            status_code=exc.status_code,
+            reason=exc.code,
+        )
+        return jsonify({"error": exc.code}), exc.status_code
+
+    try:
+        result = generate_coin_ledger_report(
+            project_id=project_id,
+            target_month=target_month,
+            generated_date=generated_date,
+            trigger="manual",
+            deliver=_coin_ledger_deliver(target_month, note="manual", idempotency_key=None) if create_delivery else None,
+        )
+    except Exception as exc:
+        error_code = getattr(exc, "code", "coin_ledger_generate_failed")
+        if isinstance(exc, MultiFileDeliveryError):
+            status_code = 409
+        else:
+            status_code = int(getattr(exc, "status_code", 500) or 500)
+        log_level = logging.warning if status_code < 500 or error_code == "source_not_ready" else logging.error
+        log_level(
+            "ICE_REPORT_COIN_LEDGER_FAILED trigger=manual target_month=%s reason=%s",
+            target_month.strftime("%Y-%m"),
+            error_code,
+        )
+        _log_admin_audit_event(
+            action="coin_ledger_generate",
+            result="failure",
+            target_type="report",
+            target_id=REPORT_ID,
+            status_code=status_code,
+            reason=error_code,
+            detail={"target_month": target_month.strftime("%Y-%m"), "create_delivery": create_delivery},
+        )
+        return jsonify(_coin_ledger_error_body(exc)), status_code
+
+    safe_result = _safe_coin_ledger_result(result, include_download_url=True)
+    delivery = safe_result.get("delivery") or {}
+    _log_admin_audit_event(
+        action="coin_ledger_generate",
+        result="success",
+        target_type="report",
+        target_id=REPORT_ID,
+        status_code=200,
+        detail={
+            "target_month": safe_result["target_month"],
+            "create_delivery": create_delivery,
+            "file_count": len(safe_result["files"]),
+            "delivery_id": delivery.get("delivery_id") or "",
+            "delivery_version": delivery.get("version"),
+        },
+    )
+    return jsonify({"result": safe_result, **safe_result})
+
+
+@app.post("/admin/reports/jumpplus-coin-ledger/scheduled-generate")
+def scheduled_generate_jumpplus_coin_ledger():
+    """Cloud Scheduler entry point (1st of every month, 07:00 Asia/Tokyo).
+
+    Response codes are chosen for Cloud Scheduler's retry policy: any
+    non-2xx is retried with backoff, 2xx is final.
+    - 200 succeeded / skipped (already generated or already delivered)
+    - 503 source_not_ready: source tables not complete yet (e.g. a TROCCO
+      load still running after 07:00) -- nothing generated, nothing
+      uploaded, no delivery; the run record is left reclaimable
+    - 409 another invocation is running right now
+    - 5xx other failures (record left "failed", which is reclaimable)
+    """
+    ok, reason = _check_coin_ledger_scheduler_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized", "reason": reason}), 401
+
+    payload = request.get_json(silent=True) or {}
+    project_id = payload.get("project_id") or _bigquery_project_id()
+
+    try:
+        from jumpplus_coin_ledger_report import (
+            CoinLedgerReportError,
+            REPORT_ID,
+            check_source_readiness,
+            generate_coin_ledger_report,
+            log_event,
+            parse_target_month,
+            tokyo_today,
+        )
+    except ImportError:
+        logging.error("ICE_REPORT_COIN_LEDGER_SCHEDULE_DEPENDENCY_MISSING")
+        return jsonify({"error": "dependency_missing"}), 500
+
+    generated_date = tokyo_today()
+    try:
+        target_month = parse_target_month(str(payload.get("target_month") or "").strip() or None, today=generated_date)
+    except CoinLedgerReportError as exc:
+        logging.warning("ICE_REPORT_COIN_LEDGER_SCHEDULE_REJECTED reason=%s", exc.code)
+        return jsonify({"error": exc.code}), exc.status_code
+
+    month_text = target_month.strftime("%Y-%m")
+    run_id = month_text
+    idempotency_key = f"scheduled:{month_text}"
+
+    db = firestore.Client()
+    run_ref = db.collection(JUMPPLUS_COIN_LEDGER_SCHEDULED_RUNS_COLLECTION).document(run_id)
+    existing = run_ref.get()
+    existing_data = (existing.to_dict() or {}) if existing.exists else {}
+    existing_status = existing_data.get("status", "")
+    if existing_status == "succeeded":
+        log_event("SCHEDULE_SKIPPED", target_month=month_text, trigger="scheduled", reason="already_generated")
+        return jsonify({"status": "skipped", "reason": "already_generated", "target_month": month_text})
+
+    if find_multi_file_version_by_idempotency_key(REPORT_ID, month_text, idempotency_key):
+        # The delivery version for this scheduled month already exists (a
+        # previous attempt finished delivering but its run-record update was
+        # lost): record success instead of generating a second copy.
+        run_ref.set(
+            {
+                "report": REPORT_ID,
+                "target_month": month_text,
+                "status": "succeeded",
+                "result_code": "already_delivered",
+                "updated_at": _now_utc(),
+            },
+            merge=True,
+        )
+        log_event("SCHEDULE_SKIPPED", target_month=month_text, trigger="scheduled", reason="already_delivered")
+        return jsonify({"status": "skipped", "reason": "already_delivered", "target_month": month_text})
+
+    readiness = check_source_readiness(project_id=project_id, target_month=target_month)
+    if not readiness.ready:
+        if existing_status != "running":
+            run_ref.set(
+                {
+                    "report": REPORT_ID,
+                    "target_month": month_text,
+                    "status": "source_not_ready",
+                    "result_code": "source_not_ready",
+                    "reasons": readiness.reasons,
+                    "updated_at": _now_utc(),
+                },
+                merge=True,
+            )
+        log_event(
+            "SCHEDULE_SOURCE_NOT_READY",
+            level=logging.WARNING,
+            target_month=month_text,
+            trigger="scheduled",
+            reasons=readiness.reasons,
+            **readiness.checks,
+        )
+        return jsonify(
+            {"error": "source_not_ready", "retryable": True, "reasons": readiness.reasons, "target_month": month_text}
+        ), 503
+
+    claimed, run_ref_or_status = _claim_scheduled_run(
+        collection_name=JUMPPLUS_COIN_LEDGER_SCHEDULED_RUNS_COLLECTION,
+        run_id=run_id,
+        initial_fields={"report": REPORT_ID, "target_month": month_text, "result_code": "generation_started"},
+        reclaimable_statuses=("failed", "source_not_ready"),
+        stale_running_after=_coin_ledger_stale_running_after(),
+    )
+    if not claimed:
+        return jsonify(
+            {"error": "duplicate_scheduled_run", "target_month": month_text, "status": run_ref_or_status}
+        ), 409
+
+    run_ref = run_ref_or_status
+    try:
+        result = generate_coin_ledger_report(
+            project_id=project_id,
+            target_month=target_month,
+            generated_date=generated_date,
+            trigger="scheduled",
+            deliver=_coin_ledger_deliver(target_month, note="scheduled", idempotency_key=idempotency_key),
+        )
+        safe_result = _safe_coin_ledger_result(result, include_download_url=False)
+    except Exception as exc:
+        error_code = getattr(exc, "code", "coin_ledger_schedule_failed")
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        if status_code < 500:
+            # Scheduler retries every non-2xx anyway; surface all
+            # non-readiness failures as 5xx so none looks like a client error.
+            status_code = 500
+        run_status = "source_not_ready" if error_code == "source_not_ready" else "failed"
+        run_ref.update({"status": run_status, "result_code": error_code, "updated_at": _now_utc()})
+        log_event(
+            "SCHEDULE_FAILED",
+            level=logging.WARNING if run_status == "source_not_ready" else logging.ERROR,
+            target_month=month_text,
+            trigger="scheduled",
+            reason=error_code,
+        )
+        return jsonify({**_coin_ledger_error_body(exc), "target_month": month_text}), status_code
+
+    run_ref.update(
+        {
+            "status": "succeeded",
+            "result_code": "generation_succeeded",
+            "result": safe_result,
+            "updated_at": _now_utc(),
+        }
     )
     return jsonify({"result": safe_result, **safe_result})
 
@@ -4476,6 +5023,20 @@ def add_version(delivery_id: str):
 
     payload = request.get_json(silent=True) or {}
 
+    if _is_multi_file_delivery(delivery_id):
+        # A multi-file (bespoke report) delivery's versions are written only
+        # by its own report generator; this endpoint would regenerate the
+        # Jump+ paid/free single-file report into it.
+        _log_admin_audit_event(
+            action="delivery_version_add",
+            result="failure",
+            target_type="delivery",
+            target_id=delivery_id,
+            status_code=409,
+            reason="multi_file_delivery_managed_by_report",
+        )
+        return jsonify({"error": "multi_file_delivery_managed_by_report"}), 409
+
     project_id = payload.get("project_id") or _bigquery_project_id()
     bucket_name = payload.get("bucket_name") or os.environ.get("BUCKET_NAME")
     object_prefix = payload.get("object_prefix") or os.environ.get("OBJECT_PREFIX", "reports/plus")
@@ -4952,6 +5513,8 @@ def _render_otp_page(
     step: str = "email",
     message: str = "",
     error: str = "",
+    body_html: str | None = None,
+    note_text: str = "PINの有効期限は約10分です。",
 ) -> str:
     token_value = escape(token or "", quote=True)
     email_value = escape(email or "", quote=True)
@@ -4987,6 +5550,11 @@ def _render_otp_page(
   <button type="submit">PINを送信</button>
 </form>
 """
+
+    if body_html is not None:
+        # Caller-rendered (already escaped) body, e.g. the multi-file
+        # delivery's file list shown after PIN verification.
+        form_html = body_html
 
     return f"""
 <!doctype html>
@@ -5165,6 +5733,47 @@ def _render_otp_page(
       margin: 0;
       overflow-wrap: anywhere;
     }}
+
+    .file-list {{
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }}
+
+    .file-list li {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }}
+
+    .file-list .file-label {{
+      font-weight: 700;
+    }}
+
+    .file-list .file-name {{
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }}
+
+    .file-list a.download {{
+      display: inline-block;
+      margin-top: 8px;
+      border-radius: 10px;
+      padding: 8px 14px;
+      font-weight: 700;
+      color: #fff;
+      background: var(--primary);
+      text-decoration: none;
+    }}
+
+    .file-list .downloaded {{
+      display: inline-block;
+      margin-top: 8px;
+      color: var(--success);
+      font-size: 13px;
+    }}
   </style>
 </head>
 <body>
@@ -5175,7 +5784,7 @@ def _render_otp_page(
     {message_html}
     {error_html}
     {form_html}
-    <div class="note">PINの有効期限は約10分です。</div>
+    <div class="note">{escape(note_text)}</div>
   </main>
 </body>
 </html>
@@ -5933,6 +6542,20 @@ def download_file(token: str):
 
     version = get_current_version(delivery)
 
+    if is_multi_file_version(version):
+        # Multi-file delivery: show the file list instead of redirecting,
+        # and do NOT consume the session here -- each file is claimed once
+        # per session by download_multi_file_item below.
+        _log_security_event(
+            event_type="download_file_list_shown",
+            token=token,
+            delivery_id=delivery_id,
+            email=email,
+            reason="multi_file_delivery",
+            detail={"version": version.get("version"), "file_count": len(version.get("files") or [])},
+        )
+        return _render_multi_file_download_page(token, delivery=delivery, version=version, session=session)
+
     signed_url = make_signed_download_url(version)
 
     log_download(
@@ -5961,6 +6584,179 @@ def download_file(token: str):
             "used": True,
             "used_at": _now_utc(),
         })
+
+    return redirect(signed_url, code=302)
+
+
+def _session_file_claim_key(version: dict, file_key: str) -> str:
+    return f"v{version.get('version')}:{file_key}"
+
+
+def _plan_session_file_claim(
+    session_data: dict, *, claim_key: str, all_claim_keys: list[str], now: datetime
+) -> tuple[bool, dict]:
+    """Pure decision for claiming one file of a multi-file delivery on an
+    authenticated download session. The session's TTL is unchanged; the
+    one-time rule is applied per file instead of per session: each file can
+    be fetched once per PIN verification, and the session itself is marked
+    used as soon as every file of the current version has been fetched."""
+    if session_data.get("used"):
+        return False, {}
+    used_keys = list(session_data.get("used_file_keys") or [])
+    if claim_key in used_keys:
+        return False, {}
+    used_keys.append(claim_key)
+    update: dict = {"used_file_keys": used_keys, "updated_at": now}
+    if all(key in used_keys for key in all_claim_keys):
+        update["used"] = True
+        update["used_at"] = now
+    return True, update
+
+
+def _claim_download_session_file(session_id: str, *, claim_key: str, all_claim_keys: list[str]) -> bool:
+    db = firestore.Client()
+    ref = db.collection(_download_sessions_collection_name()).document(session_id)
+
+    @firestore.transactional
+    def _apply(transaction) -> bool:
+        snap = ref.get(transaction=transaction)
+        if not snap.exists:
+            return False
+        allowed, update = _plan_session_file_claim(
+            snap.to_dict() or {}, claim_key=claim_key, all_claim_keys=all_claim_keys, now=_now_utc()
+        )
+        if allowed:
+            transaction.update(ref, update)
+        return allowed
+
+    return _apply(db.transaction())
+
+
+def _render_multi_file_download_page(token: str, *, delivery: dict, version: dict, session: dict) -> str:
+    token_value = escape(token or "", quote=True)
+    used_keys = set(session.get("used_file_keys") or [])
+    items = []
+    for entry in version.get("files") or []:
+        file_key = str(entry.get("file_key") or "")
+        claim_key = _session_file_claim_key(version, file_key)
+        if claim_key in used_keys:
+            action_html = "<span class='downloaded'>この認証でダウンロード済み</span>"
+        else:
+            action_html = (
+                f"<a class='download' href='/d/{token_value}/download/{escape(file_key, quote=True)}'>ダウンロード</a>"
+            )
+        items.append(
+            "<li>"
+            f"<div class='file-label'>{escape(str(entry.get('label') or file_key))}</div>"
+            f"<div class='file-name'>{escape(str(entry.get('file_name') or ''))}</div>"
+            f"{action_html}"
+            "</li>"
+        )
+    title = escape(str(delivery.get("report_title") or "ICEレポート"))
+    body_html = f"<h2>{title}</h2><ul class='file-list'>{''.join(items)}</ul>"
+    return _render_otp_page(
+        token,
+        delivery=delivery,
+        message="認証が完了しました。各ファイルを個別にダウンロードしてください。",
+        body_html=body_html,
+        note_text="各ファイルはこの認証につき1回ずつダウンロードできます。認証の有効期限を過ぎた場合は、もう一度PIN認証してください。",
+    )
+
+
+@app.get("/d/<token>/download/<file_key>")
+def download_multi_file_item(token: str, file_key: str):
+    cookie_value = request.cookies.get(_cookie_name(token), "")
+    session_id, session = _find_download_session(token, cookie_value)
+
+    if not session:
+        _log_security_event(
+            event_type="download_session_denied",
+            token=token,
+            reason="session_missing_or_expired",
+        )
+        return _render_otp_page(
+            token,
+            error="ダウンロード認証が未完了、またはsessionが期限切れです。もう一度PIN認証してください。",
+        ), 403
+
+    delivery_id, delivery = find_delivery_by_token(token)
+
+    if not delivery:
+        return _render_otp_page(
+            token,
+            error="配布URLが見つかりません。",
+        ), 404
+
+    email = session.get("email") or ""
+
+    allowed, message = validate_delivery_access(
+        delivery,
+        email,
+    )
+
+    if not allowed:
+        return _render_otp_page(
+            token,
+            email=email,
+            delivery=delivery,
+            error=message,
+        ), 403
+
+    version = get_current_version(delivery)
+    entries = (version.get("files") or []) if is_multi_file_version(version) else []
+    entry = next((f for f in entries if f.get("file_key") == file_key), None)
+
+    if entry is None:
+        return _render_otp_page(
+            token,
+            delivery=delivery,
+            error="指定されたファイルが見つかりません。",
+        ), 404
+
+    claim_key = _session_file_claim_key(version, file_key)
+    if _bool_env("DOWNLOAD_SESSION_ONE_TIME", True) and session_id:
+        claimed = _claim_download_session_file(
+            session_id,
+            claim_key=claim_key,
+            all_claim_keys=[_session_file_claim_key(version, str(f.get("file_key") or "")) for f in entries],
+        )
+        if not claimed:
+            _log_security_event(
+                event_type="download_session_denied",
+                token=token,
+                delivery_id=delivery_id,
+                email=email,
+                reason="file_already_downloaded_in_session",
+                detail={"version": version.get("version"), "file_key": file_key},
+            )
+            return _render_otp_page(
+                token,
+                delivery=delivery,
+                error="このファイルはこの認証ですでにダウンロード済みです。再度取得する場合は、もう一度PIN認証してください。",
+            ), 403
+
+    signed_url = make_signed_download_url(entry)
+
+    log_download(
+        delivery_id=delivery_id,
+        delivery=delivery,
+        version={**entry, "version": version.get("version")},
+        email=email,
+        request=request,
+    )
+
+    _log_security_event(
+        event_type="download_session_success",
+        token=token,
+        delivery_id=delivery_id,
+        email=email,
+        reason="signed_url_redirect",
+        detail={
+            "version": version.get("version"),
+            "file_key": file_key,
+            "file_name": entry.get("file_name"),
+        },
+    )
 
     return redirect(signed_url, code=302)
 

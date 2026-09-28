@@ -79,6 +79,34 @@ gcloud.cmd logging read `
   --format='value(timestamp,textPayload)'
 ```
 
+### Schedules（自動実行の一覧・drift確認）
+
+管理画面の `Schedules` タブ（API: `GET /admin/report-schedules`、`X-Admin-Key` / IAP の既存Admin認証）は、ICE Report Generatorのすべての自動実行を読み取り専用で一覧表示します。jobの作成・変更・pause/resumeは行いません。
+
+- 専用Cloud Scheduler job: `report_schedules.REPORT_SCHEDULE_SPECS`（共通registry）に登録された expected（cron / timezone / endpoint / audience）と、Cloud Scheduler v1 `projects.locations.jobs.list`（`ice-sh` / `asia-northeast1`）の実jobを比較する
+- レポート定義: Firestore `report_definitions` の enabled な schedule metadata を表示する。定義ごとの専用jobは存在しない（汎用executor job `report-definitions-monthly-schedule-runs` が全定義を評価する）ため、定義行に Scheduler job名は表示しない
+- registryに無いが `report-generator` を呼ぶ job は `UNREGISTERED` として表示する
+
+drift の意味:
+
+| drift | 意味 | 対応 |
+|---|---|---|
+| `OK` | expected と live の cron / timezone / endpoint（audienceは比較対象のjobのみ）が一致 | なし |
+| `CONFIG_DRIFT` | いずれかが不一致（差分項目を表示） | docsとregistry、実jobのどちらが正か確認。job変更は別承認 |
+| `NOT_CREATED` | registry登録済みだが job が存在しない | 作成前の新規レポートなら想定どおり。作成は別承認 |
+| `UNKNOWN` | live lookup失敗（権限不足・API error） | 下記IAMを確認 |
+| `NO_EXPECTED` | registry登録済みだが expected が未文書化 | expected を docs に記録して registry へ反映 |
+| `UNREGISTERED` | registry未登録の job | registryへ登録するか、不要jobか確認 |
+| `N/A` | レポート定義の schedule metadata 行 | なし |
+
+live lookup の権限: `cloudscheduler.jobs.list` が必要（最小role: `roles/cloudscheduler.viewer`）。2026-09-28時点で未付与のため、本番画面では `live lookup: unavailable（permission_denied）`、state は `UNKNOWN` と表示され、expected設定のみ確認できる。`REPORT_SCHEDULES_LIVE_LOOKUP=0` で live lookup 自体を無効化できる。
+
+- 2026-09-28 read-only確認: `report-generator`（public/OTP）と `report-generator-admin`（IAP admin）はどちらも runtime SA `ice-report-runner@ice-sh.iam.gserviceaccount.com` を使う。project roleは `bigquery.dataViewer` / `bigquery.user` / `datastore.user` / `iam.serviceAccountTokenCreator` / `secretmanager.secretAccessor` / `storage.objectAdmin` で、Cloud Scheduler系は無い
+- 方針: 完成形では `roles/cloudscheduler.viewer` を付与して本番Schedules画面でlive state / driftを表示する。付与はcoin ledger Golden Run・実装確定後のProduction deploy準備フェーズで別途承認して実施する（現時点では未付与）
+- 付与先が共通SAのため、read-only権限（Scheduler jobの一覧・設定の閲覧）は admin service だけでなく public service `report-generator` にも及ぶ。`/admin/report-schedules` 自体は `_check_admin()` で保護されるが、SA権限としては両serviceが同じScheduler閲覧権限を持つことを前提とする。custom role作成やruntime SA分離は今回のscope外
+
+レスポンスに含めるのは job名・schedule・timeZone・state・URI path・audience・lastAttemptTime/scheduleTime・status code のみ。`httpTarget.headers` / `body`（admin key を含み得る）、OIDC service account、OAuth token、API errorの本文は返さない。
+
 ### Admin audit log
 
 管理操作は Firestore の `admin_audit_logs` と Cloud Logging の `ICE_REPORT_ADMIN_AUDIT` に記録されます。対象は `admin_auth`、`generate_report`、`delivery_create`、`delivery_version_add`、`delivery_disable`、`delivery_enable`、`cleanup_expired_deliveries` です。
