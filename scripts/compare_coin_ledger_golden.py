@@ -191,6 +191,11 @@ def _compare_keyed(
     gen_order = [_norm(r[gi]) for r in gen_rows if _norm(r[gi]) in gold_by]
     gold_order = [_norm(r[oi]) for r in gold_rows if _norm(r[oi]) in gen_by]
     result["row_order_equal"] = gen_order == gold_order
+    result["row_order_position_matches"] = sum(1 for a, b in zip(gen_order, gold_order) if a == b)
+    result["row_order_compared_positions"] = min(len(gen_order), len(gold_order))
+    result["nat_text_cells_generated"] = sum(1 for r in gen_rows for v in r if isinstance(v, str) and v.strip() == "NaT")
+    result["_gen_order"] = gen_order
+    result["_gold_order"] = gold_order
 
     def _sorted_rows(rows: list[list[Any]]) -> list[list[Any]]:
         return sorted(rows, key=lambda r: tuple(str(_norm(v)) for v in r))
@@ -318,8 +323,104 @@ def _compare_ledger(gen_path: Path, gold_path: Path, blocks: dict[str, int]) -> 
     return out
 
 
+# ---------------------------------------------------------------------------
+# Classification (PASS / ACCEPTED_DIFF / FAIL)
+#
+# Differences are never dropped: every one is counted, and an accepted
+# difference carries the reason it was accepted (approved spec decisions,
+# 2026-09-28). Anything not covered by a rule below is "unexpected".
+# ---------------------------------------------------------------------------
+
+ACCEPTED_REASONS = {
+    "web_historical_ledger_drift": "WEB 出納の繰越(C)はBigQuery carried_over_coins_mを正とする。上流の後日補正による過去納品値との差(残高F・繰越込消費率Hは繰越に連動)",
+    "current_master_additions": "話売商品は生成時点のraise_master_contents_works(episode)を正とする。現行マスタに追加されたID",
+    "current_master_update": "話売商品は生成時点のマスタを正とする。価格・配信開始日・コミックスJDCN・コミックス巻数の更新",
+    "golden_web_book_sheet_is_episode_copy": "2026-08 Golden MasterのWEB「有料巻消費ポイント」は話シートのコピーのため比較基準にしない",
+}
+PRODUCT_CURRENT_MASTER_COLUMNS = ("価格（コイン）", "配信開始日", "コミックスJDCN", "コミックス巻数")
+TOTAL_COLUMNS = {"app": ("コイン消費合計", "消費コイン"), "web": ("ポイント消費合計", "消費ポイント")}
+
+
+def _item(area: str, kind: str, count: int, *, accepted: str | None = None, note: str = "") -> dict[str, Any]:
+    entry: dict[str, Any] = {"area": area, "kind": kind, "actual_diff_count": count}
+    if accepted:
+        entry["accepted_reason_code"] = accepted
+        entry["accepted_reason"] = ACCEPTED_REASONS[accepted]
+    if note:
+        entry["note"] = note
+    return entry
+
+
+def _groups_equal(gen_order: list, gold_order: list, groups: dict[str, str]) -> bool | None:
+    if not groups:
+        return None
+    try:
+        return [groups[str(k)] for k in gen_order] == [groups[str(k)] for k in gold_order]
+    except KeyError:
+        return None
+
+
+def _classify_keyed(area: str, sheet_result: dict[str, Any], *, product: bool, order_groups: dict[str, str]) -> tuple[list, list]:
+    accepted, unexpected = [], []
+    if not sheet_result["headers_equal"]:
+        unexpected.append(_item(area, "headers", 1))
+    for side in ("only_in_generated", "only_in_golden"):
+        n = sheet_result[side]
+        if n:
+            if product and side == "only_in_generated":
+                accepted.append(_item(area, side, n, accepted="current_master_additions"))
+            else:
+                unexpected.append(_item(area, side, n))
+    if sheet_result.get("keys_with_different_row_multiplicity"):
+        unexpected.append(_item(area, "row_multiplicity", sheet_result["keys_with_different_row_multiplicity"]))
+    if sheet_result.get("nat_text_cells_generated"):
+        unexpected.append(_item(area, "nat_text", sheet_result["nat_text_cells_generated"]))
+    for col, c in sheet_result["columns"].items():
+        if c.get("error"):
+            unexpected.append(_item(area, f"column_missing:{col}", 1))
+            continue
+        if c["mismatch_count"]:
+            if product and col in PRODUCT_CURRENT_MASTER_COLUMNS:
+                accepted.append(_item(area, f"cell:{col}", c["mismatch_count"], accepted="current_master_update"))
+            else:
+                unexpected.append(_item(area, f"cell:{col}", c["mismatch_count"]))
+        gen_types = {k for k in c["value_types"]["generated"] if k != "empty"}
+        gold_types = {k for k in c["value_types"]["golden"] if k != "empty"}
+        if gen_types and gold_types and gen_types != gold_types:
+            note = f"generated={sorted(gen_types)} golden={sorted(gold_types)}"
+            if product and col in PRODUCT_CURRENT_MASTER_COLUMNS:
+                # e.g. the Golden's 2 non-integer prices: part of the same
+                # accepted current-master price difference, not a writer type.
+                accepted.append(_item(area, f"datatype:{col}", 1, accepted="current_master_update", note=note))
+            else:
+                unexpected.append(_item(area, f"datatype:{col}", 1, note=note))
+    if not product and not sheet_result["row_order_equal"]:
+        mismatched = sheet_result["row_order_compared_positions"] - sheet_result["row_order_position_matches"]
+        within = _groups_equal(sheet_result["_gen_order"], sheet_result["_gold_order"], order_groups)
+        note = "all differing positions are within equal sort-key (name_kana) groups" if within else ""
+        unexpected.append(_item(area, "row_order", mismatched, note=note))
+    return accepted, unexpected
+
+
+def _check_expected(area: str, table: tuple, expected: dict[str, Any], total_header: str) -> list:
+    headers, rows, _ = table
+    problems = []
+    if "rows" in expected and len(rows) != expected["rows"]:
+        problems.append(_item(area, "expected_row_count", 1, note=f"generated={len(rows)} expected={expected['rows']}"))
+    if "total" in expected:
+        idx = headers.index(total_header)
+        total = sum(float(r[idx] or 0) for r in rows)
+        if abs(total - expected["total"]) > 1e-6:
+            problems.append(_item(area, "expected_total", 1, note=f"generated={total} expected={expected['total']}"))
+    return problems
+
+
 def compare(args: argparse.Namespace) -> dict[str, Any]:
-    report: dict[str, Any] = {}
+    expected = json.loads(Path(args.expected).read_text(encoding="utf-8")) if args.expected else {}
+    order_groups = json.loads(Path(args.order_groups).read_text(encoding="utf-8")) if args.order_groups else {}
+    report: dict[str, Any] = {"sections": {}}
+    accepted: list = []
+    unexpected: list = []
     pairs = (
         ("app", args.generated_app, args.golden_app, APP_SUMMARY_SHEETS, APP_DETAIL_SHEETS),
         ("web", args.generated_web, args.golden_web, WEB_SUMMARY_SHEETS, WEB_DETAIL_SHEETS),
@@ -329,25 +430,86 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
             continue
         gen, gold = Path(gen), Path(gold)
         section: dict[str, Any] = {"ledger": _compare_ledger(gen, gold, LEDGER_BLOCKS[key])}
-        for sheet in summaries:
-            section[sheet] = _compare_keyed(
-                _read_table(gen, sheet), _read_table(gold, sheet), key_header="作品名",
-                samples=args.samples, include_values=args.include_values,
+        for block, result in section["ledger"].items():
+            cells = result["mismatched_cells"]
+            if not result["coin_labels_equal"]:
+                unexpected.append(_item(f"{key}/ledger/{block}", "coin_labels", 1))
+            if key == "web" and cells and all(c[0] in "CFH" and ":" not in c for c in cells):
+                accepted.append(
+                    _item(f"{key}/ledger/{block}", "cells:" + ",".join(cells), len(cells), accepted="web_historical_ledger_drift")
+                )
+            elif cells:
+                unexpected.append(_item(f"{key}/ledger/{block}", "cells:" + ",".join(cells), len(cells)))
+        summary_total, detail_total = TOTAL_COLUMNS[key]
+        golden_episode_rows = None
+        for sheet in summaries + details:
+            is_summary = sheet in summaries
+            gen_table, gold_table = _read_table(gen, sheet), _read_table(gold, sheet)
+            area = f"{key}/{sheet}"
+            sheet_expected = (expected.get(key) or {}).get(sheet, {})
+            unexpected += _check_expected(area, gen_table, sheet_expected, summary_total if is_summary else detail_total)
+            if sheet == details[0]:
+                golden_episode_rows = gold_table[1]
+            if key == "web" and sheet == details[-1] and golden_episode_rows is not None and gold_table[1] == golden_episode_rows:
+                # Golden defect: validate the generated sheet independently instead.
+                gen_keys = [r[0] for r in gen_table[1]]
+                episode_keys = {r[0] for r in _read_table(gen, details[0])[1]}
+                validation = {
+                    "golden_sheet_equals_episode_sheet": True,
+                    "generated_rows": len(gen_keys),
+                    "generated_keys_unique": len(gen_keys) == len(set(gen_keys)),
+                    "generated_keys_disjoint_from_episode": not (set(gen_keys) & episode_keys),
+                    "nat_text_cells_generated": sum(1 for r in gen_table[1] for v in r if isinstance(v, str) and v.strip() == "NaT"),
+                }
+                section[sheet] = {"golden_comparison": "skipped", "validation": validation}
+                accepted.append(
+                    _item(area, "golden_sheet_not_comparable", len(gold_table[1]), accepted="golden_web_book_sheet_is_episode_copy")
+                )
+                if not (
+                    validation["generated_keys_unique"]
+                    and validation["generated_keys_disjoint_from_episode"]
+                    and not validation["nat_text_cells_generated"]
+                ):
+                    unexpected.append(_item(area, "independent_validation", 1))
+                continue
+            result = _compare_keyed(
+                gen_table,
+                gold_table,
+                key_header="作品名" if is_summary else "コンテンツID_Raise",
+                samples=args.samples,
+                include_values=args.include_values,
             )
-        for sheet in details:
-            section[sheet] = _compare_keyed(
-                _read_table(gen, sheet), _read_table(gold, sheet), key_header="コンテンツID_Raise",
-                samples=args.samples, include_values=args.include_values,
-            )
-        report[key] = section
+            a, u = _classify_keyed(area, result, product=False, order_groups=(order_groups.get(key) or {}).get(sheet, {}))
+            accepted += a
+            unexpected += u
+            section[sheet] = result
+        report["sections"][key] = section
     if args.generated_product and args.golden_product:
         gen, gold = Path(args.generated_product), Path(args.golden_product)
-        gen_sheet = _workbook(gen).sheetnames[0]
-        gold_sheet = _workbook(gold).sheetnames[0]
-        report["product"] = _compare_keyed(
-            _read_table(gen, gen_sheet), _read_table(gold, gold_sheet), key_header="コンテンツID_Raise",
-            samples=args.samples, include_values=args.include_values,
+        result = _compare_keyed(
+            _read_table(gen, _workbook(gen).sheetnames[0]),
+            _read_table(gold, _workbook(gold).sheetnames[0]),
+            key_header="コンテンツID_Raise",
+            samples=args.samples,
+            include_values=args.include_values,
         )
+        a, u = _classify_keyed("product", result, product=True, order_groups={})
+        accepted += a
+        unexpected += u
+        report["sections"]["product"] = result
+
+    for section in report["sections"].values():
+        for value in [section] if "columns" in section else section.values():
+            if isinstance(value, dict):
+                value.pop("_gen_order", None)
+                value.pop("_gold_order", None)
+    report["classification"] = {
+        "verdict": "FAIL" if unexpected else ("PASS_WITH_ACCEPTED_DIFFS" if accepted else "PASS"),
+        "unexpected_diff_count": sum(i["actual_diff_count"] for i in unexpected),
+        "accepted_diff_count": sum(i["actual_diff_count"] for i in accepted),
+        "unexpected": unexpected,
+        "accepted": accepted,
+    }
     return report
 
 
@@ -357,6 +519,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--generated-{kind}")
         parser.add_argument(f"--golden-{kind}")
     parser.add_argument("--report", required=True)
+    parser.add_argument("--expected", help="JSON {app|web: {sheet: {rows, total}}} checked against the generated sheets")
+    parser.add_argument(
+        "--order-groups",
+        help="JSON {app|web: {sheet: {key: sort-key group}}}; a row-order difference is annotated when every "
+        "differing position falls inside one group (ties of the documented sort key)",
+    )
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--include-values", action="store_true", help="also write mismatching cell values (local use only)")
     args = parser.parse_args(argv)
@@ -365,7 +533,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         _close_workbooks()
     Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    c = report["classification"]
     print(f"written: {args.report}")
+    print(f"verdict: {c['verdict']} unexpected={c['unexpected_diff_count']} accepted={c['accepted_diff_count']}")
     return 0
 
 

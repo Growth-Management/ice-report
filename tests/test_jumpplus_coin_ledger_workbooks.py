@@ -118,21 +118,33 @@ class LedgerSheetTests(_Base):
 
 
 class SummaryTests(_Base):
-    def test_summary_rows_group_by_work_and_sort_by_total(self):
+    def test_work_list_order_is_min_name_kana_then_work_name(self):
+        rows = [
+            {"ex_work_name": "Z", "name_kana": "アア"},
+            {"ex_work_name": "B", "name_kana": "カ"},
+            {"ex_work_name": "B", "name_kana": "ア"},  # min kana of B = ア
+            {"ex_work_name": "A", "name_kana": "ア"},  # ties with B -> 作品名
+            {"ex_work_name": "N", "name_kana": None},  # NULL sorts first
+        ]
+        self.assertEqual(workbooks.summary_work_names(rows), ["N", "A", "B", "Z"])
+
+    def test_summary_rows_group_by_work_and_keep_work_list_order(self):
         rows = [
             {"ex_work_name": "A", "purchase_type": "episode", "total_use_coins": Decimal(10), "pay_coins_total": Decimal(10)},
             {"ex_work_name": "B", "purchase_type": "book", "total_use_coins": Decimal(30), "free_ad_coins_total": Decimal(30), "ex_comic_type": "X"},
             {"ex_work_name": "A", "purchase_type": "book", "total_use_coins": Decimal(5), "pay_gift_coins_total": Decimal(5)},
         ]
         out = workbooks.build_summary_rows(rows, unit="コイン", works=["A", "B", "C"], with_type=True)
-        self.assertEqual([r["作品名"] for r in out], ["B", "A", "C"])
-        a = out[1]
+        self.assertEqual([r["作品名"] for r in out], ["A", "B", "C"])  # no consumption-based re-sort
+        a = out[0]
         self.assertEqual(a["コイン消費合計"], 15)
         self.assertEqual(a["話\n有償コイン消費数"], 10)
         self.assertEqual(a["巻\n贈答コイン消費数"], 5)
-        self.assertEqual(out[0]["巻\n広告コイン消費数"], 30)
-        self.assertEqual(out[0]["種別"], "X")
+        self.assertEqual(out[1]["巻\n広告コイン消費数"], 30)
+        self.assertEqual(out[1]["種別"], "X")
         self.assertEqual(out[2]["コイン消費合計"], 0)
+        blank = workbooks.build_summary_rows(rows, unit="ポイント", works=["A", "B"], with_type=True, type_mode=workbooks.TYPE_BLANK)
+        self.assertEqual([r["種別"] for r in blank], [None, None])
 
     def test_app_summary_sheets_share_work_list_and_keep_totals_row(self):
         template = fx.build_app_template(self.tmp / "app_t.xlsx")
@@ -160,7 +172,8 @@ class DetailTests(_Base):
         self.assertEqual(tuple(episode), workbooks.detail_headers("コイン", "episode"))
         self.assertEqual(episode["コンテンツID"], record["v2_content_id_token"])
         self.assertEqual(episode["備考"], "-")
-        self.assertEqual(episode["配信開始日"], record["ex_sales_start_date"].isoformat())
+        self.assertEqual(episode["配信開始日"], record["ex_sales_start_date"])
+        self.assertIsInstance(episode["配信開始日"], date)
         self.assertIsInstance(episode["消費コイン"], int)
         book = workbooks.detail_row(record, unit="ポイント", purchase_type="book")
         self.assertEqual((book["配信開始日"], book["備考"], book["雑誌"], book["種別"]), ("-", "-", "-", "-"))
@@ -214,6 +227,80 @@ class DetailTests(_Base):
         self.assertEqual(ctx.exception.code, "template_header_missing")
 
 
+class DateAndOrderTests(_Base):
+    def test_missing_dates_are_empty_cells_never_nat_text(self):
+        pd = fx.pd  # the real pandas bound at fixture import (some test modules stub sys.modules["pandas"])
+
+        self.assertIsNone(workbooks._excel_date(pd.NaT))
+        self.assertIsNone(workbooks._excel_date(None))
+        self.assertIsNone(workbooks._excel_date(float("nan")))
+        self.assertEqual(workbooks._excel_date(pd.Timestamp("2026-08-01")), date(2026, 8, 1))
+        template = fx.build_product_template(self.tmp / "p_t.xlsx")
+        out = self.tmp / "p.xlsx"
+        workbooks.build_product_workbook(template_path=template, output_path=out, target_month=TARGET, source=self.source)
+        ws = load_workbook(out)["file"]
+        col = [c.value for c in ws[1]].index("配信開始日") + 1
+        values = [ws.cell(r, col).value for r in range(2, ws.max_row + 1)]
+        self.assertNotIn("NaT", [str(v) for v in values])
+        self.assertIn(None, values)
+        self.assertTrue(all(v is None or hasattr(v, "year") for v in values))
+
+    def test_episode_start_date_is_native_excel_date_with_template_format(self):
+        template = fx.build_app_template(self.tmp / "app_t.xlsx")
+        wb = load_workbook(template)
+        for sheet_name in ("有料話消費コイン（Apple）", "有料話消費コイン（Google）"):
+            ws = wb[sheet_name]
+            col = [c.value for c in ws[3]].index("配信開始日") + 1
+            ws.cell(4, col).number_format = "yy/mm/dd"
+        wb.save(template)
+        out = self.tmp / "app.xlsx"
+        workbooks.build_app_workbook(template_path=template, output_path=out, target_month=TARGET, source=self.source)
+        ws = load_workbook(out)["有料話消費コイン（Apple）"]
+        col = [c.value for c in ws[3]].index("配信開始日") + 1
+        cells = [ws.cell(r, col) for r in range(4, ws.max_row + 1)]
+        dated = [c for c in cells if c.value is not None]
+        self.assertTrue(dated)
+        self.assertTrue(all(c.is_date and c.number_format == "yy/mm/dd" for c in dated))
+        self.assertNotIn("NaT", [str(c.value) for c in cells])
+
+    def test_detail_rows_are_sorted_by_name_kana_then_content_id(self):
+        template = fx.build_app_template(self.tmp / "app_t.xlsx")
+        out = self.tmp / "app.xlsx"
+        workbooks.build_app_workbook(template_path=template, output_path=out, target_month=TARGET, source=self.source)
+        expected = [
+            r["prefixed_id"]
+            for r in sorted(
+                report.content_rows_for(self.source.content, app_id=31, purchase_type="episode"),
+                key=lambda r: (r["name_kana"], float(r["content_id"])),
+            )
+        ]
+        ws = load_workbook(out)["有料話消費コイン（Apple）"]
+        self.assertEqual([ws.cell(r, 1).value for r in range(4, 4 + len(expected))], expected)
+
+    def test_app_summary_order_is_work_list_order_on_all_three_sheets(self):
+        template = fx.build_app_template(self.tmp / "app_t.xlsx")
+        out = self.tmp / "app.xlsx"
+        workbooks.build_app_workbook(template_path=template, output_path=out, target_month=TARGET, source=self.source)
+        app_rows = [r for r in self.source.content if int(r["app_id"]) in (31, 32)]
+        expected = workbooks.summary_work_names(app_rows)
+        wb = load_workbook(out)
+        for sheet_name in ("サマリ", "サマリ (Apple)", "サマリ (Google)"):
+            ws = wb[sheet_name]
+            self.assertEqual([ws.cell(r, 1).value for r in range(4, 4 + len(expected))], expected, sheet_name)
+
+    def test_web_summary_type_is_blank(self):
+        template = fx.build_web_template(self.tmp / "web_t.xlsx")
+        out = self.tmp / "web.xlsx"
+        counts = workbooks.build_web_workbook(template_path=template, output_path=out, target_month=TARGET, source=self.source)
+        ws = load_workbook(out)["サマリ"]
+        col = [c.value for c in ws[3]].index("種別") + 1
+        self.assertEqual({ws.cell(r, col).value for r in range(4, 4 + counts["サマリ"])}, {None})
+
+    def test_package_writer_date_serial(self):
+        self.assertEqual(pkg_writer.excel_date_serial(date(2026, 8, 1)), 46235)
+        self.assertEqual(pkg_writer.excel_date_serial(date(1900, 3, 1)), 61)
+
+
 class ProductTests(_Base):
     def test_product_master_mapping(self):
         template = fx.build_product_template(self.tmp / "p_t.xlsx")
@@ -231,7 +318,7 @@ class ProductTests(_Base):
         self.assertEqual(row["作品名"], first["work_title"])
         self.assertEqual(row["著者名"], first["author_name"])
         self.assertEqual(row["価格（コイン）"], first["price_in_coin"])
-        self.assertEqual(row["配信開始日"], first["ex_sales_start_date"].isoformat())
+        self.assertEqual(row["配信開始日"].date(), first["ex_sales_start_date"])
 
 
 class PackagePreservationTests(_Base):

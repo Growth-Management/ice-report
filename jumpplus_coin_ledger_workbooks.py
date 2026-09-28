@@ -89,9 +89,7 @@ WEB_LEDGER_BLOCKS = (LedgerBlock("A1", "ポイント出納", 3, 4, ("Web",)),)
 def _num(value: Any) -> int | float | None:
     """BigQuery NUMERIC -> Decimal; pandas may give float/NaN. Whole numbers
     are written as int (no trailing .0 in the cell)."""
-    if value is None:
-        return None
-    if isinstance(value, float) and value != value:
+    if _missing(value):
         return None
     if isinstance(value, Decimal):
         if not value.is_finite():
@@ -206,18 +204,55 @@ def _work_key(row: dict[str, Any]) -> str:
     return str(name)
 
 
+def _missing(value: Any) -> bool:
+    """None, float NaN, and pandas NaT/NA (BigQuery NULLs after
+    to_dataframe()) all mean "no value" -- never a string like "NaT".
+    Detected by self-inequality (NaN != NaN, NaT != NaT) rather than by
+    importing pandas, so the check cannot be changed by whatever pandas
+    module happens to be loaded; pd.NA, whose comparison is itself
+    ambiguous, raises on bool() and is treated as missing too."""
+    if value is None:
+        return True
+    if isinstance(value, (str, bytes)):
+        return False
+    try:
+        return bool(value != value)
+    except (TypeError, ValueError):
+        return True
+
+
+def _kana(row: dict[str, Any]) -> str:
+    value = row.get("name_kana")
+    return "" if _missing(value) else str(value)
+
+
 def summary_work_names(rows: list[dict[str, Any]]) -> list[str]:
-    return sorted({_work_key(r) for r in rows})
+    """The file's work list, in the existing report's order: ascending
+    MIN(name_kana) over the work's rows, then 作品名. Verified against the
+    2026-08 Golden Master: exact row-order match for App (1,745 works) and
+    WEB (821 works). NULL name_kana sorts first (as BigQuery's ASC does)."""
+    min_kana: dict[str, str] = {}
+    for row in rows:
+        key = _work_key(row)
+        kana = _kana(row)
+        if key not in min_kana or kana < min_kana[key]:
+            min_kana[key] = kana
+    return sorted(min_kana, key=lambda work: (min_kana[work], work))
+
+
+TYPE_FROM_COMIC_TYPE = "comic_type"
+TYPE_BLANK = "blank"
 
 
 def build_summary_rows(
-    rows: list[dict[str, Any]], *, unit: str, works: list[str], with_type: bool
+    rows: list[dict[str, Any]], *, unit: str, works: list[str], with_type: bool, type_mode: str = TYPE_FROM_COMIC_TYPE
 ) -> list[dict[str, Any]]:
-    """One row per work in `works` (every work of the file, so the per-
-    platform sheets list the same works as the total sheet, with zeros where
-    a platform had no consumption). コイン消費合計 is SUM(total_use_coins);
-    the 12 component columns are the per purchase_type sums. Sorted by
-    消費合計 descending, then 作品名."""
+    """One row per work in `works`, in that order (every work of the file,
+    so the per-platform sheets list the same works in the same order as the
+    total sheet, with zeros where a platform had no consumption).
+    コイン消費合計 is SUM(total_use_coins); the 12 component columns are the
+    per purchase_type sums. 種別 (when the sheet has it): ex_comic_type for
+    App, always blank for WEB (type_mode=TYPE_BLANK)."""
     totals: dict[str, int | float] = defaultdict(int)
     components: dict[str, dict[str, int | float]] = defaultdict(lambda: defaultdict(int))
     comic_types: dict[str, Counter] = defaultdict(Counter)
@@ -241,9 +276,11 @@ def build_summary_rows(
             out[header] = components[work].get(header, 0)
         if with_type:
             counts = comic_types.get(work)
-            out["種別"] = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0] if counts else None
+            if type_mode == TYPE_BLANK or not counts:
+                out["種別"] = None
+            else:
+                out["種別"] = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
         result.append(out)
-    result.sort(key=lambda r: (-r[f"{unit}消費合計"], r["作品名"]))
     return result
 
 
@@ -274,23 +311,26 @@ def detail_headers(unit: str, purchase_type: str) -> tuple[str, ...]:
     ) + tail
 
 
-def _date_text(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    if hasattr(value, "date") and callable(getattr(value, "date")):  # pandas Timestamp
-        try:
-            return value.date().isoformat()
-        except Exception:
-            return value
-    if isinstance(value, float) and value != value:
+def _excel_date(value: Any) -> date | None:
+    """A native date for the template's yy/mm/dd cells, or None (empty cell)
+    for NULL -- pandas NaT included, which used to leak out as the text
+    "NaT" (2026-08 Golden Run)."""
+    if _missing(value):
         return None
-    return value
+    if isinstance(value, datetime):  # also pandas Timestamp
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
+    return None
 
 
 def _text(value: Any) -> Any:
-    if value is None or (isinstance(value, float) and value != value):
+    if _missing(value):
         return None
     return value
 
@@ -314,7 +354,7 @@ def detail_row(record: dict[str, Any], *, unit: str, purchase_type: str) -> dict
         # is the former `_mom` ex_comics_start_date constant '-' -- never
         # ex_sales_start_date (confirmed spec, 2026-09-28).
         "配信開始日": (
-            _date_text(record.get("ex_sales_start_date"))
+            _excel_date(record.get("ex_sales_start_date"))
             if purchase_type == "episode"
             else _text(record.get("ex_comics_start_date", "-"))
         ),
@@ -380,6 +420,25 @@ WEB_DETAIL_SHEETS = (
 )
 
 
+def detail_sort_key(record: dict[str, Any]) -> tuple:
+    """name_kana ascending (the existing report's order: every 2026-08
+    Golden Master detail sheet is non-decreasing in name_kana with identical
+    per-kana group sizes), then content_id as the deterministic tie-break.
+    The Golden's own order *within* equal name_kana is not reproducible by
+    any column (it is not deterministic at the source), so content_id --
+    the previous ordering key -- is kept for ties."""
+    content_id = record.get("content_id")
+    try:
+        numeric_id = float(content_id) if not _missing(content_id) else float("inf")
+    except (TypeError, ValueError):
+        numeric_id = float("inf")
+    return (_kana(record), numeric_id)
+
+
+def _detail_records(content: list[dict[str, Any]], *, app_id: int, purchase_type: str) -> list[dict[str, Any]]:
+    return sorted(content_rows_for(content, app_id=app_id, purchase_type=purchase_type), key=detail_sort_key)
+
+
 def _rows_for_apps(content: list[dict[str, Any]], app_ids: tuple[int, ...]) -> list[dict[str, Any]]:
     wanted = set(app_ids)
     return [r for r in content if r.get("app_id") is not None and int(r["app_id"]) in wanted]
@@ -400,7 +459,7 @@ def build_app_workbook(*, template_path: Path, output_path: Path, target_month: 
         counts[sheet_name] = len(rows)
 
     for sheet_name, app_id, purchase_type in APP_DETAIL_SHEETS:
-        records = content_rows_for(source.content, app_id=app_id, purchase_type=purchase_type)
+        records = _detail_records(source.content, app_id=app_id, purchase_type=purchase_type)
         rows = [detail_row(r, unit="コイン", purchase_type=purchase_type) for r in records]
         _replace_table(package, sheet_name, detail_headers("コイン", purchase_type), rows)
         counts[sheet_name] = len(rows)
@@ -418,12 +477,15 @@ def build_web_workbook(*, template_path: Path, output_path: Path, target_month: 
 
     counts: dict[str, int] = {}
     web_rows = _rows_for_apps(source.content, (101,))
-    rows = build_summary_rows(web_rows, unit="ポイント", works=summary_work_names(web_rows), with_type=True)
+    # The WEB report's 種別 column is left blank (confirmed spec).
+    rows = build_summary_rows(
+        web_rows, unit="ポイント", works=summary_work_names(web_rows), with_type=True, type_mode=TYPE_BLANK
+    )
     _replace_table(package, WEB_SUMMARY_SHEET, summary_headers("ポイント", with_type=True), rows)
     counts[WEB_SUMMARY_SHEET] = len(rows)
 
     for sheet_name, app_id, purchase_type in WEB_DETAIL_SHEETS:
-        records = content_rows_for(source.content, app_id=app_id, purchase_type=purchase_type)
+        records = _detail_records(source.content, app_id=app_id, purchase_type=purchase_type)
         rows = [detail_row(r, unit="ポイント", purchase_type=purchase_type) for r in records]
         _replace_table(package, sheet_name, detail_headers("ポイント", purchase_type), rows)
         counts[sheet_name] = len(rows)
@@ -454,7 +516,7 @@ def product_row(record: dict[str, Any]) -> dict[str, Any]:
         if field in _PRODUCT_NUMERIC_FIELDS:
             out[header] = _num(value)
         elif field == "ex_sales_start_date":
-            out[header] = _date_text(value)
+            out[header] = _excel_date(value)
         else:
             out[header] = _text(value)
     return out

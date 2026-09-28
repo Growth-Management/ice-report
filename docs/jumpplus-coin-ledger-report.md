@@ -112,8 +112,9 @@ readinessがNGのときは次のとおりになる。
   - いずれもSUBTOTALの合計行付きで、空の書式行が事前確保されている。作品数に合わせて行数を合わせる
   - 作品名 = `ex_work_name`
   - 各platformシートにも合計シートと同じ作品一覧を出す（該当platformの消費が無い作品は0）
-  - 並びは消費合計の降順、同値は作品名順
+  - 並び（work list）: 作品ごとの `MIN(name_kana)` 昇順、同値は作品名昇順（NULLは先頭）。App の3シートは同じwork list順、WEBはWEB側のwork list順。2026-08 Golden Masterと行順が完全一致（App 1,745 / WEB 821作品）
 - 明細4シート（zoom 80%、E4で固定）: `有料話消費コイン（Apple/Google）`（Table `話明細_*`）、`有料巻消費コイン（Apple/Google）`（Table `巻明細_*`）。18列で、後ろ2列は話=コミックスJDCN / コミックス巻数、巻=雑誌 / 種別
+  - 並び: `name_kana` 昇順、同値は `content_id` 昇順。Golden Masterの全明細シートは `name_kana` で単調非減少かつ各kanaの行数が一致することを確認済み。Golden側の同値内の順序はどの列でも再現できない（ソース側で非決定的）ため、同値の中の順序は `content_id` で決定的にしている（2026-08: 同値グループ内の125位置がGoldenと異なる）
 
 **WEB**（4シート。Excel保存版で、calcChain・shared formula・`_FilterDatabase` 定義名がある）
 
@@ -121,14 +122,16 @@ readinessがNGのときは次のとおりになる。
 
 **話売商品**（シート `file`、Table `テーブル1` A1:J、ヘッダー1行目、A2固定、zoom 85%）
 
-- 列: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、コンテンツ名=`name`、作品名=`work_title`、著者名=`author_name`、JDCN=`jdcn`、価格（コイン）=`price_in_coin`、配信開始日=`ex_sales_start_date`、コミックスJDCN=`ex_comics_jdcn`、コミックス巻数=`ex_episode_package_no`
-- 「現在の全話売商品マスタ」を出す仕様。購入履歴ベースの旧一覧とは、配信開始日235件・コミックスJDCN 113件・コミックス巻数113件で差分があるが、マスタの現在値を正とする
+- 列: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、コンテンツ名=`name`、作品名=`work_title`、著者名=`author_name`、JDCN=`jdcn`、価格（コイン）=`price_in_coin`、配信開始日=`ex_sales_start_date`（Excelネイティブ日付、NULLは空セル）、コミックスJDCN=`ex_comics_jdcn`、コミックス巻数=`ex_episode_package_no`
+- 「生成時点の全話売商品マスタ」を出す仕様。価格・配信開始日・コミックスJDCN・コミックス巻数はマスタの現在値を正とし、過去の納品物（購入履歴ベースの旧一覧）との差は current-master drift として扱う。差分件数はマスタの更新で変わるため固定の期待値にしない
 
-明細の列の対応: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、価格=`unit_price`、DL数=`download_count`、消費=`total_use_coins`、有償=`pay_coins_total`、購入お得=`pay_bonus_coins_total`、無償広告=`free_ad_coins_total`、無償ボーナス=`free_bonus_coins_total`、贈答=`pay_gift_coins_total`、動画リワード広告=`reward_video_ad_coin_count`、配信開始日=話は`ex_sales_start_date`（`YYYY-MM-DD` 文字列）、巻は固定値`'-'`（旧`_mom`の`ex_comics_start_date`相当。`ex_sales_start_date`は使わない）、備考=`ex_note`、作品名=`ex_work_name`、雑誌=`ex_magazine`、種別=`ex_file_type`。
+明細の列の対応: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、価格=`unit_price`、DL数=`download_count`、消費=`total_use_coins`、有償=`pay_coins_total`、購入お得=`pay_bonus_coins_total`、無償広告=`free_ad_coins_total`、無償ボーナス=`free_bonus_coins_total`、贈答=`pay_gift_coins_total`、動画リワード広告=`reward_video_ad_coin_count`、配信開始日=話は`ex_sales_start_date`（Excelネイティブ日付。テンプレートの `yy/mm/dd` 書式のまま、NULL / NaT は空セル）、巻は固定値`'-'`（旧`_mom`の`ex_comics_start_date`相当。`ex_sales_start_date`は使わない）、備考=`ex_note`、作品名=`ex_work_name`、雑誌=`ex_magazine`、種別=`ex_file_type`。
 
-サマリの「種別」には `ex_comic_type`（作品内の最頻値）を入れる。
+サマリの「種別」: App は `ex_comic_type`（作品内の最頻値）。WEB は常に空欄（ex_comic_typeを出さない。Golden Masterの821作品すべて空欄と一致）。
 
-※ この節の列の対応・並び順・日付の表記は Golden Run（現在作成済みExcelとの突合）で確定する。
+> 未確定: App 種別は、既存帳票では1作品に複数の `ex_comic_type` がある場合 `/` 連結（例 `JC/ノベル`、`JC+/JC`）だが、2026-08のコンテンツ明細から連結順を完全再現できる規則が無く、明細上NULLの2作品にもGoldenは値を持つ。旧work_listが購入実績以外（話売商品マスタ等）から作られていた可能性があり、確認できるまで現行（最頻値）のまま（2026-08: 12作品差）。
+
+※ 列の対応・並び順・日付型は 2026-08 Golden Run（下記）で確認した。
 
 ### Writer
 
@@ -158,6 +161,8 @@ readinessがNGのときは次のとおりになる。
 - Slack通知には、配布URL・token・GCS pathを含めない
 
 ## Rerun / version
+
+> 過去月を再生成した場合、上流（`report_plus_monthly_coin_report` 等）の履歴が後日補正されていれば、当時納品したファイルと繰越・残高などが異なる場合がある（例: 2026-08 WEB出納の繰越3区分）。BigQueryの現在値を正とし、過去納品値のimmutable snapshot化は行っていない（scope外）。話売商品も生成時点のマスタを出すため、再生成すると当時と内容が変わり得る。
 
 - 同じ target_month を手動で再生成すると、既存deliveryを残したまま新しい version（3ファイルのセット）を追加し、`current_version` を切り替える。公開URL・allowlist・期限・active状態は変わらない
   - 注意: version追加では `expires_at` を延長しない（既存の `add_delivery_version` と同じ扱い）
@@ -194,7 +199,7 @@ scheduled-generateの応答（Cloud Schedulerは非2xxをretryする）:
 
 `report_schedules.REPORT_SCHEDULE_SPECS` の `jumpplus-coin-ledger` エントリに、上表の expected（cron / timezone / endpoint / audience = service root）が登録されている。管理画面の Schedules タブでは、job作成前は `NOT_CREATED`、作成後は `OK` になることが完了条件（`docs/operations.md`「Schedules」参照）。
 
-## Golden Run（未実施）
+## Golden Run（2026-08 実施: 2026-09-28）
 
 - target_month: 2026-08
 - 方法: ローカルCLI（BigQueryを読み、ローカルでファイルを作るだけ。Drive / GCS / Firestore / delivery には触れない）
@@ -220,7 +225,20 @@ python jumpplus_coin_ledger_report.py --target-month 2026-08 --generated-date 20
 | WEB 巻 | 2,688行 / 5,899,007 |
 | 話売商品 | 100,823行（2026-09-28調査時点の参考値。コードには固定しない） |
 
-件数・総計に加えて、代表作品・代表明細を現在作成済みExcelと突き合わせる。結果はこの節に記録する。
+突合: `scripts/compare_coin_ledger_golden.py`（ローカルファイルのみ。値は出さず件数・列別diff・キーのサンプルを出す。`--expected` で上表、`--order-groups` で並びの同値グループを検証）。差分は unexpected / accepted（理由付き）に分けて数える。
+
+結果（2回目、仕様確定後の修正込み）: 判定 **FAIL（unexpected 137）**。期待値表の件数・総計はすべて一致。
+
+| 区分 | 内容 | 件数 |
+|---|---|---|
+| 一致 | App/Apple/Google/WEB サマリ（行順・作品集合・全列。WEB種別は空欄で一致）、全明細の全列（コンテンツID=`v2_content_id_token`、話の配信開始日=Excel日付、巻の配信開始日 `'-'`）、App出納3ブロック（B-H、システム調整=`cancellation_coins_m`）、Apple/Googleの0件作品の0埋め | - |
+| accepted: WEB historical ledger drift | WEB出納の繰越（有償・無償ボーナス・贈答用購入）と連動する残高・繰越込消費率 | 9セル |
+| accepted: current master | 話売商品のID追加 20,695 / 価格 3,053 / 配信開始日 414（マスタNULL）/ コミックスJDCN 113 / 巻数 113 | - |
+| accepted: Golden不備 | WEB「有料巻消費ポイント」がGoldenでは話シートのコピー。生成物は2,688行・5,899,007・キー一意・話とキー重複なしで独立検証 | - |
+| unexpected | App サマリ種別（`/` 連結規則が未確定） | 12 |
+| unexpected | 明細の行順（すべて `name_kana` 同値グループ内。Apple話45 / Google話62 / Apple巻2 / Google巻6 / WEB話10） | 125 |
+
+`"NaT"` 文字列は0件（修正前は話売商品で21,109セル）。
 
 ## 運用手順
 
@@ -255,7 +273,7 @@ Invoke-RestMethod -Method Post `
 
 ## Production未実施項目
 
-- [ ] 2026-08 Golden Run と突合結果の記録
+- [x] 2026-08 Golden Run と突合結果の記録（unexpected 137件は判断待ち）
 - [ ] Production deploy（`app.py` を変更しているため `report-generator` と `report-generator-admin` の両方）
 - [ ] Cloud Scheduler SA `jumpplus-coin-ledger-scheduler` の作成と、Cloud Run env（`JUMPPLUS_COIN_LEDGER_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS` / `_AUDIENCE`）の設定
 - [ ] Cloud Scheduler job `jumpplus-coin-ledger-monthly-report` の作成、OIDC smoke、重複（409）smoke、source_not_ready（503）smoke

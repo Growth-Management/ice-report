@@ -15,6 +15,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
@@ -52,9 +53,11 @@ def dummy_source(*, seed: int = 7, contents_per_app: int = 40, works: int = 6, m
                     "pay_gift_coins_total": Decimal(parts[4]),
                     "reward_video_ad_coin_count": Decimal(parts[5]),
                     "ex_work_name": f"ダミー作品{i % works}",
-                    "name_kana": "ダミー",
+                    # varies independently of content_id, so kana ordering is exercised
+                    "name_kana": f"カナ{(i * 37) % 97:03d}",
                     "ex_comic_type": "オリジナル" if i % works else "コミックス",
-                    "ex_sales_start_date": date(2025, 1 + i % 12, 1),
+                    # pandas NaT, as to_dataframe() yields for a NULL DATE
+                    "ex_sales_start_date": pd.NaT if i % 11 == 5 else date(2025, 1 + i % 12, 1),
                     "ex_comics_jdcn": None if i % 4 else f"C{i:06d}",
                     "ex_episode_package_no": None if i % 4 else i % 9,
                     **report.MOM_ONLY_FIXED_COLUMNS,
@@ -91,7 +94,7 @@ def dummy_source(*, seed: int = 7, contents_per_app: int = 40, works: int = 6, m
             "author_name": f"著者{i % 3}",
             "jdcn": f"J{i:07d}",
             "price_in_coin": 50,
-            "ex_sales_start_date": date(2024, 1 + i % 12, 1),
+            "ex_sales_start_date": pd.NaT if i % 7 == 3 else date(2024, 1 + i % 12, 1),
             "ex_comics_jdcn": None,
             "ex_episode_package_no": None,
         }
@@ -133,7 +136,8 @@ def _table_sheet(wb, title, table_name, headers, *, blank_rows=1, totals=False, 
     for c, header in enumerate(headers, start=1):
         ws.cell(row=3, column=c, value=header)
         for r in range(4, 4 + blank_rows):
-            ws.cell(row=r, column=c).number_format = "#,##0"
+            # the official templates format 配信開始日 as yy/mm/dd
+            ws.cell(row=r, column=c).number_format = "yy/mm/dd" if header == "配信開始日" else "#,##0"
     last_data = 3 + blank_rows
     last_col = ws.cell(row=3, column=len(headers)).column_letter
     ref = f"A3:{last_col}{last_data + (1 if totals else 0)}"
@@ -204,6 +208,8 @@ def build_product_template(path: Path) -> Path:
     headers = tuple(h for h, _ in workbooks.PRODUCT_HEADERS)
     for c, header in enumerate(headers, start=1):
         ws.cell(row=1, column=c, value=header)
+        if header == "配信開始日":
+            ws.cell(row=2, column=c).number_format = "yy/mm/dd"
     table = Table(displayName="テーブル1", ref="A1:J2")
     table.tableStyleInfo = TableStyleInfo(name="TableStyleLight21", showRowStripes=True)
     ws.add_table(table)

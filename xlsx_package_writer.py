@@ -27,6 +27,7 @@ from __future__ import annotations
 import copy
 import re
 import zipfile
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -314,6 +315,18 @@ def _format_number(value: int | float | Decimal) -> str:
     return repr(value)
 
 
+_EXCEL_EPOCH = datetime(1899, 12, 30)
+
+
+def excel_date_serial(value: date | datetime) -> int | float:
+    """1900 date system serial (the one every template here uses): whole
+    days for a date, days + day fraction for a datetime."""
+    if isinstance(value, datetime):
+        delta = value.replace(tzinfo=None) - _EXCEL_EPOCH
+        return delta.days + delta.seconds / 86400
+    return (value - _EXCEL_EPOCH.date()).days
+
+
 def _set_cell_value(row_el: etree._Element, col_idx: int, row_num: int, value: Any) -> None:
     col_letter = _index_to_col_letter(col_idx)
     ref = f"{col_letter}{row_num}"
@@ -340,6 +353,11 @@ def _set_cell_value(row_el: etree._Element, col_idx: int, row_num: int, value: A
         cell_el.set("t", "b")
         v_el = etree.SubElement(cell_el, _qn("main", "v"))
         v_el.text = "1" if value else "0"
+    elif isinstance(value, (date, datetime)):
+        # Native Excel date: a serial number, displayed through the cell's
+        # existing (template) date number format, e.g. yy/mm/dd.
+        v_el = etree.SubElement(cell_el, _qn("main", "v"))
+        v_el.text = _format_number(excel_date_serial(value))
     elif isinstance(value, (int, float, Decimal)):
         v_el = etree.SubElement(cell_el, _qn("main", "v"))
         v_el.text = _format_number(value)
