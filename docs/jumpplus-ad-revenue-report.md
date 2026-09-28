@@ -62,9 +62,11 @@ AD_REVENUE_WEB_TEMPLATE_FILE_ID=1LJ72durOS1ekPO79GtDFdrJX23Vr8je-
 
 AD_REVENUE_SCHEDULED_RUNS_COLLECTION=ad_revenue_scheduled_runs
 AD_REVENUE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS=thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com
-AD_REVENUE_SCHEDULER_AUDIENCE=<report-generator の実URL>/admin/reports/jumpplus-ad-revenue/<report_type>/scheduled-generate
 AD_REVENUE_SYNC_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS=thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com
-AD_REVENUE_SYNC_SCHEDULER_AUDIENCE=<report-generator の実URL>/admin/ad-revenue/scheduled-sync
+# audienceはCloud Runサービスのルートオリジン固定(パス/クエリ/末尾スラッシュなし)。
+# endpointごとの完全URLではない -- 理由は「Cloud Scheduler設定」セクション参照。
+AD_REVENUE_SCHEDULER_AUDIENCE=<report-generator の実URL(ルートのみ)>
+AD_REVENUE_SYNC_SCHEDULER_AUDIENCE=<report-generator の実URL(ルートのみ)>
 ```
 
 `BIGQUERY_PROJECT_ID` / `PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` はBigQueryクライアントのプロジェクトに使う
@@ -544,9 +546,69 @@ Invoke-RestMethod `
 
 ## Cloud Scheduler設定(自動実行する場合)
 
-4つのジョブが必要(3帳票分の生成ポーリング + 確定値同期)。
+4つのジョブが必要(3帳票分の生成ポーリング + 確定値同期)。2026-09-28、3帳票すべてのProduction
+Acceptance PASS後にScheduler ENABLEDへ移行した際の確定設計は以下の通り。
+
+### 前提env(report-generator)
+
+`_check_scheduler_oidc_auth()` 共通ヘルパーが要求する `<env_prefix>_ALLOWED_SERVICE_ACCOUNTS` と
+`<env_prefix>_AUDIENCE` を設定する(`ALLOWED_SERVICE_ACCOUNTS` 未設定だと `scheduler_auth_not_configured`
+で全リクエストが401になり、有効なOIDCトークンでも通らない -- 2026-09-28のpreflightで実際にこの状態を
+検出し、追加した):
+
+```
+AD_REVENUE_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS=thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com
+AD_REVENUE_SYNC_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS=thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com
+AD_REVENUE_SCHEDULER_AUDIENCE=https://report-generator-635067190197.asia-northeast1.run.app
+AD_REVENUE_SYNC_SCHEDULER_AUDIENCE=https://report-generator-635067190197.asia-northeast1.run.app
+```
+
+**audienceはCloud Runサービスのルートオリジン固定(パスなし・クエリなし・末尾スラッシュなし)を採用する。
+`request.base_url`(呼ばれたendpointの完全URL)へのフォールバックは使わない。** 当初、`AD_REVENUE_SCHEDULER`
+という同一env_prefixを3帳票(video-reward/app2/web)の異なるendpointが共有しているため固定の1値では
+各endpointの完全URLを表現できない、という理由でaudience envを未設定にしフォールバックへ委ねる設計を
+試したが、2026-09-28のProduction smokeで `invalid_oidc_token` により失敗した。原因は、Cloud RunがTLSを
+フロントエンドで終端しコンテナへは内部的にプレーンHTTPで転送するため、`app.py`に`ProxyFix`等の
+X-Forwarded-Proto対応がなく、`request.base_url` が `https://` ではなく `http://` として構築され、
+Cloud Scheduler側が送る `https://` audienceのOIDCトークンと一致しなかったためと判明している
+(既存のTHERMAE/PLUS/REPORT_DEFINITION各schedulerは、そもそも`request.base_url`フォールバックを
+使わず固定audience envを設定する運用だったため、このバグの影響を受けていなかった)。
+
+このため、ProxyFix導入等のアプリ全体へ影響する変更は行わず、Scheduler側の `--oidc-token-audience` を
+**サービスのルートURLに統一**(endpointごとの完全URLではない)することで解決した。`--uri` は従来通り
+各endpointの完全URLのまま。`google.oauth2.id_token.verify_oauth2_token()` はaudienceの完全一致のみを
+見るため、Cloud Runサービスの外部公開URL(`https://report-generator-635067190197.asia-northeast1.run.app`)
+さえ一致していれば、path部分がendpointごとに異なっていても認証は成立する。
+
+Production smoke(2026-09-28)で実証済み: `ad-revenue-sync` を実際にCloud Schedulerからmanual runし、
+`ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_COMPLETED`(BigQuery MERGE成功、row_count妥当)をWARNINGログで確認。
+生成系についても、同一のallowed SA/固定audienceでSA impersonationした OIDC tokenを用い、
+`video-reward` の `scheduled-generate` に対し安全な未確定対象月(`2027-06-01`)を指定してHTTP 200・
+`status: "waiting"`(実帳票生成なし、Firestore claimなし)を確認した。app2/webの2ジョブは同一の
+共通ヘルパー・同一allowed SA env・同一固定audience・同一Cloud Runサービスで、endpoint pathのみが
+異なるため、上記2件の実証結果をもって3帳票共通の認証経路が機能することの根拠とする。
+
+### Schedule(stagger設計、2026-09-28確定)
+
+3帳票を同時刻に実行すると、`report-generator` の `containerConcurrency=80` の下でCloud Runが
+複数リクエストを同一インスタンスへルーティングする可能性を排除できず、video-reward単体で過去に
+実測した生成時ピークメモリ(修正後約1.25GiB、コンテナ上限2Gi)を踏まえると、複数帳票が同一
+インスタンスで同時実行された場合にOOM再発のリスクが残る。このリスクを避けるため、当初docsに
+あった3帳票同時08:00実行から、以下のようにstaggerする方針へ変更した(`containerConcurrency`/
+`memory` 自体は変更していない):
+
+| ジョブ | schedule (JST) | 理由 |
+|---|---|---|
+| `ad-revenue-sync` | `*/30 * * * *`(変更なし) | 確定値同期。冪等なMERGEで負荷も軽い |
+| `ad-revenue-video-reward-monthly-report` | `5 8 * * *` | 08:00の同期実行と重ならないよう5分ずらす |
+| `ad-revenue-app2-monthly-report` | `15 8 * * *` | video-rewardの生成(~1分程度)と重ならないよう10分後 |
+| `ad-revenue-web-monthly-report` | `25 8 * * *` | app2の生成と重ならないよう10分後 |
 
 ```powershell
+# audienceは4ジョブ共通でCloud Runサービスのルートオリジン固定(パス/クエリ/末尾スラッシュなし)。
+# --uriのみジョブごとに完全なendpoint URLを指定する。
+$AUDIENCE = "https://<service-url>"
+
 # 確定値同期: 30分おき
 gcloud.cmd scheduler jobs create http ad-revenue-sync `
   --project=ice-sh --location=asia-northeast1 `
@@ -554,22 +616,21 @@ gcloud.cmd scheduler jobs create http ad-revenue-sync `
   --uri="https://<service-url>/admin/ad-revenue/scheduled-sync" `
   --http-method=POST `
   --oidc-service-account-email="thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com" `
-  --oidc-token-audience="https://<service-url>/admin/ad-revenue/scheduled-sync"
+  --oidc-token-audience="$AUDIENCE"
 
-# レポート生成ポーリング: 毎日08:00 JST (report_typeごとに1ジョブ、例は video-reward)
+# レポート生成ポーリング: 毎日08:05/08:15/08:25 JST でstagger
 gcloud.cmd scheduler jobs create http ad-revenue-video-reward-monthly-report `
   --project=ice-sh --location=asia-northeast1 `
-  --schedule="0 8 * * *" --time-zone="Asia/Tokyo" `
+  --schedule="5 8 * * *" --time-zone="Asia/Tokyo" `
   --uri="https://<service-url>/admin/reports/jumpplus-ad-revenue/video-reward/scheduled-generate" `
   --http-method=POST `
   --oidc-service-account-email="thermae-romae-scheduler@ice-sh.iam.gserviceaccount.com" `
-  --oidc-token-audience="https://<service-url>/admin/reports/jumpplus-ad-revenue/video-reward/scheduled-generate"
-# app2 / web も同様に report_type部分を差し替えて作成する
+  --oidc-token-audience="$AUDIENCE"
+# app2は15 8 * * *、webは25 8 * * * -- report_type部分(--uri)を差し替えるのみ、--oidc-token-audienceは共通
 ```
 
-同期を08:00より前に何度か回しておく(例: 07:00, 07:30)ことで、明細データ準備(1日7:00)の直後から
-確定値が反映されていればその日のうちに生成される。確定値がまだの場合は `waiting` を返し続けるだけで、
-アラートは出ない。
+同期を08:00に回すことで、明細データ準備(1日7:00)の直後から確定値が反映されていればその日のうちに
+生成される。確定値がまだの場合は `waiting` を返し続けるだけで、アラートは出ない。
 
 ## テスト
 
@@ -943,30 +1004,21 @@ image rollback不要にロールバックできる。
   テンプレート(Drive file ID `1IsZCv8COFLAyPlo-FxOD7_dmKUbGO5GM`)の列A幅を8.25→14へ修正・再生成の
   うえ再確認してPASS(他の帳票仕様・数値・数式は無変更)。
 - **Scheduler acceptance gate**: 3帳票すべてのExcel Desktop acceptanceがPASSしたため解除。
-  Scheduler有効化自体は別途のOIDC/並行実行/observability preflightに従う(下記参照)。
-- **production deploy**: `report-generator`(image `ecb6233...`、`DRIVE_UPLOAD_TRANSPORT=authorized_session`
+- **production deploy**: `report-generator`(image `112376f...`、`DRIVE_UPLOAD_TRANSPORT=authorized_session`
   有効)・`report-generator-admin`(同imageへ同期、env/IAM/リソース設定は不変)ともに完了。
 - **Drive出力フォルダのruntime SAアクセス**: 3帳票とも実際に「広告売上」フォルダ
   (`1jxC2AZ6eeDKx1wVr86kf4Ilw86FWTART`)へ正常にアップロードできたことを確認済み(実運用で解消)。
+- **Cloud Scheduler**: 2026-09-28、4ジョブ(`ad-revenue-sync` / `ad-revenue-video-reward-monthly-report` /
+  `ad-revenue-app2-monthly-report` / `ad-revenue-web-monthly-report`)を作成し、OIDC smoke
+  (sync実行でBigQuery MERGE成功、生成endpointは安全な未確定対象月でHTTP 200/waitingを確認)PASS後、
+  4件とも`state=ENABLED`。**Scheduler: ENABLED**(以前のBLOCKEDから移行)。
+- **Sheets OAuth / `dataset_exdata_tables` IAM**: `ad-revenue-sync` のOIDC smokeが実際に
+  `row_count=65`でBigQuery MERGE成功したことにより、Sheets読み取り・BigQuery書き込みIAMとも
+  正常に機能していることを実証済み(以下の項目1・2は解消)。
 
 ### 残っている既知事項
 
-1. **Sheets OAuth認証情報・API有効化**: `ice-report-runner` への共有は行わない方針(確定、上記
-   「Sheets認証」参照)。代わりに `sinohara@impress.co.jp` のユーザーOAuth(`SHEETS_AUTH_MODE=oauth`、
-   Drive OAuthと同じ方式)で読み取る。Scheduler有効化前のOIDC smokeで `ad-revenue-sync`
-   (確定値同期)の実行結果とあわせて確認する。
-2. **`dataset_exdata_tables` への書き込みIAM**: 上記「BigQueryへの新規テーブルと権限」参照。
-   `ad_revenue_confirmed_monthly` への書き込みが必要になった時点で権限不足が判明する設計
-   (フェイルクローズ)。`ad-revenue-sync` の実行結果で確認する。
-3. **Cloud Scheduler**: 4ジョブ(sync 1件 + report generation 3件)の作成状況は本ドキュメントの
-   「Scheduler有効化」セクションを正とする(作成日・state・preflight結果を記録)。
-4. **observability**: Python root loggerがデフォルトWARNINGのため、`logging.info()` は
-   Cloud Loggingに一切出ない(Scheduler運用に必要な `ICE_REPORT_AD_REVENUE_READINESS` /
-   `ICE_REPORT_AD_REVENUE_SCHEDULE_SKIPPED` / `ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_COMPLETED`
-   がこれに該当していた)。PR `fix/ad-revenue-scheduler-observability` でこの3行のみ
-   `logging.warning()` へ変更(通常の帳票生成ロジック・BigQueryクエリ・Drive転送は無変更)。
-   グローバルなroot logger levelのINFO化は既存全サービスのログ量増加リスクがあるため見送り。
-5. **動画リワードのF/G列相当(著者還元額・作品別ロールアップ)は自動計算されない**: 「作品別」シートの
+1. **動画リワードのF/G列相当(著者還元額・作品別ロールアップ)は自動計算されない**: 「作品別」シートの
    `コイン消費割合`/`広告還元額`列や、サマリの「著者還元額」ブロックは、明細データだけからは計算できない
    追加のビジネスロジック(単価・還元率など)が必要と見られ、本実装のスコープ外(受入条件である
    総計金額・明細のコイン消費数/広告表示数には影響しない)。運用上必要であれば、情シス側で別途手動計算・
