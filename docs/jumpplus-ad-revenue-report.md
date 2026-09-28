@@ -508,8 +508,11 @@ Drive登録は行っていない -- item 20の「切替」はレビュー後の�
 
 ## ログ・監査
 
-- readiness判定結果は `logging.info("ICE_REPORT_AD_REVENUE_READINESS report_type=%s target_month=%s status=%s", ...)`
-  で毎回記録する(waiting/readyの別、生の金額やSQL・Excelセル値は出さない)。
+- readiness判定結果は `logging.warning("ICE_REPORT_AD_REVENUE_READINESS report_type=%s target_month=%s status=%s", ...)`
+  で毎回記録する(waiting/readyの別、生の金額やSQL・Excelセル値は出さない)。WARNINGなのはroot loggerの
+  デフォルトレベルがWARNINGでlogging.info()がCloud Loggingに届かないため(2026-09-28、
+  `fix/ad-revenue-scheduler-observability`)。同じ理由で `ICE_REPORT_AD_REVENUE_SCHEDULE_SKIPPED`
+  (冪等性スキップ)・`ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_COMPLETED`(同期成功)もWARNINGにしている。
 - 手動生成の成功/失敗は `_log_admin_audit_event(action="ad_revenue_generate", ...)` に記録され、
   detailに `target_month` / `revenue_yen` / `detail_row_count` を含む(既存の thermae 実装が
   `payment_total` 等を audit detail に含めているのと同じ扱い -- Admin監査ログのみに残り、生ログには出さない)。
