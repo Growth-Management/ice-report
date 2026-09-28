@@ -163,8 +163,23 @@ class DetailTests(_Base):
         self.assertEqual(episode["配信開始日"], record["ex_sales_start_date"].isoformat())
         self.assertIsInstance(episode["消費コイン"], int)
         book = workbooks.detail_row(record, unit="ポイント", purchase_type="book")
-        self.assertEqual((book["雑誌"], book["種別"]), ("-", "-"))
+        self.assertEqual((book["配信開始日"], book["備考"], book["雑誌"], book["種別"]), ("-", "-", "-", "-"))
         self.assertIn("価格（ポイント）", book)
+        self.assertEqual(tuple(book), workbooks.detail_headers("ポイント", "book"))
+
+    def test_book_start_date_is_never_ex_sales_start_date(self):
+        template = fx.build_app_template(self.tmp / "app_t.xlsx")
+        out = self.tmp / "app.xlsx"
+        workbooks.build_app_workbook(template_path=template, output_path=out, target_month=TARGET, source=self.source)
+        wb = load_workbook(out)
+        for sheet_name in ("有料巻消費コイン（Apple）", "有料巻消費コイン（Google）"):
+            ws = wb[sheet_name]
+            col = [c.value for c in ws[3]].index("配信開始日") + 1
+            values = {ws.cell(r, col).value for r in range(4, ws.max_row + 1)}
+            self.assertEqual(values, {"-"}, sheet_name)
+        ws = wb["有料話消費コイン（Apple）"]
+        col = [c.value for c in ws[3]].index("配信開始日") + 1
+        self.assertNotIn("-", {ws.cell(r, col).value for r in range(4, ws.max_row + 1)})
 
     def test_detail_tables_grow_and_split_by_platform_and_type(self):
         template = fx.build_app_template(self.tmp / "app_t.xlsx")

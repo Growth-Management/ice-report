@@ -124,7 +124,7 @@ readinessがNGのときは次のとおりになる。
 - 列: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、コンテンツ名=`name`、作品名=`work_title`、著者名=`author_name`、JDCN=`jdcn`、価格（コイン）=`price_in_coin`、配信開始日=`ex_sales_start_date`、コミックスJDCN=`ex_comics_jdcn`、コミックス巻数=`ex_episode_package_no`
 - 「現在の全話売商品マスタ」を出す仕様。購入履歴ベースの旧一覧とは、配信開始日235件・コミックスJDCN 113件・コミックス巻数113件で差分があるが、マスタの現在値を正とする
 
-明細の列の対応: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、価格=`unit_price`、DL数=`download_count`、消費=`total_use_coins`、有償=`pay_coins_total`、購入お得=`pay_bonus_coins_total`、無償広告=`free_ad_coins_total`、無償ボーナス=`free_bonus_coins_total`、贈答=`pay_gift_coins_total`、動画リワード広告=`reward_video_ad_coin_count`、配信開始日=`ex_sales_start_date`（`YYYY-MM-DD` 文字列）、備考=`ex_note`、作品名=`ex_work_name`、雑誌=`ex_magazine`、種別=`ex_file_type`。
+明細の列の対応: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、価格=`unit_price`、DL数=`download_count`、消費=`total_use_coins`、有償=`pay_coins_total`、購入お得=`pay_bonus_coins_total`、無償広告=`free_ad_coins_total`、無償ボーナス=`free_bonus_coins_total`、贈答=`pay_gift_coins_total`、動画リワード広告=`reward_video_ad_coin_count`、配信開始日=話は`ex_sales_start_date`（`YYYY-MM-DD` 文字列）、巻は固定値`'-'`（旧`_mom`の`ex_comics_start_date`相当。`ex_sales_start_date`は使わない）、備考=`ex_note`、作品名=`ex_work_name`、雑誌=`ex_magazine`、種別=`ex_file_type`。
 
 サマリの「種別」には `ex_comic_type`（作品内の最頻値）を入れる。
 

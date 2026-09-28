@@ -310,7 +310,14 @@ def detail_row(record: dict[str, Any], *, unit: str, purchase_type: str) -> dict
         "無償ボーナス": _num(record.get("free_bonus_coins_total")),
         "贈答": _num(record.get("pay_gift_coins_total")),
         "動画リワード広告": _num(record.get("reward_video_ad_coin_count")),
-        "配信開始日": _date_text(record.get("ex_sales_start_date")),
+        # episode: ex_sales_start_date. book: the official report's value
+        # is the former `_mom` ex_comics_start_date constant '-' -- never
+        # ex_sales_start_date (confirmed spec, 2026-09-28).
+        "配信開始日": (
+            _date_text(record.get("ex_sales_start_date"))
+            if purchase_type == "episode"
+            else _text(record.get("ex_comics_start_date", "-"))
+        ),
         "備考": _text(record.get("ex_note")),
         "作品名": _text(record.get("ex_work_name")),
     }
