@@ -3340,7 +3340,12 @@ def scheduled_generate_jumpplus_ad_revenue(report_type: str):
     if existing.exists:
         existing_status = (existing.to_dict() or {}).get("status", "")
         if existing_status == "succeeded":
-            logging.info(
+            # WARNING (not INFO): same rationale as ICE_REPORT_AD_REVENUE_READINESS
+            # above -- low volume (once daily per report_type), and confirming
+            # the idempotency skip actually fires is an operationally
+            # meaningful Scheduler signal that would otherwise never reach
+            # Cloud Logging.
+            logging.warning(
                 "ICE_REPORT_AD_REVENUE_SCHEDULE_SKIPPED report_type=%s target_month=%s reason=already_generated",
                 report_type,
                 target_month.isoformat(),
@@ -3351,7 +3356,12 @@ def scheduled_generate_jumpplus_ad_revenue(report_type: str):
         ), 409
 
     readiness = check_readiness(project_id=project_id, report_type=report_type, target_month=target_month)
-    logging.info(
+    # WARNING (not INFO): this Scheduler job runs once daily per report_type
+    # (low volume), and readiness/waiting state is exactly what Scheduler
+    # operators need visible in Cloud Logging -- the app's root logger has
+    # no explicit level configured, so plain INFO calls are silently
+    # dropped before ever reaching Cloud Logging.
+    logging.warning(
         "ICE_REPORT_AD_REVENUE_READINESS report_type=%s target_month=%s status=%s",
         report_type,
         target_month.isoformat(),
@@ -3695,7 +3705,12 @@ def scheduled_sync_jumpplus_ad_revenue():
         logging.error("ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_FAILED reason=%s", error_code)
         return jsonify({"error": error_code}), status_code
 
-    logging.info("ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_COMPLETED row_count=%s", result.get("row_count"))
+    # WARNING (not INFO): this Scheduler job runs every 30 minutes, and a
+    # successful sync completing (or silently never showing up in Cloud
+    # Logging, since the app's root logger has no explicit level and plain
+    # INFO calls are dropped before reaching Cloud Logging) is exactly the
+    # signal Scheduler operators need to confirm the sync job is alive.
+    logging.warning("ICE_REPORT_AD_REVENUE_SYNC_SCHEDULE_COMPLETED row_count=%s", result.get("row_count"))
     return jsonify(result)
 
 
