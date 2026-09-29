@@ -251,6 +251,24 @@ python jumpplus_coin_ledger_report.py --target-month 2026-08 --generated-date 20
 
 前回（2回目、仕様確定後）は判定 FAIL（unexpected 137: 種別12 + 行順125）だった。種別12件の詳細は「明細4シート」節の「サマリの『種別』」を参照。行順125件は本節「明細4シート」の並び節を参照。
 
+## メモリ最適化（2026-09-29 OOM調査）
+
+Production `report-generator`（旧 2GiB）で `create_delivery: false` の生成smoke中にOOM（2067 MiB使用、HTTP 503）が発生。Windowsローカルのpsutil計測（~905-932 MiB）はglibc/Linuxのメモリ挙動を再現できず、実態と大きく乖離することが判明したため、`--memory=2048m` 制限のLinux Dockerコンテナ（`python:3.12-slim`、Production同一Dockerfile）で、同一2026-08データ・同一手法（実オーケストレーション `fetch_source_data()` → `build_workbooks()` をそのまま1回実行し、`resource.getrusage().ru_maxrss` でtrue peakを取得）により、修正前(commit `5acf93c`、PR #145 merge時点)と修正後を比較した。
+
+| | true peak (`ru_maxrss`) |
+|---|---|
+| 修正前 | 2123.6 MiB |
+| 修正後（source lifecycle分離） | 2053.4 MiB |
+| 削減 | 約70 MiB（約3.3%） |
+
+- content: 193,196行 / product_master: 100,823行（2026-08）
+- 主要peakは **App workbook build** 単独（698.1→1963.3 MiB、修正前トレース）で、content/product_masterの同時保持（仮説A）は副次的な要因に留まった
+- root cause: `xlsx_package_writer.py` が大きいworksheet（App版だけで明細15万行超）を `lxml` の全木構造としてメモリ上に構築・保持する設計によるsingle-workbook working set。これはPR #138で解消済みの「複数worksheet treeをsaveまで累積保持」問題とは別の問題
+- 採用した修正: `fetch_source_data()` は常に `product_master=[]` を返し、`build_workbooks()` がApp/WEB構築後に `source.content`/`source.ledger` を解放してから `product_master` を取得しProductを構築する（lifecycle分離）。出力仕様・sort順・Golden差分分類は変更なし
+- 2GiBには収まらないため、Production側は暫定でCloud Run memoryを2GiB→4GiBへ変更する方針（本節と別途のProduction rollout記録を参照）
+- 上記lifecycle分離は「70MiBでは2GiBに収まらないから無価値」ではなく、working setを確実に削減し、将来content/product_master件数が増えた場合にも有効な恒久的改善として採用する
+- 未実施（別課題化）: `xlsx_package_writer` のstreaming/chunked XML生成への置き換え。全レポート共通コードのため影響範囲が大きく、専用の検証が必要（`docs/roadmap.md`「次の優先課題」参照）
+
 ## 運用手順
 
 - **月次（自動）**: 毎月1日 07:00 JST にScheduler jobが前月分を実行する
