@@ -363,6 +363,106 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(result["delivery"]["version"], 1)
 
 
+class BuildWorkbooksMemoryLifecycleTests(unittest.TestCase):
+    """build_workbooks() must fetch product_master only after App/WEB are
+    built, and release content/ledger before doing so -- holding
+    content (~190k rows in Production) and product_master (~100k rows)
+    simultaneously was the dominant driver of a real Production OOM
+    (2067 MiB used against a 2048 MiB limit). See
+    docs/jumpplus-coin-ledger-report.md for the stage-by-stage RSS
+    measurements that isolated this."""
+
+    def test_product_master_fetched_after_app_and_web_with_content_released(self):
+        import tempfile
+        from tests import coin_ledger_fixtures as fx
+
+        full_source = fx.dummy_source()
+        real_product_master = full_source.product_master
+        # Mimics fetch_source_data()'s new contract: product_master starts
+        # empty; build_workbooks() must populate it itself, later.
+        source = report.SourceData(
+            ledger=full_source.ledger,
+            content=full_source.content,
+            product_master=[],
+            comic_type_order_dates=full_source.comic_type_order_dates,
+        )
+
+        observed = {}
+
+        def fake_fetch_product_master(*, client):
+            # Captures state at call time: content/ledger must already be
+            # released (App/WEB are done and no longer need them).
+            observed["content_at_call"] = list(source.content)
+            observed["ledger_at_call"] = list(source.ledger)
+            return real_product_master
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            templates = {
+                "app": fx.build_app_template(tmp_path / "app_t.xlsx"),
+                "web": fx.build_web_template(tmp_path / "web_t.xlsx"),
+                "product": fx.build_product_template(tmp_path / "product_t.xlsx"),
+            }
+            output_dir = tmp_path / "out"
+            output_dir.mkdir()
+            with mock.patch.object(report, "fetch_product_master_rows", side_effect=fake_fetch_product_master):
+                files = report.build_workbooks(
+                    templates=templates,
+                    output_dir=output_dir,
+                    target_month=date(2026, 8, 1),
+                    generated_date=date(2026, 9, 1),
+                    source=source,
+                    project_id="p",
+                    client=mock.Mock(),
+                )
+
+        self.assertEqual(observed["content_at_call"], [])
+        self.assertEqual(observed["ledger_at_call"], [])
+        self.assertEqual([f.file_key for f in files], ["app", "web", "product"])
+        self.assertEqual(source.product_master, real_product_master)
+        product_file = next(f for f in files if f.file_key == "product")
+        self.assertEqual(product_file.row_counts.get("file"), len(real_product_master))
+
+    def test_fetch_source_data_returns_empty_product_master(self):
+        client = _RecordingClient([_content_totals_dummy_rows(), [], []])
+        # fetch_source_data calls: content, ledger, comic-type-order-dates
+        # (in that order) -- product_master must NOT be one of them.
+        source = report.fetch_source_data(project_id="p", target_month=date(2026, 8, 1), client=client)
+        self.assertEqual(source.product_master, [])
+        self.assertEqual(len(client.queries), 3)
+
+
+def _content_totals_dummy_rows():
+    return [
+        {
+            "purchase_date_month_jst": date(2026, 8, 1),
+            "app_id": 31,
+            "app_pf": "iOS",
+            "purchase_type": "episode",
+            "content_id": 1,
+            "prefixed_id": "episode-1",
+            "v2_content_id_token": "tok1",
+            "name": "n",
+            "jdcn": "j",
+            "unit_price": 1,
+            "download_count": 1,
+            "total_use_coins": 1,
+            "pay_coins_total": 1,
+            "pay_bonus_coins_total": 0,
+            "free_ad_coins_total": 0,
+            "free_bonus_coins_total": 0,
+            "pay_gift_coins_total": 0,
+            "reward_video_ad_coin_count": 0,
+            "ex_work_name": "w",
+            "name_kana": "カ",
+            "ex_comic_type": "JC",
+            "ex_sales_start_date": date(2025, 1, 1),
+            "ex_comics_jdcn": None,
+            "ex_episode_package_no": None,
+        }
+    ]
+
+
 class LoggingTests(unittest.TestCase):
     def test_info_events_are_emitted_as_structured_json(self):
         handler = next(h for h in report.logger.handlers if getattr(h, "_coin_ledger_handler", False))

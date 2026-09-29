@@ -573,13 +573,19 @@ def fetch_comic_type_order_dates(*, client: bigquery.Client, work_names: list[st
 
 
 def fetch_source_data(*, project_id: str, target_month: date, client: bigquery.Client | None = None) -> SourceData:
+    """App/WEB向けのsourceのみ取得する -- `product_master`は空のまま返す
+    (`build_workbooks()`がApp/WEB生成完了後、contentを解放してから別途
+    取得する)。content(~19万行)とproduct_master(~10万行)を同時に
+    メモリ保持し続けることが、Production環境(Linux)でのプロセスRSS
+    ピークを大幅に増加させることを実測で確認したため(2026-09、
+    docs/jumpplus-coin-ledger-report.md参照)。"""
     client = client or bigquery.Client(project=project_id)
     content = fetch_content_rows(client=client, target_month=target_month)
     work_names = sorted({r["ex_work_name"] for r in content if r.get("ex_work_name")})
     return SourceData(
         ledger=fetch_ledger_rows(client=client, target_month=target_month),
         content=content,
-        product_master=fetch_product_master_rows(client=client),
+        product_master=[],
         comic_type_order_dates=fetch_comic_type_order_dates(client=client, work_names=work_names),
     )
 
@@ -698,8 +704,6 @@ def upload_generated_files(
 # Orchestration
 # ---------------------------------------------------------------------------
 
-WorkbookBuilder = Callable[..., dict[str, int]]
-
 
 def build_workbooks(
     *,
@@ -708,37 +712,59 @@ def build_workbooks(
     target_month: date,
     generated_date: date,
     source: SourceData,
+    project_id: str,
+    client: bigquery.Client | None = None,
 ) -> list[GeneratedFile]:
     """Builds and validates all three files locally. Nothing is uploaded
     here, so a failure on any one file leaves no trace outside the temp
-    directory."""
+    directory.
+
+    `source.product_master` is expected to be empty on entry (see
+    `fetch_source_data`): App and WEB only read `source.content` /
+    `source.ledger` / `source.comic_type_order_dates`, so this fetches
+    product_master (~100k rows) only after App and WEB are built and their
+    content/ledger references are dropped, instead of holding content
+    (~190k rows) and product_master simultaneously for the whole run. This
+    was the dominant driver of Production's OOM (2067 MiB used against a
+    2048 MiB limit) -- see docs/jumpplus-coin-ledger-report.md for the
+    stage-by-stage RSS measurements that isolated it."""
     import jumpplus_coin_ledger_workbooks as workbooks
 
     names = output_file_names(target_month, generated_date)
-    builders: dict[str, WorkbookBuilder] = {
-        "app": workbooks.build_app_workbook,
-        "web": workbooks.build_web_workbook,
-        "product": workbooks.build_product_workbook,
-    }
     generated: list[GeneratedFile] = []
-    for spec in OUTPUT_FILES:
-        output_path = output_dir / names[spec.file_key]
-        row_counts = builders[spec.file_key](
-            template_path=templates[spec.file_key],
-            output_path=output_path,
-            target_month=target_month,
-            source=source,
+
+    for file_key, builder in (("app", workbooks.build_app_workbook), ("web", workbooks.build_web_workbook)):
+        spec = next(s for s in OUTPUT_FILES if s.file_key == file_key)
+        output_path = output_dir / names[file_key]
+        row_counts = builder(
+            template_path=templates[file_key], output_path=output_path, target_month=target_month, source=source
         )
         validate_xlsx_output(output_path)
         generated.append(
             GeneratedFile(
-                file_key=spec.file_key,
-                label=spec.label,
-                file_name=names[spec.file_key],
-                local_path=output_path,
-                row_counts=row_counts,
+                file_key=file_key, label=spec.label, file_name=names[file_key], local_path=output_path, row_counts=row_counts
             )
         )
+
+    # App/WEB are done: release the large content/ledger structures before
+    # fetching product_master, so the two never coexist in memory.
+    source.content = []
+    source.ledger = []
+
+    client = client or bigquery.Client(project=project_id)
+    source.product_master = fetch_product_master_rows(client=client)
+
+    spec = next(s for s in OUTPUT_FILES if s.file_key == "product")
+    output_path = output_dir / names["product"]
+    row_counts = workbooks.build_product_workbook(
+        template_path=templates["product"], output_path=output_path, target_month=target_month, source=source
+    )
+    validate_xlsx_output(output_path)
+    generated.append(
+        GeneratedFile(
+            file_key="product", label=spec.label, file_name=names["product"], local_path=output_path, row_counts=row_counts
+        )
+    )
     return generated
 
 
@@ -764,6 +790,7 @@ def generate_local(
         target_month=target_month,
         generated_date=generated_date,
         source=source,
+        project_id=project_id,
     )
     return {
         "status": "ok",
@@ -830,6 +857,7 @@ def generate_coin_ledger_report(
             target_month=target_month,
             generated_date=generated_date,
             source=source,
+            project_id=project_id,
         )
         log_event(
             "WORKBOOKS_BUILT",

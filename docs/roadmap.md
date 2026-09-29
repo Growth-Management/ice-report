@@ -163,6 +163,14 @@ setupとroadmapは現状に合わせて整理済みです。機密情報を含�
 
 - docs legacy reference check の実績に基づく許容リスト / 修正対象の微調整
 
+### 7. large Excel generation memory optimization
+
+2026-09-29のJump+コイン出納レポートOOM調査（`docs/jumpplus-coin-ledger-report.md`「メモリ最適化」節）で判明した課題。`xlsx_package_writer.py` が大きいworksheet（明細15万行超）を `lxml` の全木構造としてメモリ上に構築・保持する設計が、single-workbook working setの主要因（App workbook build単独で約1.2GB）。
+
+- 検討事項: lxml full-tree構築をstreaming/chunked XML生成へ置換可能か
+- 全帳票（ad-revenue、thermae-romaeなど）共通のwriterコードのため、影響範囲が大きく専用の検証が必要
+- 2026-09時点ではCloud Run memory 4GiB化で当面運用可能と見込み、今回のProduction rolloutのblockerにはしない
+
 ## Phase 7 Operational hardening / automation
 
 Phase 7 は、主要基盤の実装後に残る継続課題を日常運用へ定着させる
