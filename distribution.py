@@ -446,6 +446,243 @@ def create_scheduled_delivery_record(
     }
 
 
+DELIVERY_KIND_MULTI_FILE = "multi_file"
+_MULTI_FILE_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_MULTI_FILE_REPORT_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
+_MULTI_FILE_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+class MultiFileDeliveryError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def multi_file_delivery_id(report_key: str, report_month: str) -> str:
+    """Deterministic delivery document id: one delivery (one public URL) per
+    bespoke report and target month, so a Scheduler retry or a manual
+    re-run can only ever add a version to it, never create a second one."""
+    if not _MULTI_FILE_REPORT_KEY_PATTERN.match(report_key or ""):
+        raise MultiFileDeliveryError("invalid_report_key")
+    if not _MULTI_FILE_MONTH_PATTERN.match(report_month or ""):
+        raise MultiFileDeliveryError("invalid_report_month")
+    return f"{report_key}_{report_month}"
+
+
+def is_multi_file_version(version: dict[str, Any] | None) -> bool:
+    return bool(version) and isinstance(version.get("files"), list) and bool(version.get("files"))
+
+
+def _multi_file_entries(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not files:
+        raise MultiFileDeliveryError("files_required")
+    entries = []
+    seen: set[str] = set()
+    for item in files:
+        file_key = str(item.get("file_key") or "")
+        if not _MULTI_FILE_KEY_PATTERN.match(file_key) or file_key in seen:
+            raise MultiFileDeliveryError("invalid_file_key")
+        seen.add(file_key)
+        gcs_uri = str(item.get("gcs_uri") or "")
+        bucket, object_name = parse_gcs_uri(gcs_uri)
+        entries.append(
+            {
+                "file_key": file_key,
+                "label": str(item.get("label") or file_key),
+                "gcs_uri": gcs_uri,
+                "bucket": bucket,
+                "object_name": object_name,
+                "file_name": object_name.rsplit("/", 1)[-1],
+            }
+        )
+    return entries
+
+
+def plan_multi_file_delivery_write(
+    existing: dict[str, Any] | None,
+    *,
+    report_key: str,
+    report_title: str,
+    customer_name: str,
+    report_month: str,
+    files: list[dict[str, Any]],
+    allowed_domains: list[str],
+    expires_days: int,
+    note: str,
+    idempotency_key: str | None,
+    now: datetime,
+) -> tuple[str, dict[str, Any]]:
+    """Pure decision for one upsert (no Firestore access), run inside the
+    transaction in upsert_multi_file_delivery:
+
+    - ("create", doc): no delivery yet -> new delivery, version 1.
+    - ("append", update): delivery exists -> new version set, made current.
+      Everything else on the delivery (token/URL, allowlist, expiry,
+      active flag) is left exactly as it was.
+    - ("noop", version): a version with the same idempotency_key already
+      exists (e.g. a Scheduler retry after a response was lost) -> nothing
+      is written.
+
+    Refuses to append a multi-file version to a delivery that was not
+    created as a multi-file delivery, so a single-file delivery can never be
+    changed by this path."""
+    entries = _multi_file_entries(files)
+
+    if existing is None:
+        token = generate_token()
+        url = f"{PUBLIC_BASE_URL.rstrip('/')}/d/{token}" if PUBLIC_BASE_URL else f"/d/{token}"
+        version_doc = {
+            "version": 1,
+            "files": entries,
+            "file_name": f"{report_title}（{len(entries)}ファイル）",
+            "created_at": now,
+            "note": note,
+            "idempotency_key": idempotency_key or "",
+        }
+        doc = {
+            "delivery_kind": DELIVERY_KIND_MULTI_FILE,
+            "report_key": report_key,
+            "report_title": report_title,
+            "token_hash": hash_token(token),
+            "token": token,
+            "public_download_url": url,
+            "customer_name": customer_name,
+            "report_month": report_month,
+            "current_version": 1,
+            "active": True,
+            "expires_at": now + timedelta(days=expires_days),
+            "allowed_domains": sorted({d.strip().lower() for d in allowed_domains if str(d).strip()}),
+            "allowed_emails": [],
+            "versions": [version_doc],
+            "created_at": now,
+            "updated_at": now,
+            "source": "bespoke_report",
+        }
+        return "create", doc
+
+    if existing.get("delivery_kind") != DELIVERY_KIND_MULTI_FILE or existing.get("report_key") != report_key:
+        raise MultiFileDeliveryError("delivery_kind_mismatch")
+
+    versions = list(existing.get("versions") or [])
+    if idempotency_key:
+        for version in versions:
+            if version.get("idempotency_key") == idempotency_key:
+                return "noop", version
+
+    next_version = max([int(v.get("version", 0) or 0) for v in versions] or [0]) + 1
+    versions.append(
+        {
+            "version": next_version,
+            "files": entries,
+            "file_name": f"{report_title}（{len(entries)}ファイル）",
+            "created_at": now,
+            "note": note,
+            "idempotency_key": idempotency_key or "",
+        }
+    )
+    return "append", {"versions": versions, "current_version": next_version, "updated_at": now}
+
+
+def find_multi_file_version_by_idempotency_key(
+    report_key: str, report_month: str, idempotency_key: str
+) -> dict[str, Any] | None:
+    db = get_firestore_client()
+    snap = db.collection(FIRESTORE_COLLECTION_DELIVERIES).document(
+        multi_file_delivery_id(report_key, report_month)
+    ).get()
+    if not snap.exists:
+        return None
+    for version in (snap.to_dict() or {}).get("versions") or []:
+        if version.get("idempotency_key") == idempotency_key:
+            return version
+    return None
+
+
+def upsert_multi_file_delivery(
+    *,
+    report_key: str,
+    report_title: str,
+    customer_name: str,
+    report_month: str,
+    files: list[dict[str, Any]],
+    allowed_domains: list[str],
+    expires_days: int = DEFAULT_EXPIRES_DAYS,
+    note: str = "generated",
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Creates the report-month's multi-file delivery, or adds a new current
+    version set to it, in one Firestore transaction. Called only after every
+    file already exists in GCS, so the one write that makes a version
+    reachable is also the last step -- a failure anywhere earlier leaves no
+    partial version visible."""
+    delivery_id = multi_file_delivery_id(report_key, report_month)
+    db = get_firestore_client()
+    ref = db.collection(FIRESTORE_COLLECTION_DELIVERIES).document(delivery_id)
+    now = utcnow()
+
+    @firestore.transactional
+    def _apply(transaction):
+        snap = ref.get(transaction=transaction)
+        existing = (snap.to_dict() or {}) if snap.exists else None
+        action, payload = plan_multi_file_delivery_write(
+            existing,
+            report_key=report_key,
+            report_title=report_title,
+            customer_name=customer_name,
+            report_month=report_month,
+            files=files,
+            allowed_domains=allowed_domains,
+            expires_days=expires_days,
+            note=note,
+            idempotency_key=idempotency_key,
+            now=now,
+        )
+        if action == "create":
+            transaction.create(ref, payload)
+        elif action == "append":
+            transaction.update(ref, payload)
+        return action, payload, existing
+
+    action, payload, existing = _apply(db.transaction())
+
+    if action == "create":
+        delivery = payload
+        version = payload["current_version"]
+    elif action == "append":
+        delivery = {**(existing or {}), **payload}
+        version = payload["current_version"]
+    else:
+        delivery = existing or {}
+        version = int(payload.get("version") or 0)
+
+    if action != "noop":
+        # Deliberately no download URL / token / gcs_uri in this notification.
+        notify_slack_event(
+            "ICEレポート配布(複数ファイル)が作成されました" if action == "create" else "ICEレポート配布(複数ファイル)のバージョンが追加されました",
+            {
+                "delivery_id": delivery_id,
+                "customer_name": customer_name,
+                "report_month": report_month,
+                "version": version,
+                "file_count": len(files),
+                "active": delivery.get("active"),
+                "timestamp": now.isoformat(),
+            },
+            color=SLACK_COLOR_GOOD if action == "create" else SLACK_COLOR_INFO,
+        )
+
+    return {
+        "delivery_id": delivery_id,
+        "action": action,
+        "version": version,
+        "current_version": delivery.get("current_version"),
+        "active": delivery.get("active"),
+        "expires_at": _format_dt(delivery.get("expires_at")),
+        "public_download_url": delivery.get("public_download_url"),
+        "file_count": len(files),
+    }
+
+
 def _format_dt(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -471,6 +708,7 @@ def _public_delivery(
         "updated_at": _format_dt(delivery.get("updated_at")),
         "allowed_domains": delivery.get("allowed_domains") or [],
         "allowed_emails": delivery.get("allowed_emails") or [],
+        "delivery_kind": delivery.get("delivery_kind") or "single_file",
     }
 
     if include_versions:

@@ -27,6 +27,7 @@ from __future__ import annotations
 import copy
 import re
 import zipfile
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -314,6 +315,18 @@ def _format_number(value: int | float | Decimal) -> str:
     return repr(value)
 
 
+_EXCEL_EPOCH = datetime(1899, 12, 30)
+
+
+def excel_date_serial(value: date | datetime) -> int | float:
+    """1900 date system serial (the one every template here uses): whole
+    days for a date, days + day fraction for a datetime."""
+    if isinstance(value, datetime):
+        delta = value.replace(tzinfo=None) - _EXCEL_EPOCH
+        return delta.days + delta.seconds / 86400
+    return (value - _EXCEL_EPOCH.date()).days
+
+
 def _set_cell_value(row_el: etree._Element, col_idx: int, row_num: int, value: Any) -> None:
     col_letter = _index_to_col_letter(col_idx)
     ref = f"{col_letter}{row_num}"
@@ -340,6 +353,11 @@ def _set_cell_value(row_el: etree._Element, col_idx: int, row_num: int, value: A
         cell_el.set("t", "b")
         v_el = etree.SubElement(cell_el, _qn("main", "v"))
         v_el.text = "1" if value else "0"
+    elif isinstance(value, (date, datetime)):
+        # Native Excel date: a serial number, displayed through the cell's
+        # existing (template) date number format, e.g. yy/mm/dd.
+        v_el = etree.SubElement(cell_el, _qn("main", "v"))
+        v_el.text = _format_number(excel_date_serial(value))
     elif isinstance(value, (int, float, Decimal)):
         v_el = etree.SubElement(cell_el, _qn("main", "v"))
         v_el.text = _format_number(value)
@@ -853,3 +871,103 @@ def validate_preserved_parts(template_source: Any, output_source: Any, part_name
                 continue
             results[name] = template_zip.read(name) == output_zip.read(name)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Fixed-cell helpers (added for fixed-layout blocks such as the coin ledger
+# 出納 sheet). Purely additive: nothing above calls them, so existing
+# report writers are unaffected.
+# ---------------------------------------------------------------------------
+
+
+def read_cell_texts(pkg: XlsxPackage, sheet_name: str, refs: list[str]) -> dict[str, str]:
+    """Displayed text of each requested cell ("" for an absent/empty cell).
+    Read-only -- used to verify a template's fixed labels are where a writer
+    expects them before writing anything next to them."""
+    sheet_part = _sheet_name_to_part(pkg, sheet_name)
+    shared_strings = _read_shared_strings(pkg)
+    root = pkg.xml(sheet_part)
+    wanted = set(refs)
+    found: dict[str, str] = {}
+    for cell_el in root.iter(_qn("main", "c")):
+        ref = cell_el.get("r")
+        if ref in wanted:
+            found[ref] = _cell_text(cell_el, shared_strings)
+    return {ref: found.get(ref, "") for ref in refs}
+
+
+def write_fixed_cells(pkg: XlsxPackage, sheet_name: str, values: dict[str, Any]) -> None:
+    """Writes plain values into specific cells of a fixed-layout block,
+    keeping each cell's existing style (`s`) exactly as the template has it.
+    Refuses to overwrite a formula cell (XlsxPackageError
+    "formula_cell_overwrite"), so a template formula such as 残高 = C+B-D+E
+    can never be silently replaced by a hardcoded number. Missing rows/cells
+    are created (unstyled), in the correct sorted position."""
+    sheet_part = _sheet_name_to_part(pkg, sheet_name)
+    root = pkg.xml(sheet_part)
+    sheet_data = root.find(_qn("main", "sheetData"))
+    if sheet_data is None:
+        raise XlsxPackageError("sheet_data_not_found", sheet=sheet_name)
+
+    row_index = {int(r.get("r")): r for r in sheet_data.findall(_qn("main", "row"))}
+    for ref, value in values.items():
+        col_letter, row_num = _split_ref(ref)
+        row_el = row_index.get(row_num)
+        if row_el is None:
+            row_el = etree.Element(_qn("main", "row"))
+            row_el.set("r", str(row_num))
+            following = [n for n in sorted(row_index) if n > row_num]
+            if following:
+                row_index[following[0]].addprevious(row_el)
+            else:
+                sheet_data.append(row_el)
+            row_index[row_num] = row_el
+        existing = _find_cell(row_el, ref)
+        if existing is not None and existing.find(_qn("main", "f")) is not None:
+            raise XlsxPackageError("formula_cell_overwrite", sheet=sheet_name, ref=ref)
+        _set_cell_value(row_el, _col_letter_to_index(col_letter), row_num, value)
+    pkg.set_xml(sheet_part, root)
+
+
+def sync_filter_database_names(pkg: XlsxPackage) -> list[str]:
+    """Re-points each sheet-local `_xlnm._FilterDatabase` defined name at the
+    current autoFilter range of that sheet's (single) Excel Table, after
+    replace_detail_rows() resized it. Templates saved by Excel desktop carry
+    these hidden names (e.g. サマリ!$A$3:$O$4); left alone they keep
+    describing the pristine template's one-row table. Returns the sheet
+    names updated. Names for sheets without exactly one table are left
+    untouched."""
+    if not pkg.has("xl/workbook.xml"):
+        return []
+    wb_root = pkg.xml("xl/workbook.xml")
+    defined_names = wb_root.find(_qn("main", "definedNames"))
+    sheets_el = wb_root.find(_qn("main", "sheets"))
+    if defined_names is None or sheets_el is None:
+        return []
+
+    sheet_names = [s.get("name") for s in sheets_el.findall(_qn("main", "sheet"))]
+    updated: list[str] = []
+    for name_el in defined_names.findall(_qn("main", "definedName")):
+        if name_el.get("name") != "_xlnm._FilterDatabase" or name_el.get("localSheetId") is None:
+            continue
+        index = int(name_el.get("localSheetId"))
+        if not 0 <= index < len(sheet_names):
+            continue
+        sheet_name = sheet_names[index]
+        table_parts = _sheet_table_parts(pkg, _sheet_name_to_part(pkg, sheet_name))
+        if len(table_parts) != 1:
+            continue
+        table_root = pkg.xml(table_parts[0])
+        autofilter_el = table_root.find(_qn("main", "autoFilter"))
+        ref = autofilter_el.get("ref") if autofilter_el is not None else table_root.get("ref")
+        start, end = ref.split(":")
+        (sc, sr), (ec, er) = _split_ref(start), _split_ref(end)
+        # Same quoting Excel itself uses: bare for word characters (incl.
+        # Japanese, e.g. サマリ!$A$3:$O$4), quoted once spaces/brackets appear.
+        needs_quotes = not re.match(r"^[^\W\d][\w.]*$", sheet_name)
+        quoted = "'" + sheet_name.replace("'", "''") + "'" if needs_quotes else sheet_name
+        name_el.text = f"{quoted}!${sc}${sr}:${ec}${er}"
+        updated.append(sheet_name)
+    if updated:
+        pkg.set_xml("xl/workbook.xml", wb_root)
+    return updated

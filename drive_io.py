@@ -286,6 +286,18 @@ def download_drive_file(file_id: str, destination_path: str | Path, *, service=N
     return destination
 
 
+def trash_drive_file(file_id: str, *, service=None) -> None:
+    """Moves a file this app uploaded to the Drive trash (recoverable, not a
+    hard delete). Used only to clean up a multi-file report run's own
+    earlier uploads when a later file in the same run fails, so a partial
+    set is never left in the official output folder."""
+    service = service or get_drive_service()
+    try:
+        service.files().update(fileId=file_id, body={"trashed": True}, supportsAllDrives=True).execute()
+    except Exception as exc:
+        _raise_drive_error(exc)
+
+
 def upload_xlsx_to_drive(
     local_path: str | Path,
     *,

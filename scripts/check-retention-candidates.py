@@ -121,6 +121,22 @@ def version_gcs_uri(version: dict[str, Any]) -> str | None:
     return None
 
 
+def version_gcs_uris(version: dict[str, Any]) -> list[str]:
+    """Every GCS object a delivery version references: the single file of a
+    legacy single-file version, or each entry of a multi-file version's
+    `files` list (bespoke reports such as jumpplus-coin-ledger)."""
+    uris: list[str] = []
+    single = version_gcs_uri(version)
+    if single:
+        uris.append(single)
+    for entry in version.get("files") or []:
+        if isinstance(entry, dict):
+            uri = version_gcs_uri(entry)
+            if uri and uri not in uris:
+                uris.append(uri)
+    return uris
+
+
 def current_version_uri(delivery: dict[str, Any]) -> str | None:
     current_version = delivery.get("current_version")
     for version in delivery.get("versions") or []:
@@ -216,9 +232,7 @@ def gcs_object_candidates(
     for _, delivery in deliveries:
         if delivery.get("active") is True:
             for version in delivery.get("versions") or []:
-                uri = version_gcs_uri(version)
-                if uri:
-                    active_referenced_uris.add(uri)
+                active_referenced_uris.update(version_gcs_uris(version))
 
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -243,32 +257,32 @@ def gcs_object_candidates(
             continue
 
         for version in delivery.get("versions") or []:
-            uri = version_gcs_uri(version)
-            if not uri or uri in seen or uri in active_referenced_uris:
-                continue
-            bucket, object_name = parse_gcs_uri(uri)
-            if bucket != bucket_name:
-                continue
-            if prefix and object_name and not object_name.startswith(prefix):
-                continue
+            for uri in version_gcs_uris(version):
+                if uri in seen or uri in active_referenced_uris:
+                    continue
+                bucket, object_name = parse_gcs_uri(uri)
+                if bucket != bucket_name:
+                    continue
+                if prefix and object_name and not object_name.startswith(prefix):
+                    continue
 
-            seen.add(uri)
-            candidates.append(
-                {
-                    "gcs_uri": uri,
-                    "delivery_id": doc_id,
-                    "report_month": delivery.get("report_month"),
-                    "delivery_active": bool(delivery.get("active")),
-                    "version": version.get("version"),
-                    "is_current_version": version.get("version")
-                    == delivery.get("current_version"),
-                    "expires_at": iso(expires_at),
-                    "retain_until": iso(retain_until),
-                    "protected_by_active_delivery": False,
-                }
-            )
-            if len(candidates) >= limit:
-                return candidates
+                seen.add(uri)
+                candidates.append(
+                    {
+                        "gcs_uri": uri,
+                        "delivery_id": doc_id,
+                        "report_month": delivery.get("report_month"),
+                        "delivery_active": bool(delivery.get("active")),
+                        "version": version.get("version"),
+                        "is_current_version": version.get("version")
+                        == delivery.get("current_version"),
+                        "expires_at": iso(expires_at),
+                        "retain_until": iso(retain_until),
+                        "protected_by_active_delivery": False,
+                    }
+                )
+                if len(candidates) >= limit:
+                    return candidates
     return candidates
 
 

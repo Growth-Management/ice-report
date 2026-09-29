@@ -58,6 +58,8 @@
 1. 専用service account作成(例: `<report-name>-scheduler@ice-sh.iam.gserviceaccount.com`)
 2. Cloud Runへ `<PREFIX>_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS` / `<PREFIX>_SCHEDULER_AUDIENCE` を設定
 3. Cloud Scheduler jobを作成し、OIDC token(上記service account、audienceは`scheduled-generate`のURL)で呼び出す
+4. `report_schedules.py` の `REPORT_SCHEDULE_SPECS` へ `ScheduledReportSpec` を1件追加する(id / display_name / report_type / kind / scheduler_job_name / expected_schedule(cron) / timezone / endpoint / target_month_rule / audience_mode)。expected値はdocsに記録した値を正とし、live jobからコピーしない。管理画面 Schedules タブはregistryだけを見て描画するため、レポート個別のUI・if文は追加しない
+5. 管理画面 Schedules タブ(`GET /admin/report-schedules`)で、そのレポートの行が `OK` になること(job作成前は `NOT_CREATED`)を確認する。`CONFIG_DRIFT` / `UNREGISTERED` が残った状態では完了にしない
 
 ## チェックリスト
 
@@ -67,6 +69,12 @@
 - [ ] Drive/GCSの権限を確認した(Shared Drive制約の有無は `docs/drive-domain-wide-delegation.md` 参照)
 - [ ] 手動生成エンドポイントのsmokeを実施した
 - [ ] スケジュール実行が必要な場合: 専用SA作成・env設定・Cloud Scheduler job作成・OIDC smoke・重複実行(409)smokeを実施した
+- [ ] スケジュール実行が必要な場合(Definition of Done):
+  - [ ] `scheduled-generate` endpoint を実装し、OIDC保護した
+  - [ ] Cloud Scheduler job名・cron・timezone・endpoint URI・audienceを `docs/<report-name>-report.md` に記録した
+  - [ ] `report_schedules.REPORT_SCHEDULE_SPECS` に登録した(`tests/test_report_schedules.py` の「全scheduled endpointがregistry登録済み」テストが通る)
+  - [ ] 管理画面 Schedules タブで対象行を確認した
+  - [ ] expected / live の drift が無い(`OK`)
 - [ ] `docs/<report-name>-report.md` を作成した(`docs/thermae-romae-report.md` を参考に)
 - [ ] 監査ログ・Slack通知に secret、PIN、生メール、token断片、Admin key fingerprint、IP、user agent、Signed URL、SQL本文、Excelセル値が出ていないことを確認した
 
