@@ -462,6 +462,7 @@ class SourceData:
     ledger: list[dict[str, Any]]
     content: list[dict[str, Any]]
     product_master: list[dict[str, Any]]
+    comic_type_order_dates: dict[str, dict[str, date | None]] = field(default_factory=dict)
 
 
 def fetch_ledger_rows(*, client: bigquery.Client, target_month: date) -> list[dict[str, Any]]:
@@ -523,12 +524,63 @@ def fetch_product_master_rows(*, client: bigquery.Client) -> list[dict[str, Any]
     return client.query(query).to_dataframe().to_dict("records")
 
 
+# App サマリの「種別」の対象ラベルは、あくまで当月の購入実績にある
+# ex_comic_type(このmodule内 build_summary_rows 側の集計)を正とする --
+# raise_master_contents_worksが持つ全履歴の型をそのまま採用すると、
+# 当月の購入実績が無い型まで表示してしまい、Golden Masterの大多数の作品
+# (当月1種類しか売れていない)で単一値だったものまで誤って複合値に
+# なってしまう(2026-08 Golden Runで実際に検証し、この誤りを確認・修正)。
+#
+# raise_master_contents_worksは「複数の観測ラベルをどの順で連結するか」
+# の決定にのみ使う: 各ラベルが最初に episode として現れた日付(無ければ
+# 任意の content_type での最初の日付)の昇順。ただし ノベル は常に最後
+# (本編/主要なコミック種別に対する副次コンテンツという位置づけ。
+# 2026-08 Golden Runで確認したすべての複合値作品は、主要種別が先・
+# ノベルが後だった)。この2条件で、2026-08 Golden Masterの複合種別
+# 10作品すべての連結順を再現できることを確認済み
+# (docs/jumpplus-coin-ledger-report.md 参照)。
+def fetch_comic_type_order_dates(*, client: bigquery.Client, work_names: list[str]) -> dict[str, dict[str, date | None]]:
+    """{work: {ex_comic_type: sort_date}} -- sort_date is the earliest
+    episode-type publish_begin_date_jst for that (work, ex_comic_type), or
+    the earliest date of any content_type when that label never appears as
+    an episode. Used only to order labels that build_summary_rows already
+    observed in this month's purchases; never adds a label the month didn't
+    actually have."""
+    if not work_names:
+        return {}
+    query = f"""
+        select
+          ex_work_name,
+          ex_comic_type,
+          min(case when content_type = 'episode' then publish_begin_date_jst end) as earliest_episode_date,
+          min(publish_begin_date_jst) as earliest_any_date
+        from `{product_master_table()}`
+        where ex_work_name in unnest(@work_names)
+            and ex_comic_type is not null
+            and ex_comic_type != ''
+        group by ex_work_name, ex_comic_type
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("work_names", "STRING", work_names)]
+    )
+    rows = [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
+
+    out: dict[str, dict[str, date | None]] = {}
+    for row in rows:
+        best_date = row["earliest_episode_date"] or row["earliest_any_date"]
+        out.setdefault(row["ex_work_name"], {})[row["ex_comic_type"]] = best_date
+    return out
+
+
 def fetch_source_data(*, project_id: str, target_month: date, client: bigquery.Client | None = None) -> SourceData:
     client = client or bigquery.Client(project=project_id)
+    content = fetch_content_rows(client=client, target_month=target_month)
+    work_names = sorted({r["ex_work_name"] for r in content if r.get("ex_work_name")})
     return SourceData(
         ledger=fetch_ledger_rows(client=client, target_month=target_month),
-        content=fetch_content_rows(client=client, target_month=target_month),
+        content=content,
         product_master=fetch_product_master_rows(client=client),
+        comic_type_order_dates=fetch_comic_type_order_dates(client=client, work_names=work_names),
     )
 
 

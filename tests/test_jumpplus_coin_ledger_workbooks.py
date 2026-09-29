@@ -146,6 +146,55 @@ class SummaryTests(_Base):
         blank = workbooks.build_summary_rows(rows, unit="ポイント", works=["A", "B"], with_type=True, type_mode=workbooks.TYPE_BLANK)
         self.assertEqual([r["種別"] for r in blank], [None, None])
 
+    def test_multiple_comic_types_observed_this_month_are_joined_in_master_date_order(self):
+        # Reproduces the 2026-08 Golden Run チェンソーマン case: JC episode
+        # published before JC+ episode, so despite JC+ having more monthly
+        # purchases, Golden lists "JC/JC+" (chronological, not by count).
+        rows = [
+            {"ex_work_name": "W", "purchase_type": "episode", "total_use_coins": Decimal(1), "ex_comic_type": "JC+"},
+            {"ex_work_name": "W", "purchase_type": "episode", "total_use_coins": Decimal(1), "ex_comic_type": "JC"},
+        ]
+        order_dates = {"W": {"JC": date(2019, 4, 8), "JC+": date(2022, 7, 13)}}
+        out = workbooks.build_summary_rows(
+            rows, unit="コイン", works=["W"], with_type=True, comic_type_order_dates=order_dates
+        )
+        self.assertEqual(out[0]["種別"], "JC/JC+")
+
+    def test_novel_always_sorts_last_regardless_of_publish_date(self):
+        # Reproduces 元勇者は静かに暮らしたい: ノベル published earlier than
+        # YJC, but Golden still lists "YJC/ノベル" (novel is always the
+        # trailing, secondary type -- see fetch_comic_type_order_dates).
+        rows = [
+            {"ex_work_name": "W", "purchase_type": "book", "total_use_coins": Decimal(1), "ex_comic_type": "ノベル"},
+            {"ex_work_name": "W", "purchase_type": "book", "total_use_coins": Decimal(1), "ex_comic_type": "YJC"},
+        ]
+        order_dates = {"W": {"ノベル": date(2019, 12, 20), "YJC": date(2022, 8, 19)}}
+        out = workbooks.build_summary_rows(
+            rows, unit="コイン", works=["W"], with_type=True, comic_type_order_dates=order_dates
+        )
+        self.assertEqual(out[0]["種別"], "YJC/ノベル")
+
+    def test_comic_type_label_never_includes_a_type_not_purchased_this_month(self):
+        # A work whose master metadata has extra historical types must not
+        # gain them in 種別 just because master knows about them -- only
+        # types actually observed in this month's purchase rows are shown
+        # (2026-08 Golden Run: switching to a master-wide type set produced
+        # far more diffs than the original majority-vote approach).
+        rows = [{"ex_work_name": "W", "purchase_type": "episode", "total_use_coins": Decimal(1), "ex_comic_type": "JC"}]
+        order_dates = {"W": {"JC": date(2020, 1, 1), "ノベル": date(2021, 1, 1), "JC+": date(2019, 1, 1)}}
+        out = workbooks.build_summary_rows(
+            rows, unit="コイン", works=["W"], with_type=True, comic_type_order_dates=order_dates
+        )
+        self.assertEqual(out[0]["種別"], "JC")
+
+    def test_comic_type_order_falls_back_to_alphabetical_without_master_dates(self):
+        rows = [
+            {"ex_work_name": "W", "purchase_type": "episode", "total_use_coins": Decimal(1), "ex_comic_type": "JC+"},
+            {"ex_work_name": "W", "purchase_type": "episode", "total_use_coins": Decimal(1), "ex_comic_type": "JC"},
+        ]
+        out = workbooks.build_summary_rows(rows, unit="コイン", works=["W"], with_type=True)
+        self.assertEqual(out[0]["種別"], "JC/JC+")
+
     def test_app_summary_sheets_share_work_list_and_keep_totals_row(self):
         template = fx.build_app_template(self.tmp / "app_t.xlsx")
         out = self.tmp / "app.xlsx"

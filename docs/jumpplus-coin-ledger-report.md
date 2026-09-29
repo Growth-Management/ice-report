@@ -114,7 +114,7 @@ readinessがNGのときは次のとおりになる。
   - 各platformシートにも合計シートと同じ作品一覧を出す（該当platformの消費が無い作品は0）
   - 並び（work list）: 作品ごとの `MIN(name_kana)` 昇順、同値は作品名昇順（NULLは先頭）。App の3シートは同じwork list順、WEBはWEB側のwork list順。2026-08 Golden Masterと行順が完全一致（App 1,745 / WEB 821作品）
 - 明細4シート（zoom 80%、E4で固定）: `有料話消費コイン（Apple/Google）`（Table `話明細_*`）、`有料巻消費コイン（Apple/Google）`（Table `巻明細_*`）。18列で、後ろ2列は話=コミックスJDCN / コミックス巻数、巻=雑誌 / 種別
-  - 並び: `name_kana` 昇順、同値は `content_id` 昇順。Golden Masterの全明細シートは `name_kana` で単調非減少かつ各kanaの行数が一致することを確認済み。Golden側の同値内の順序はどの列でも再現できない（ソース側で非決定的）ため、同値の中の順序は `content_id` で決定的にしている（2026-08: 同値グループ内の125位置がGoldenと異なる）
+  - 並び: `name_kana` 昇順、同値は `content_id` 昇順。Golden Masterの全明細シートは `name_kana` で単調非減少かつ各kanaの行数が一致することを確認済み。Golden側の同値内の順序はどの列でも再現できない（ソース側で非決定的）ため、同値の中の順序は `content_id` で決定的にしている（2026-08: 同値グループ内の125位置がGoldenと異なる。**ACCEPTED_DIFF確定(2026-09-29)**: `scripts/build_coin_ledger_order_groups.py` でBigQuery content行から `コンテンツID_Raise -> name_kana` を再現し、`--order-groups` で厳密検証(name_kana groupの並び順一致・各groupの行数一致・group内キー集合一致・全列値一致・差分は全てgroup内部の順列のみ)を通過。5シート(Apple話45/Google話62/Apple巻2/Google巻6/WEB話10)すべてPASSし、合計125件と一致。`compare_coin_ledger_golden.py` はこの検証結果を `detail_row_order_within_name_kana_ties` としてACCEPTED_DIFFへ分類する）
 
 **WEB**（4シート。Excel保存版で、calcChain・shared formula・`_FilterDatabase` 定義名がある）
 
@@ -127,9 +127,18 @@ readinessがNGのときは次のとおりになる。
 
 明細の列の対応: コンテンツID_Raise=`prefixed_id`、コンテンツID=`v2_content_id_token`、価格=`unit_price`、DL数=`download_count`、消費=`total_use_coins`、有償=`pay_coins_total`、購入お得=`pay_bonus_coins_total`、無償広告=`free_ad_coins_total`、無償ボーナス=`free_bonus_coins_total`、贈答=`pay_gift_coins_total`、動画リワード広告=`reward_video_ad_coin_count`、配信開始日=話は`ex_sales_start_date`（Excelネイティブ日付。テンプレートの `yy/mm/dd` 書式のまま、NULL / NaT は空セル）、巻は固定値`'-'`（旧`_mom`の`ex_comics_start_date`相当。`ex_sales_start_date`は使わない）、備考=`ex_note`、作品名=`ex_work_name`、雑誌=`ex_magazine`、種別=`ex_file_type`。
 
-サマリの「種別」: App は `ex_comic_type`（作品内の最頻値）。WEB は常に空欄（ex_comic_typeを出さない。Golden Masterの821作品すべて空欄と一致）。
+サマリの「種別」: App は当月の購入実績(明細)に現れた `ex_comic_type` を**すべて**('/' 連結で複数可)、WEB は常に空欄(ex_comic_typeを出さない。Golden Masterの821作品すべて空欄と一致)。
 
-> 未確定: App 種別は、既存帳票では1作品に複数の `ex_comic_type` がある場合 `/` 連結（例 `JC/ノベル`、`JC+/JC`）だが、2026-08のコンテンツ明細から連結順を完全再現できる規則が無く、明細上NULLの2作品にもGoldenは値を持つ。旧work_listが購入実績以外（話売商品マスタ等）から作られていた可能性があり、確認できるまで現行（最頻値）のまま（2026-08: 12作品差）。
+**2026-09-29 追加調査で解決・確定(旧: 未確定だった12作品差)**:
+
+- 当初「作品内の最頻値」(1種類だけ選ぶ)だった実装が原因で、当月の購入実績に複数の`ex_comic_type`がある10作品(例: チェンソーマン、ヘタリアWorld☆Stars)で単一値に丸められていた。**修正: 当月実績にある型を全て`/`連結する**(`build_summary_rows`の`comic_types`をCounterからsetへ変更)。
+- 連結順は `raise_master_contents_works` から取得する(`fetch_comic_type_order_dates`): 各`ex_comic_type`が最初に`content_type='episode'`として現れた日付(なければ任意の`content_type`での最初の日付)の昇順。ただし **`ノベル`は常に最後**(本編に対する副次コンテンツという位置づけ。2026-08 Golden Masterで確認した全ての複合値作品は主要種別が先・ノベルが後だった)。この2条件(ノベル最後・非ノベルは episode優先の日付昇順)で、2026-08 Golden Masterの複合種別10作品すべての連結順を再現できることを確認した(例: チェンソーマンはJC episodeがJC+ episodeより先に始まったため「JC/JC+」、ヘタリアWorld☆Stars/幼稚園WARSはJC+のepisodeがJCより大幅に先だったため「JC+/JC」)。
+- **重要**: 対象となる型の集合(どの`ex_comic_type`を表示するか)は、あくまで**当月の購入実績**から決める。`raise_master_contents_works`の全履歴の型をそのまま採用すると、当月1種類しか売れていない大多数の作品(Golden Masterでは単一値)まで誤って複合値になってしまうことを実装検証で確認した(一度その誤った設計で試し、unexpected diffが12→37件に悪化したため撤回)。masterは「複数観測された型をどの順で連結するか」の決定にのみ使う。
+- **2026-08 Golden限定のACCEPTED_DIFFとして確定(2026-09-29)**: UNTRACE-アントレース-／ネーム版、スミハナ-贋作浮世絵巻- の2作品。
+  - 当月の明細では`ex_comic_type`が全てNULL。`raise_master_contents_works`を確認したところ、この2作品はいずれも`ex_comic_type='その他'`(`JC+`ではない)のみで、Golden Master値「JC+」を裏付けるデータが現行sourceのどこにも見つからなかった。
+  - **現行の正式source(当月content detail・raise_master_contents_works)からGolden値を再現する決定的ルールが存在しない** -- Goldenに合わせるには作品名固有のhardcodeが必要になるため、**writerには一切手を入れていない**(作品名によるJC+ hardcode・NULLの一律JC+変換・masterの「その他」のJC+変換・Goldenからの逆引きは、いずれも実施しない・今後も禁止)。`種別`はsource-drivenのまま`None`を出力する。
+  - `scripts/compare_coin_ledger_golden.py`へ、`--target-month 2026-08` かつ 対象キーが厳密に上記2作品**のみ**の場合に限り `legacy_golden_only_comic_type_2026_08` としてACCEPTED_DIFFへ分類する処理を追加した(`LEGACY_GOLDEN_ONLY_COMIC_TYPE_2026_08_KEYS`)。**これは汎用的な「種別が違えばACCEPTED」ルールではない**: 別作品でtype setが不一致の場合、別target_monthで同様の差が発生した場合、複合種別の集合自体が不一致な場合は、引き続きFAIL(unexpected)として扱う。3件目のキーが混入した場合もそのキー分はunexpectedのまま。
+  - **今後の運用方針**: 新しい月次実行で同種の(NULL/その他型なのにGoldenだけ値がある)差分が別作品に発生しても、自動的にACCEPTED_DIFF扱いにしない。都度再調査し、必要なら個別に承認・追加する。
 
 ※ 列の対応・並び順・日付型は 2026-08 Golden Run（下記）で確認した。
 
@@ -227,18 +236,20 @@ python jumpplus_coin_ledger_report.py --target-month 2026-08 --generated-date 20
 
 突合: `scripts/compare_coin_ledger_golden.py`（ローカルファイルのみ。値は出さず件数・列別diff・キーのサンプルを出す。`--expected` で上表、`--order-groups` で並びの同値グループを検証）。差分は unexpected / accepted（理由付き）に分けて数える。
 
-結果（2回目、仕様確定後の修正込み）: 判定 **FAIL（unexpected 137）**。期待値表の件数・総計はすべて一致。
+結果（4回目、2026-09-29 追加調査・writer修正・legacy allowlist追加込み）: 判定 **PASS_WITH_ACCEPTED_DIFFS（unexpected 0）**。期待値表の件数・総計はすべて一致。`--target-month 2026-08` を指定して実行（後述のlegacy allowlistは2026-08限定のため必須）。
 
 | 区分 | 内容 | 件数 |
 |---|---|---|
-| 一致 | App/Apple/Google/WEB サマリ（行順・作品集合・全列。WEB種別は空欄で一致）、全明細の全列（コンテンツID=`v2_content_id_token`、話の配信開始日=Excel日付、巻の配信開始日 `'-'`）、App出納3ブロック（B-H、システム調整=`cancellation_coins_m`）、Apple/Googleの0件作品の0埋め | - |
+| 一致 | App/Apple/Google/WEB サマリ（行順・作品集合・全列。WEB種別は空欄で一致）、App サマリ種別（当月実績の型を`/`連結、1,743/1,745作品で一致）、全明細の全列（コンテンツID=`v2_content_id_token`、話の配信開始日=Excel日付、巻の配信開始日 `'-'`）、App出納3ブロック（B-H、システム調整=`cancellation_coins_m`）、Apple/Googleの0件作品の0埋め | - |
+| accepted: detail_row_order_within_name_kana_ties | 明細の行順（`--order-groups`で厳密検証、name_kana同値グループ内の順列のみ。Apple話45 / Google話62 / Apple巻2 / Google巻6 / WEB話10） | 125 |
+| accepted: legacy_golden_only_comic_type_2026_08 | App サマリ種別: UNTRACE-アントレース-／ネーム版、スミハナ-贋作浮世絵巻- の2作品限定(上記「サマリの『種別』」節参照。汎用ルールではない) | 2 |
 | accepted: WEB historical ledger drift | WEB出納の繰越（有償・無償ボーナス・贈答用購入）と連動する残高・繰越込消費率 | 9セル |
 | accepted: current master | 話売商品のID追加 20,695 / 価格 3,053 / 配信開始日 414（マスタNULL）/ コミックスJDCN 113 / 巻数 113 | - |
 | accepted: Golden不備 | WEB「有料巻消費ポイント」がGoldenでは話シートのコピー。生成物は2,688行・5,899,007・キー一意・話とキー重複なしで独立検証 | - |
-| unexpected | App サマリ種別（`/` 連結規則が未確定） | 12 |
-| unexpected | 明細の行順（すべて `name_kana` 同値グループ内。Apple話45 / Google話62 / Apple巻2 / Google巻6 / WEB話10） | 125 |
 
 `"NaT"` 文字列は0件（修正前は話売商品で21,109セル）。
+
+前回（2回目、仕様確定後）は判定 FAIL（unexpected 137: 種別12 + 行順125）だった。種別12件の詳細は「明細4シート」節の「サマリの『種別』」を参照。行順125件は本節「明細4シート」の並び節を参照。
 
 ## 運用手順
 
@@ -273,7 +284,7 @@ Invoke-RestMethod -Method Post `
 
 ## Production未実施項目
 
-- [x] 2026-08 Golden Run と突合結果の記録（unexpected 137件は判断待ち）
+- [x] 2026-08 Golden Run と突合結果の記録（2026-09-29: **PASS_WITH_ACCEPTED_DIFFS、unexpected 0**。詳細は「Golden Run」節）
 - [ ] Production deploy（`app.py` を変更しているため `report-generator` と `report-generator-admin` の両方）
 - [ ] Cloud Scheduler SA `jumpplus-coin-ledger-scheduler` の作成と、Cloud Run env（`JUMPPLUS_COIN_LEDGER_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS` / `_AUDIENCE`）の設定
 - [ ] Cloud Scheduler job `jumpplus-coin-ledger-monthly-report` の作成、OIDC smoke、重複（409）smoke、source_not_ready（503）smoke

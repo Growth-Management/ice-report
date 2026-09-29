@@ -24,7 +24,7 @@ WEB (4 sheets): 出納 (one block, rows 4-9, 総計 row 10), サマリ, 有料�
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -244,18 +244,51 @@ TYPE_FROM_COMIC_TYPE = "comic_type"
 TYPE_BLANK = "blank"
 
 
+_COMIC_TYPE_TRAILING_LABEL = "ノベル"
+
+
+def _ordered_comic_type_label(observed: set[str], order_dates: dict[str, Any] | None) -> str | None:
+    """Joins the labels actually observed in this month's purchases (never
+    adds a label the month didn't have) with '/', ordered by
+    raise_master_contents_works date metadata: ノベル always last, other
+    labels by earliest known publish date (see fetch_comic_type_order_dates
+    for the exact date rule). Falls back to alphabetical when no date is
+    available (e.g. in tests without order_dates), which never affects the
+    Golden-verified cases since those all have real master dates."""
+    if not observed:
+        return None
+    order_dates = order_dates or {}
+    primary = sorted(observed - {_COMIC_TYPE_TRAILING_LABEL})
+    trailing = sorted(observed & {_COMIC_TYPE_TRAILING_LABEL})
+
+    def _sort_key(label: str) -> tuple:
+        d = order_dates.get(label)
+        return (d is None, d, label)
+
+    primary.sort(key=_sort_key)
+    return "/".join(primary + trailing)
+
+
 def build_summary_rows(
-    rows: list[dict[str, Any]], *, unit: str, works: list[str], with_type: bool, type_mode: str = TYPE_FROM_COMIC_TYPE
+    rows: list[dict[str, Any]],
+    *,
+    unit: str,
+    works: list[str],
+    with_type: bool,
+    type_mode: str = TYPE_FROM_COMIC_TYPE,
+    comic_type_order_dates: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """One row per work in `works`, in that order (every work of the file,
     so the per-platform sheets list the same works in the same order as the
     total sheet, with zeros where a platform had no consumption).
     コイン消費合計 is SUM(total_use_coins); the 12 component columns are the
-    per purchase_type sums. 種別 (when the sheet has it): ex_comic_type for
-    App, always blank for WEB (type_mode=TYPE_BLANK)."""
+    per purchase_type sums. 種別 (when the sheet has it): every distinct
+    ex_comic_type observed in this month's purchase rows for the work,
+    '/'-joined in the order given by `comic_type_order_dates` (see
+    _ordered_comic_type_label), always blank for WEB (type_mode=TYPE_BLANK)."""
     totals: dict[str, int | float] = defaultdict(int)
     components: dict[str, dict[str, int | float]] = defaultdict(lambda: defaultdict(int))
-    comic_types: dict[str, Counter] = defaultdict(Counter)
+    comic_types: dict[str, set[str]] = defaultdict(set)
     for row in rows:
         key = _work_key(row)
         totals[key] += _sum([row.get("total_use_coins")])
@@ -266,7 +299,7 @@ def build_summary_rows(
             components[key][f"{prefix}\n{label}{unit}消費数"] += _sum([row.get(field)])
         comic_type = row.get("ex_comic_type")
         if isinstance(comic_type, str) and comic_type:
-            comic_types[key][comic_type] += 1
+            comic_types[key].add(comic_type)
 
     headers = summary_headers(unit, with_type=with_type)
     result = []
@@ -275,11 +308,12 @@ def build_summary_rows(
         for header in headers[2:14]:
             out[header] = components[work].get(header, 0)
         if with_type:
-            counts = comic_types.get(work)
-            if type_mode == TYPE_BLANK or not counts:
+            if type_mode == TYPE_BLANK:
                 out["種別"] = None
             else:
-                out["種別"] = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+                out["種別"] = _ordered_comic_type_label(
+                    comic_types.get(work, set()), (comic_type_order_dates or {}).get(work)
+                )
         result.append(out)
     return result
 
@@ -454,7 +488,13 @@ def build_app_workbook(*, template_path: Path, output_path: Path, target_month: 
     app_rows = _rows_for_apps(source.content, (31, 32))
     works = summary_work_names(app_rows)
     for sheet_name, app_ids, with_type in APP_SUMMARY_SHEETS:
-        rows = build_summary_rows(_rows_for_apps(source.content, app_ids), unit="コイン", works=works, with_type=with_type)
+        rows = build_summary_rows(
+            _rows_for_apps(source.content, app_ids),
+            unit="コイン",
+            works=works,
+            with_type=with_type,
+            comic_type_order_dates=source.comic_type_order_dates,
+        )
         _replace_table(package, sheet_name, summary_headers("コイン", with_type=with_type), rows)
         counts[sheet_name] = len(rows)
 

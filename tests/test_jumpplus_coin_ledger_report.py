@@ -194,6 +194,36 @@ class SourceQueryTests(unittest.TestCase):
         self.assertNotIn("coin_content_report", query)
         self.assertNotIn("ws_ex_mailaddress", query)
 
+    def test_comic_type_order_dates_prefers_episode_date_falls_back_to_any_type(self):
+        client = _RecordingClient(
+            [
+                [
+                    {
+                        "ex_work_name": "チェンソーマン",
+                        "ex_comic_type": "JC+",
+                        "earliest_episode_date": None,
+                        "earliest_any_date": date(2019, 3, 4),
+                    },
+                    {
+                        "ex_work_name": "チェンソーマン",
+                        "ex_comic_type": "JC",
+                        "earliest_episode_date": date(2019, 4, 8),
+                        "earliest_any_date": date(2019, 4, 8),
+                    },
+                ]
+            ]
+        )
+        out = report.fetch_comic_type_order_dates(client=client, work_names=["チェンソーマン"])
+        # JC+ has no episode-type row here (falls back to earliest_any_date);
+        # JC does have one, so its own episode date is used directly.
+        self.assertEqual(out["チェンソーマン"]["JC+"], date(2019, 3, 4))
+        self.assertEqual(out["チェンソーマン"]["JC"], date(2019, 4, 8))
+
+    def test_comic_type_order_dates_empty_work_list_skips_query(self):
+        client = _RecordingClient([])
+        self.assertEqual(report.fetch_comic_type_order_dates(client=client, work_names=[]), {})
+        self.assertEqual(client.queries, [])
+
     def test_content_rows_for_splits_by_app_id_and_purchase_type(self):
         rows = [
             {"app_id": 31, "purchase_type": "episode"},

@@ -243,6 +243,11 @@ def _compare_keyed(
         entry: dict[str, Any] = {"mismatch_count": len(mismatched), "value_types": {"generated": gen_types, "golden": gold_types}}
         if mismatched:
             entry["sample_keys"] = [str(k) for k, _, _ in mismatched[:samples]]
+            # Full (never sample-truncated) mismatched key set, for exact-key
+            # classification rules (e.g. legacy_golden_only_comic_type_2026_08)
+            # that must never approximate from a --samples-limited preview.
+            # Stripped before the report is written (see compare()).
+            entry["_mismatched_keys"] = [str(k) for k, _, _ in mismatched]
             if include_values:
                 entry["sample_values"] = [
                     {"key": str(k), "generated": str(gv), "golden": str(ov)} for k, gv, ov in mismatched[:samples]
@@ -336,7 +341,25 @@ ACCEPTED_REASONS = {
     "current_master_additions": "話売商品は生成時点のraise_master_contents_works(episode)を正とする。現行マスタに追加されたID",
     "current_master_update": "話売商品は生成時点のマスタを正とする。価格・配信開始日・コミックスJDCN・コミックス巻数の更新",
     "golden_web_book_sheet_is_episode_copy": "2026-08 Golden MasterのWEB「有料巻消費ポイント」は話シートのコピーのため比較基準にしない",
+    "detail_row_order_within_name_kana_ties": (
+        "明細のGolden行順はname_kana昇順だが、同値(tie)内の順序はソース側で非決定的で再現できない"
+        "(2026-08 Golden Run、docs/jumpplus-coin-ledger-report.md参照)。--order-groupsで検証: "
+        "差分の全position がname_kana同値グループの境界内に収まっている(グループの並び順・各グループの行数・"
+        "グループ内キー集合は生成物とGoldenで一致し、列値の不一致は無い -- それぞれ別項目で個別に検査済み)"
+    ),
+    "legacy_golden_only_comic_type_2026_08": (
+        "2026-08 Goldenのみに存在する種別値。当月content detail・現行raise_master_contents_worksの"
+        "いずれにもGolden値(JC+)を裏付けるデータが無く、現行sourceから再現する決定的ルールが存在しない"
+        "(2026-09-29 追加調査、docs/jumpplus-coin-ledger-report.md参照)。対象は2026-08の"
+        "UNTRACE-アントレース-／ネーム版・スミハナ-贋作浮世絵巻-の2作品のみに限定する -- 汎用的な"
+        "『種別が違えばACCEPTED』ルールではない。writerに作品名によるhardcodeは追加しない"
+    ),
 }
+
+# legacy_golden_only_comic_type_2026_08 の対象は 2026-08 のこの2作品だけに厳密に限定する。
+# 別作品・別target_monthでの種別差分、または3件目のキーはこの分類に含めず unexpected のまま扱う。
+LEGACY_GOLDEN_ONLY_COMIC_TYPE_2026_08_TARGET_MONTH = "2026-08"
+LEGACY_GOLDEN_ONLY_COMIC_TYPE_2026_08_KEYS = frozenset({"UNTRACE-アントレース-／ネーム版", "スミハナ-贋作浮世絵巻-"})
 PRODUCT_CURRENT_MASTER_COLUMNS = ("価格（コイン）", "配信開始日", "コミックスJDCN", "コミックス巻数")
 TOTAL_COLUMNS = {"app": ("コイン消費合計", "消費コイン"), "web": ("ポイント消費合計", "消費ポイント")}
 
@@ -360,7 +383,9 @@ def _groups_equal(gen_order: list, gold_order: list, groups: dict[str, str]) -> 
         return None
 
 
-def _classify_keyed(area: str, sheet_result: dict[str, Any], *, product: bool, order_groups: dict[str, str]) -> tuple[list, list]:
+def _classify_keyed(
+    area: str, sheet_result: dict[str, Any], *, product: bool, order_groups: dict[str, str], target_month: str | None = None
+) -> tuple[list, list]:
     accepted, unexpected = [], []
     if not sheet_result["headers_equal"]:
         unexpected.append(_item(area, "headers", 1))
@@ -382,6 +407,31 @@ def _classify_keyed(area: str, sheet_result: dict[str, Any], *, product: bool, o
         if c["mismatch_count"]:
             if product and col in PRODUCT_CURRENT_MASTER_COLUMNS:
                 accepted.append(_item(area, f"cell:{col}", c["mismatch_count"], accepted="current_master_update"))
+            elif (
+                not product
+                and area == "app/サマリ"
+                and col == "種別"
+                and target_month == LEGACY_GOLDEN_ONLY_COMIC_TYPE_2026_08_TARGET_MONTH
+            ):
+                # Exact-key allowlist only -- never a general "種別 differs ->
+                # accepted" rule. Any key outside the 2026-08 two-work
+                # allowlist (a different work, or a 3rd key showing up here)
+                # stays unexpected, and so does every 種別 diff for any other
+                # target_month.
+                mismatched_keys = set(c.get("_mismatched_keys") or [])
+                legacy_keys = mismatched_keys & LEGACY_GOLDEN_ONLY_COMIC_TYPE_2026_08_KEYS
+                other_keys = mismatched_keys - LEGACY_GOLDEN_ONLY_COMIC_TYPE_2026_08_KEYS
+                if legacy_keys:
+                    accepted.append(
+                        _item(
+                            area,
+                            f"cell:{col}:legacy_2026_08",
+                            len(legacy_keys),
+                            accepted="legacy_golden_only_comic_type_2026_08",
+                        )
+                    )
+                if other_keys:
+                    unexpected.append(_item(area, f"cell:{col}", len(other_keys)))
             else:
                 unexpected.append(_item(area, f"cell:{col}", c["mismatch_count"]))
         gen_types = {k for k in c["value_types"]["generated"] if k != "empty"}
@@ -397,8 +447,25 @@ def _classify_keyed(area: str, sheet_result: dict[str, Any], *, product: bool, o
     if not product and not sheet_result["row_order_equal"]:
         mismatched = sheet_result["row_order_compared_positions"] - sheet_result["row_order_position_matches"]
         within = _groups_equal(sheet_result["_gen_order"], sheet_result["_gold_order"], order_groups)
-        note = "all differing positions are within equal sort-key (name_kana) groups" if within else ""
-        unexpected.append(_item(area, "row_order", mismatched, note=note))
+        # `within` (every position's sort-key/name_kana group matches between
+        # generated and golden, i.e. _groups_equal) together with the
+        # already-independently-checked only_in_generated/only_in_golden==0
+        # (same key set) and per-column mismatch_count==0 (same values)
+        # above jointly prove all 5 conditions the row_order diff must meet:
+        # (1) group order equal, (2) each group's row count equal (both
+        # follow from the two sequences of group-values being identical),
+        # (3) each group's row-identity multiset equal (follows from the key
+        # sets being identical -- a row's group is a fixed function of its
+        # own key, not of position), (4) all column values equal (checked
+        # above), (5) every differing position stays within one group
+        # (exactly what `within` checks). Only accept when order_groups was
+        # actually supplied and covered every key (within is True, not None
+        # for "not checked").
+        if within:
+            accepted.append(_item(area, "row_order", mismatched, accepted="detail_row_order_within_name_kana_ties"))
+        else:
+            note = "order_groups not supplied or incomplete for this sheet" if within is None else ""
+            unexpected.append(_item(area, "row_order", mismatched, note=note))
     return accepted, unexpected
 
 
@@ -479,7 +546,13 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
                 samples=args.samples,
                 include_values=args.include_values,
             )
-            a, u = _classify_keyed(area, result, product=False, order_groups=(order_groups.get(key) or {}).get(sheet, {}))
+            a, u = _classify_keyed(
+                area,
+                result,
+                product=False,
+                order_groups=(order_groups.get(key) or {}).get(sheet, {}),
+                target_month=args.target_month,
+            )
             accepted += a
             unexpected += u
             section[sheet] = result
@@ -503,6 +576,9 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
             if isinstance(value, dict):
                 value.pop("_gen_order", None)
                 value.pop("_gold_order", None)
+                for col_entry in (value.get("columns") or {}).values():
+                    if isinstance(col_entry, dict):
+                        col_entry.pop("_mismatched_keys", None)
     report["classification"] = {
         "verdict": "FAIL" if unexpected else ("PASS_WITH_ACCEPTED_DIFFS" if accepted else "PASS"),
         "unexpected_diff_count": sum(i["actual_diff_count"] for i in unexpected),
@@ -527,6 +603,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--include-values", action="store_true", help="also write mismatching cell values (local use only)")
+    parser.add_argument(
+        "--target-month",
+        help="YYYY-MM of the generated files, e.g. 2026-08. Only enables the exact-key "
+        "legacy_golden_only_comic_type_2026_08 allowlist when set to '2026-08'; every other "
+        "value (or omitting this flag) keeps 種別 diffs unexpected.",
+    )
     args = parser.parse_args(argv)
     try:
         report = compare(args)
