@@ -332,6 +332,23 @@ class ScheduledEndpointTests(unittest.TestCase):
         generate.assert_not_called()
         readiness.assert_not_called()
 
+    def test_succeeded_run_with_scheduled_version_skips_without_new_version(self):
+        # State after the first production run (2026-09): run succeeded and the
+        # delivery already holds version 1 with idempotency_key scheduled:2026-09.
+        self.fs.store[self.run_key] = {"status": "succeeded"}
+        before = dict(self.fs.store)
+        with mock.patch.object(app_module, "_coin_ledger_deliver") as deliver, mock.patch.object(
+            app_module, "find_multi_file_version_by_idempotency_key", return_value={"version": 1}
+        ) as find, mock.patch.object(report, "generate_coin_ledger_report") as generate:
+            resp = self.client.post(self.url, json={})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual((body["status"], body["reason"]), ("skipped", "already_generated"))
+        deliver.assert_not_called()
+        generate.assert_not_called()
+        find.assert_not_called()
+        self.assertEqual(self.fs.store, before)
+
     def test_existing_scheduled_version_is_not_delivered_twice(self):
         with mock.patch.object(app_module, "find_multi_file_version_by_idempotency_key", return_value={"version": 1}), mock.patch.object(
             report, "generate_coin_ledger_report"

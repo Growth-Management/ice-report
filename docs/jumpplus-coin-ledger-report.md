@@ -182,13 +182,16 @@ readinessがNGのときは次のとおりになる。
 
 | 項目 | 値 |
 |---|---|
-| job | `jumpplus-coin-ledger-monthly-report`（**未作成**） |
+| job | `jumpplus-coin-ledger-monthly-report`（作成済み・ENABLED） |
 | schedule | `0 7 1 * *`（毎月1日 07:00） |
 | timezone | `Asia/Tokyo` |
 | URI | `https://report-generator-635067190197.asia-northeast1.run.app/admin/reports/jumpplus-coin-ledger/scheduled-generate`（POST） |
 | OIDC audience | Cloud Runのルートorigin（パスなし）。env `JUMPPLUS_COIN_LEDGER_SCHEDULER_AUDIENCE` に同じ値を設定する |
 | 呼び出しSA | `jumpplus-coin-ledger-scheduler@ice-sh.iam.gserviceaccount.com`（予定、**未作成**）。env `JUMPPLUS_COIN_LEDGER_SCHEDULER_ALLOWED_SERVICE_ACCOUNTS` |
-| retry（提案） | max-retry-attempts 5、min-backoff 600s、max-backoff 3600s、max-doublings 3、attempt-deadline 1800s（07:00から約3時間retryする。repoにScheduler retryの標準が無いため新規提案） |
+| Cloud Run request timeout | `report-generator` の `timeoutSeconds` = **1800**（service全体に適用）。初回Production定期実行（2026-10-01、`report-generator-00140-fd4`）の実処理は325.8秒で、旧値300秒では HTTP 504 になった |
+| attempt-deadline | **1800s**（Cloud Run timeout以上に保つこと） |
+| retry | max-retry-attempts **5**、min-backoff **600s**、max-backoff **3600s**、max-doublings **3**、max-retry-duration **0s**（期間無制限。回数5回が上限）。待ち間隔は約10/20/40/60/60分で、07:00から約3時間retryする |
+| drift監視 | Admin Schedulesが attemptDeadline と retryConfig を expected と比較する（`report_schedules.py` の `COIN_LEDGER_ATTEMPT_DEADLINE` / `COIN_LEDGER_RETRY`） |
 
 scheduled-generateの応答（Cloud Schedulerは非2xxをretryする）:
 
@@ -273,6 +276,11 @@ Production `report-generator`（旧 2GiB）で `create_delivery: false` の生�
 
 - **月次（自動）**: 毎月1日 07:00 JST にScheduler jobが前月分を実行する
   - `source_not_ready` の間はretryが続く。約3時間経っても未達なら、TROCCO / データマートの状況を確認し、揃ってから手動実行する
+- **timeout時の扱い（重要）**: Scheduler / Cloud Run がtimeout（DEADLINE_EXCEEDED / HTTP 504）を返しても、コンテナ内の処理は継続して完了し得る（2026-10-01は504でもdelivery作成まで完了）。**response timeoutだけを理由に手動再実行しない**。再実行前に次を確認する
+  - Firestore `jumpplus_coin_ledger_scheduled_runs/YYYY-MM` の `status`（`succeeded` なら生成済み）
+  - 配布 `jumpplus-coin-ledger_YYYY-MM` の `current_version` / `version_count` / `idempotency_key`（`scheduled:YYYY-MM`）
+  - Cloud Logging の構造化ログ（`STARTED` → `WORKBOOKS_BUILT` → `DRIVE_UPLOAD_COMPLETED` → `COMPLETED`）
+- **重複防止**: `status = succeeded` なら同月のscheduled再呼び出しは生成前に200 `skipped`（`already_generated`）を返し、新versionを作らない。run記録が欠けていても `scheduled:YYYY-MM` のversionが既にあれば `already_delivered` でskipする
 - **手動実行 / 再生成**:
 
 ```powershell

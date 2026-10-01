@@ -18,9 +18,10 @@ Two different things are shown side by side and deliberately never merged:
    report_definition_executor) -- so definition rows never get a job name.
 
 Only non-secret job fields are ever read into a response: name, schedule,
-timeZone, state, httpTarget.uri / httpMethod, httpTarget.oidcToken.audience,
-and the lastAttemptTime / scheduleTime / userUpdateTime / status.code
-timestamps. httpTarget.headers / body (which can carry an admin key),
+timeZone, state, attemptDeadline, retryConfig.* (maxRetryAttempts,
+maxRetryDuration, minBackoffDuration, maxBackoffDuration, maxDoublings),
+httpTarget.uri / httpMethod, httpTarget.oidcToken.audience, and the
+lastAttemptTime / scheduleTime / userUpdateTime / status.code timestamps. httpTarget.headers / body (which can carry an admin key),
 oidcToken.serviceAccountEmail and oauthToken are never copied.
 """
 
@@ -68,6 +69,19 @@ AUDIENCE_SERVICE_ROOT = "service_root"  # audience = Cloud Run origin only (no p
 
 
 @dataclass(frozen=True)
+class RetryExpectation:
+    """Expected Cloud Scheduler retryConfig (durations as the API prints them,
+    e.g. "600s"). max_retry_duration "0s" means "no duration limit"; the
+    attempt count is then the only bound."""
+
+    max_retry_attempts: int
+    max_retry_duration: str
+    min_backoff: str
+    max_backoff: str
+    max_doublings: int
+
+
+@dataclass(frozen=True)
 class ScheduledReportSpec:
     id: str
     display_name: str
@@ -80,7 +94,22 @@ class ScheduledReportSpec:
     target_month_rule: str
     audience_mode: str | None = None
     notes: str = ""
+    # None = no documented expectation; drift is not evaluated for that part.
+    expected_attempt_deadline: str | None = None
+    expected_retry: RetryExpectation | None = None
 
+
+# docs/jumpplus-coin-ledger-report.md. Generation takes ~326s (first production
+# run), so the Scheduler deadline must not be shorter than the Cloud Run request
+# timeout; retries (10m, 20m, 40m, 60m, 60m) cover ~3h of source_not_ready.
+COIN_LEDGER_ATTEMPT_DEADLINE = "1800s"
+COIN_LEDGER_RETRY = RetryExpectation(
+    max_retry_attempts=5,
+    max_retry_duration="0s",
+    min_backoff="600s",
+    max_backoff="3600s",
+    max_doublings=3,
+)
 
 # Source of each expected value is noted per entry; none is copied from the
 # live job itself.
@@ -162,6 +191,8 @@ REPORT_SCHEDULE_SPECS: tuple[ScheduledReportSpec, ...] = (
         target_month_rule="前月 + readiness gate（未達は503、Cloud Scheduler retryで再実行）",
         audience_mode=AUDIENCE_SERVICE_ROOT,
         notes="App/WEB/話売商品の3ファイルを1つのOTP付きdeliveryで配布",
+        expected_attempt_deadline=COIN_LEDGER_ATTEMPT_DEADLINE,
+        expected_retry=COIN_LEDGER_RETRY,
     ),
     ScheduledReportSpec(
         id="ad-revenue-sync",
@@ -255,6 +286,16 @@ def safe_job_view(job: dict[str, Any]) -> dict[str, Any]:
     view["uri"] = http_target.get("uri")
     view["httpMethod"] = http_target.get("httpMethod")
     view["audience"] = oidc.get("audience")
+    view["attemptDeadline"] = job.get("attemptDeadline")
+    retry = job.get("retryConfig")
+    retry = retry if isinstance(retry, dict) else {}
+    view["retryConfig"] = {
+        "maxRetryAttempts": retry.get("maxRetryAttempts"),
+        "maxRetryDuration": retry.get("maxRetryDuration"),
+        "minBackoffDuration": retry.get("minBackoffDuration"),
+        "maxBackoffDuration": retry.get("maxBackoffDuration"),
+        "maxDoublings": retry.get("maxDoublings"),
+    }
     status = job.get("status") or {}
     view["lastAttemptStatusCode"] = status.get("code") if isinstance(status, dict) else None
     return view
@@ -363,6 +404,70 @@ def expected_audience(spec: ScheduledReportSpec, base_url: str) -> str | None:
     return None
 
 
+def _duration_seconds(value: Any) -> float | None:
+    """Cloud Scheduler prints durations as "<seconds>s" (e.g. "1800s").
+    Anything unparsable / missing is None, never an exception."""
+    if isinstance(value, bool) or value is None:
+        return None
+    text = str(value).strip()
+    if not text.endswith("s"):
+        return None
+    try:
+        return float(text[:-1])
+    except ValueError:
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_view(job: dict[str, Any]) -> dict[str, Any]:
+    retry = job.get("retryConfig") or {}
+    return {
+        "max_retry_attempts": _int_or_none(retry.get("maxRetryAttempts")),
+        "max_retry_duration": retry.get("maxRetryDuration"),
+        "min_backoff": retry.get("minBackoffDuration"),
+        "max_backoff": retry.get("maxBackoffDuration"),
+        "max_doublings": _int_or_none(retry.get("maxDoublings")),
+    }
+
+
+def _expected_retry_view(expected: RetryExpectation | None) -> dict[str, Any] | None:
+    if expected is None:
+        return None
+    return {
+        "max_retry_attempts": expected.max_retry_attempts,
+        "max_retry_duration": expected.max_retry_duration,
+        "min_backoff": expected.min_backoff,
+        "max_backoff": expected.max_backoff,
+        "max_doublings": expected.max_doublings,
+    }
+
+
+def _retry_diffs(expected: RetryExpectation, job: dict[str, Any]) -> list[str]:
+    actual = _retry_view(job)
+    diffs = []
+    if actual["max_retry_attempts"] != expected.max_retry_attempts:
+        diffs.append("retry.max_retry_attempts")
+    # An omitted maxRetryDuration is the proto default "0s" (no limit).
+    actual_duration = 0.0 if actual["max_retry_duration"] is None else _duration_seconds(actual["max_retry_duration"])
+    if actual_duration != _duration_seconds(expected.max_retry_duration):
+        diffs.append("retry.max_retry_duration")
+    if _duration_seconds(actual["min_backoff"]) != _duration_seconds(expected.min_backoff):
+        diffs.append("retry.min_backoff")
+    if _duration_seconds(actual["max_backoff"]) != _duration_seconds(expected.max_backoff):
+        diffs.append("retry.max_backoff")
+    if actual["max_doublings"] != expected.max_doublings:
+        diffs.append("retry.max_doublings")
+    return diffs
+
+
 def evaluate_drift(
     spec: ScheduledReportSpec, job: dict[str, Any] | None, *, live_status: str, base_url: str
 ) -> tuple[str, list[str]]:
@@ -383,6 +488,12 @@ def evaluate_drift(
     audience = expected_audience(spec, base_url)
     if audience is not None and (job.get("audience") or "") != audience:
         diffs.append("audience")
+    if spec.expected_attempt_deadline is not None and (
+        _duration_seconds(job.get("attemptDeadline")) != _duration_seconds(spec.expected_attempt_deadline)
+    ):
+        diffs.append("attempt_deadline")
+    if spec.expected_retry is not None:
+        diffs.extend(_retry_diffs(spec.expected_retry, job))
     return (DRIFT_OK if not diffs else DRIFT_CONFIG), diffs
 
 
@@ -411,6 +522,8 @@ def _spec_row(spec: ScheduledReportSpec, live: LiveLookup, base_url: str) -> dic
             "schedule_text": human_readable_schedule(spec.expected_schedule),
             "timezone": spec.timezone,
             "endpoint": spec.endpoint,
+            "attempt_deadline": spec.expected_attempt_deadline,
+            "retry": _expected_retry_view(spec.expected_retry),
         },
         "actual": (
             {
@@ -421,6 +534,8 @@ def _spec_row(spec: ScheduledReportSpec, live: LiveLookup, base_url: str) -> dic
                 "last_attempt_time": job.get("lastAttemptTime"),
                 "next_schedule_time": job.get("scheduleTime"),
                 "last_attempt_status_code": job.get("lastAttemptStatusCode"),
+                "attempt_deadline": job.get("attemptDeadline"),
+                "retry": _retry_view(job),
             }
             if job
             else None
@@ -496,6 +611,8 @@ def _unregistered_rows(live: LiveLookup, base_url: str) -> list[dict[str, Any]]:
                     "last_attempt_time": job.get("lastAttemptTime"),
                     "next_schedule_time": job.get("scheduleTime"),
                     "last_attempt_status_code": job.get("lastAttemptStatusCode"),
+                    "attempt_deadline": job.get("attemptDeadline"),
+                    "retry": _retry_view(job),
                 },
                 "state": job.get("state") or "UNKNOWN",
                 "drift": DRIFT_UNREGISTERED,

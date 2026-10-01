@@ -44,6 +44,17 @@ def _raw_job(spec, **overrides):
         "scheduleTime": "2026-10-02T00:00:00Z",
         "status": {"code": 0, "message": "detail that must not leak"},
     }
+    if spec.expected_attempt_deadline is not None:
+        job["attemptDeadline"] = spec.expected_attempt_deadline
+    if spec.expected_retry is not None:
+        r = spec.expected_retry
+        job["retryConfig"] = {
+            "maxRetryAttempts": r.max_retry_attempts,
+            "maxRetryDuration": r.max_retry_duration,
+            "minBackoffDuration": r.min_backoff,
+            "maxBackoffDuration": r.max_backoff,
+            "maxDoublings": r.max_doublings,
+        }
     for key, value in overrides.items():
         if key in ("uri", "audience"):
             if key == "uri":
@@ -180,6 +191,82 @@ class DriftCaseTests(unittest.TestCase):
         row = _row(view, "new-report-job")
         self.assertEqual((row["kind"], row["drift"], row["state"]), (rs.KIND_UNREGISTERED, rs.DRIFT_UNREGISTERED, "PAUSED"))
         self.assertFalse(any(r["id"] == "other" for r in view["items"]))
+
+
+class RetryDeadlineDriftTests(unittest.TestCase):
+    COIN = "jumpplus-coin-ledger"
+
+    def _coin_row(self, **overrides):
+        spec = _spec(self.COIN)
+        job = _raw_job(spec)
+        if "attemptDeadline" in overrides:
+            job["attemptDeadline"] = overrides["attemptDeadline"]
+        job["retryConfig"] = {**job["retryConfig"], **overrides.get("retryConfig", {})}
+        for key in overrides.get("drop", ()):
+            job["retryConfig"].pop(key, None)
+        return _row(_view([job]), self.COIN)
+
+    def test_exact_match_is_ok_and_exposes_both_sides(self):
+        row = self._coin_row()
+        self.assertEqual((row["drift"], row["drift_fields"]), (rs.DRIFT_OK, []))
+        self.assertEqual(row["expected"]["attempt_deadline"], "1800s")
+        self.assertEqual(row["expected"]["retry"]["max_retry_attempts"], 5)
+        self.assertEqual(row["actual"]["attempt_deadline"], "1800s")
+        self.assertEqual(row["actual"]["retry"]["min_backoff"], "600s")
+
+    def test_each_field_drifts_individually(self):
+        cases = {
+            "attempt_deadline": {"attemptDeadline": "180s"},
+            "retry.max_retry_attempts": {"retryConfig": {"maxRetryAttempts": 0}},
+            "retry.max_retry_duration": {"retryConfig": {"maxRetryDuration": "7200s"}},
+            "retry.min_backoff": {"retryConfig": {"minBackoffDuration": "5s"}},
+            "retry.max_backoff": {"retryConfig": {"maxBackoffDuration": "300s"}},
+            "retry.max_doublings": {"retryConfig": {"maxDoublings": 5}},
+        }
+        for field, overrides in cases.items():
+            with self.subTest(field=field):
+                row = self._coin_row(**overrides)
+                self.assertEqual(row["drift"], rs.DRIFT_CONFIG)
+                self.assertEqual(row["drift_fields"], [field])
+
+    def test_production_state_before_fix_is_detected(self):
+        row = self._coin_row(
+            attemptDeadline="180s",
+            retryConfig={"maxRetryAttempts": 0, "minBackoffDuration": "5s", "maxDoublings": 5},
+        )
+        self.assertEqual(
+            row["drift_fields"],
+            ["attempt_deadline", "retry.max_retry_attempts", "retry.min_backoff", "retry.max_doublings"],
+        )
+
+    def test_missing_api_fields_do_not_crash(self):
+        spec = _spec(self.COIN)
+        job = _raw_job(spec)
+        del job["attemptDeadline"]
+        del job["retryConfig"]
+        row = _row(_view([job]), self.COIN)
+        self.assertEqual(row["drift"], rs.DRIFT_CONFIG)
+        self.assertIn("attempt_deadline", row["drift_fields"])
+        self.assertIn("retry.max_retry_attempts", row["drift_fields"])
+        self.assertNotIn("retry.max_retry_duration", row["drift_fields"])  # omitted == proto default 0s
+        job["retryConfig"] = "garbage"
+        self.assertEqual(_row(_view([job]), self.COIN)["drift"], rs.DRIFT_CONFIG)
+
+    def test_legacy_spec_without_expectation_is_unchanged(self):
+        legacy = _spec("thermae-romae")
+        self.assertIsNone(legacy.expected_attempt_deadline)
+        self.assertIsNone(legacy.expected_retry)
+        job = _raw_job(legacy)
+        job["attemptDeadline"] = "180s"
+        job["retryConfig"] = {"maxRetryAttempts": 3}
+        row = _row(_view([job]), "thermae-romae")
+        self.assertEqual((row["drift"], row["drift_fields"]), (rs.DRIFT_OK, []))
+        self.assertIsNone(row["expected"]["retry"])
+        self.assertEqual(row["actual"]["retry"]["max_retry_attempts"], 3)
+
+    def test_api_exposes_new_fields_without_leaking_secrets(self):
+        view = _view()
+        self.assertNotIn("super-secret-admin-key", json.dumps(view))
 
 
 class SafeResponseTests(unittest.TestCase):

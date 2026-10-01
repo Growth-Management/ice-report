@@ -105,7 +105,9 @@ live lookup の権限: `cloudscheduler.jobs.list` が必要（最小role: `roles
 - 方針: 完成形では `roles/cloudscheduler.viewer` を付与して本番Schedules画面でlive state / driftを表示する。付与はcoin ledger Golden Run・実装確定後のProduction deploy準備フェーズで別途承認して実施する（現時点では未付与）
 - 付与先が共通SAのため、read-only権限（Scheduler jobの一覧・設定の閲覧）は admin service だけでなく public service `report-generator` にも及ぶ。`/admin/report-schedules` 自体は `_check_admin()` で保護されるが、SA権限としては両serviceが同じScheduler閲覧権限を持つことを前提とする。custom role作成やruntime SA分離は今回のscope外
 
-レスポンスに含めるのは job名・schedule・timeZone・state・URI path・audience・lastAttemptTime/scheduleTime・status code のみ。`httpTarget.headers` / `body`（admin key を含み得る）、OIDC service account、OAuth token、API errorの本文は返さない。
+drift判定は cron / timezone / endpoint / audience に加え、expected が定義された専用jobでは `attemptDeadline` と `retryConfig`（maxRetryAttempts / maxRetryDuration / minBackoffDuration / maxBackoffDuration / maxDoublings）も比較する。差分は `drift_fields` に `attempt_deadline` / `retry.max_retry_attempts` / `retry.max_retry_duration` / `retry.min_backoff` / `retry.max_backoff` / `retry.max_doublings` として出る。`GET /admin/report-schedules` は各行の `expected` / `actual` に `attempt_deadline` と `retry` を含める。現在expectedを持つのは `jumpplus-coin-ledger` のみ（他jobは未定義で従来どおり比較しない）。
+
+レスポンスに含めるのは job名・schedule・timeZone・state・attemptDeadline・retryConfig・URI path・audience・lastAttemptTime/scheduleTime・status code のみ。`httpTarget.headers` / `body`（admin key を含み得る）、OIDC service account、OAuth token、API errorの本文は返さない。
 
 ### Admin audit log
 
