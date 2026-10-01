@@ -2649,6 +2649,11 @@ function renderReportSchedules() {
     const actualNote = item.drift === "CONFIG_DRIFT" && actual.cron !== undefined
       ? "<br><span class='muted' style='font-size:11px;'>live: " + esc(actual.cron || "-") + " / " + esc(actual.timezone || "-") + " / " + esc(actual.endpoint || "-") + "</span>"
       : "";
+    const fmtRetry = r => r ? "attempts=" + (r.max_retry_attempts ?? "-") + " min=" + (r.min_backoff || "-") + " max=" + (r.max_backoff || "-") + " dbl=" + (r.max_doublings ?? "-") + " dur=" + (r.max_retry_duration || "-") : "";
+    const policyLine = (label, o) => (o.attempt_deadline || o.retry)
+      ? "<br><span class='muted' style='font-size:11px;'>" + label + ": deadline=" + esc(o.attempt_deadline || "-") + " / retry " + esc(fmtRetry(o.retry) || "-") + "</span>"
+      : "";
+    const policyNote = policyLine("expected", expected) + (item.drift === "CONFIG_DRIFT" || expected.retry ? policyLine("live", actual) : "");
     const lastAttempt = actual.last_attempt_time ? "<br><span class='muted' style='font-size:11px;'>last: " + esc(formatDateTime(actual.last_attempt_time)) + "</span>" : "";
     return "<tr>" +
       "<td>" + esc(item.display_name || "") + "</td>" +
@@ -2661,7 +2666,7 @@ function renderReportSchedules() {
       "<td>" + esc(item.state || "") + lastAttempt + "</td>" +
       "<td><code>" + esc(endpoint || "-") + "</code></td>" +
       "<td>" + esc(item.target_month_rule || "") + "</td>" +
-      "<td><span class='status-pill " + (REPORT_SCHEDULE_DRIFT_CLASSES[item.drift] || "status-neutral") + "'>" + esc(item.drift || "") + "</span>" + driftFields + actualNote + "</td>" +
+      "<td><span class='status-pill " + (REPORT_SCHEDULE_DRIFT_CLASSES[item.drift] || "status-neutral") + "'>" + esc(item.drift || "") + "</span>" + driftFields + actualNote + policyNote + "</td>" +
       "<td>" + esc(item.notes || "") + "</td>" +
     "</tr>";
   }).join("");
