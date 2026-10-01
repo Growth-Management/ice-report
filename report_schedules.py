@@ -18,7 +18,7 @@ Two different things are shown side by side and deliberately never merged:
    report_definition_executor) -- so definition rows never get a job name.
 
 Only non-secret job fields are ever read into a response: name, schedule,
-timeZone, state, attemptDeadline, retryConfig.* (maxRetryAttempts,
+timeZone, state, attemptDeadline, retryConfig.* (retryCount/maxRetryAttempts,
 maxRetryDuration, minBackoffDuration, maxBackoffDuration, maxDoublings),
 httpTarget.uri / httpMethod, httpTarget.oidcToken.audience, and the
 lastAttemptTime / scheduleTime / userUpdateTime / status.code timestamps. httpTarget.headers / body (which can carry an admin key),
@@ -290,7 +290,9 @@ def safe_job_view(job: dict[str, Any]) -> dict[str, Any]:
     retry = job.get("retryConfig")
     retry = retry if isinstance(retry, dict) else {}
     view["retryConfig"] = {
-        "maxRetryAttempts": retry.get("maxRetryAttempts"),
+        # Cloud Scheduler API v1 returns the attempt count as `retryCount`
+        # (REST/gcloud); `maxRetryAttempts` is the client-library name.
+        "maxRetryAttempts": retry.get("retryCount") if retry.get("retryCount") is not None else retry.get("maxRetryAttempts"),
         "maxRetryDuration": retry.get("maxRetryDuration"),
         "minBackoffDuration": retry.get("minBackoffDuration"),
         "maxBackoffDuration": retry.get("maxBackoffDuration"),
