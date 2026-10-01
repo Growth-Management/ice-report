@@ -60,14 +60,17 @@ gcloud.cmd run deploy report-generator `
   --image $image `
   --region asia-northeast1 `
   --project ice-sh `
-  --memory 2Gi `
+  --memory 4Gi `
+  --cpu 1 `
+  --concurrency 80 `
+  --timeout 1800 `
   --service-account ice-report-runner@ice-sh.iam.gserviceaccount.com `
   --allow-unauthenticated `
   --impersonate-service-account=ice-deployer@ice-sh.iam.gserviceaccount.com `
   --quiet
 ```
 
-> 注意: `gcloud run deploy` は指定しなかった設定を直前revisionから引き継ぎます。Production `report-generator` は memory 4Gi / timeout 1800s に変更済み（coin ledger用）です。上記の `--memory 2Gi` をそのまま実行するとmemoryが2Giへ下がりOOMするため、memoryは現行値（4Gi）に合わせ、`--timeout 1800` も指定してください（`gcloud run services describe report-generator` で現行値を確認）。
+> 注意: このコマンドは Production `report-generator` 専用です（memory 4Gi / CPU 1 / concurrency 80 / timeout 1800s。coin ledger生成が約326秒・メモリ大のため）。`gcloud run deploy` は指定しなかった設定を直前revisionから引き継ぐので、resource値は必ず明示します。deploy前に `gcloud.cmd run services describe report-generator` で現行値と一致することを確認してください。
 
 deploy 結果に表示される revision 名を控えます。
 
