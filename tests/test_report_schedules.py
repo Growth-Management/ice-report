@@ -49,7 +49,7 @@ def _raw_job(spec, **overrides):
     if spec.expected_retry is not None:
         r = spec.expected_retry
         job["retryConfig"] = {
-            "maxRetryAttempts": r.max_retry_attempts,
+            "retryCount": r.max_retry_attempts,  # real Cloud Scheduler API v1 shape
             "maxRetryDuration": r.max_retry_duration,
             "minBackoffDuration": r.min_backoff,
             "maxBackoffDuration": r.max_backoff,
@@ -217,7 +217,7 @@ class RetryDeadlineDriftTests(unittest.TestCase):
     def test_each_field_drifts_individually(self):
         cases = {
             "attempt_deadline": {"attemptDeadline": "180s"},
-            "retry.max_retry_attempts": {"retryConfig": {"maxRetryAttempts": 0}},
+            "retry.max_retry_attempts": {"retryConfig": {"retryCount": 4}},
             "retry.max_retry_duration": {"retryConfig": {"maxRetryDuration": "7200s"}},
             "retry.min_backoff": {"retryConfig": {"minBackoffDuration": "5s"}},
             "retry.max_backoff": {"retryConfig": {"maxBackoffDuration": "300s"}},
@@ -232,7 +232,7 @@ class RetryDeadlineDriftTests(unittest.TestCase):
     def test_production_state_before_fix_is_detected(self):
         row = self._coin_row(
             attemptDeadline="180s",
-            retryConfig={"maxRetryAttempts": 0, "minBackoffDuration": "5s", "maxDoublings": 5},
+            retryConfig={"retryCount": 0, "minBackoffDuration": "5s", "maxDoublings": 5},
         )
         self.assertEqual(
             row["drift_fields"],
@@ -251,6 +251,23 @@ class RetryDeadlineDriftTests(unittest.TestCase):
         self.assertNotIn("retry.max_retry_duration", row["drift_fields"])  # omitted == proto default 0s
         job["retryConfig"] = "garbage"
         self.assertEqual(_row(_view([job]), self.COIN)["drift"], rs.DRIFT_CONFIG)
+
+    def test_real_api_shape_retry_count_is_ok(self):
+        row = self._coin_row(retryConfig={"retryCount": 5})
+        self.assertEqual((row["drift"], row["drift_fields"]), (rs.DRIFT_OK, []))
+        self.assertEqual(row["actual"]["retry"]["max_retry_attempts"], 5)
+
+    def test_real_api_shape_retry_count_mismatch(self):
+        row = self._coin_row(retryConfig={"retryCount": 4})
+        self.assertEqual(row["drift"], rs.DRIFT_CONFIG)
+        self.assertIn("retry.max_retry_attempts", row["drift_fields"])
+
+    def test_max_retry_attempts_fallback_still_supported(self):
+        spec = _spec(self.COIN)
+        job = _raw_job(spec)
+        job["retryConfig"]["maxRetryAttempts"] = job["retryConfig"].pop("retryCount")
+        row = _row(_view([job]), self.COIN)
+        self.assertEqual((row["drift"], row["drift_fields"]), (rs.DRIFT_OK, []))
 
     def test_legacy_spec_without_expectation_is_unchanged(self):
         legacy = _spec("thermae-romae")
